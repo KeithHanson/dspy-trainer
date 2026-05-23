@@ -2,6 +2,13 @@
 
 This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get started.
 
+## Critical Folders and Files
+
+- `AGENTS.md`: Operator and agent workflow rules for this repository.
+- `.beads/`: Local beads issue database, hooks, and interaction history.
+- `README.md`: Project overview and high-level goals.
+- `docs/NAIVE_PLAN.md`: Product and architecture planning baseline.
+
 ## Quick Reference
 
 ```bash
@@ -100,6 +107,35 @@ bd close bd-42 --reason "Completed" --json
 4. **Discover new work?** Create linked issue:
    - `bd create "Found bug" --description="Details about what was found" -p 1 --deps discovered-from:<parent-id>`
 5. **Complete**: `bd close <id> --reason "Done"`
+
+### Execution Procedures for Beads
+
+1. **Write complete bead context before work starts**
+   - Every bead description should contain enough implementation context for independent execution.
+   - Reference relevant repository files directly and include related bead IDs/dependencies.
+   - Include expected behavior, acceptance criteria, and verification steps in the bead description.
+
+2. **Start each bead from a clean repository state**
+   - Before beginning new bead work, ensure the git working tree is clean.
+   - If there is in-progress work, commit it before starting the next bead.
+
+3. **Test every new functionality change**
+   - Any newly implemented functionality must include tests for new code paths.
+
+4. **Completion gate before calling work done**
+   - Before marking a bead done, run required tests for new code.
+   - Run the full project test suite and confirm all tests pass.
+
+5. **Handle blockers with a new bead**
+   - If a major blocker appears, create a dedicated blocker bead immediately.
+   - Include troubleshooting context, observed failures, reproduction steps, and candidate next actions.
+
+6. **Only close beads after test gates pass**
+   - A bead is complete only when required tests exist and the relevant test suite passes.
+
+7. **Require a Definition of Done for each epic**
+   - Every epic bead should include a `Definition of Done` section in its description.
+   - The section should state concrete completion criteria, including functionality delivered, test expectations, and dependency/acceptance criteria for child beads.
 
 ### Auto-Sync
 
