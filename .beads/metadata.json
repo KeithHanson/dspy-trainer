@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "server",
+  "dolt_database": "dspy_trainer",
+  "project_id": "2fe7accb-f9c0-4fce-9a1f-6cf4ec0c5260"
+}
