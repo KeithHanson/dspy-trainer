@@ -1,0 +1,156 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: dspy-trainer-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: dspy_trainer
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d dspy_trainer"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: dspy-trainer-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:latest
+    container_name: dspy-trainer-mlflow
+    command: >-
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --allowed-hosts mlflow,mlflow:5000,localhost,localhost:5000,127.0.0.1,127.0.0.1:5000
+      --backend-store-uri sqlite:///mlflow.db
+      --default-artifact-root /mlflow/artifacts
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow_artifacts:/mlflow/artifacts
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  litellm-proxy:
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: dspy-trainer-litellm-proxy
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--host", "0.0.0.0"]
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-local-dev-master-key}
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY}
+      AZURE_OPENAI_API_BASE: ${AZURE_OPENAI_API_BASE}
+      AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION}
+      OPENAI_DEPLOYMENT_NAME: ${OPENAI_DEPLOYMENT_NAME}
+    volumes:
+      - ./ops/litellm-proxy/config.yaml:/app/config.yaml:ro
+    ports:
+      - "4000:4000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, urllib.request; req=urllib.request.Request('http://localhost:4000/health', headers={'Authorization': 'Bearer ' + os.environ.get('LITELLM_MASTER_KEY', '')}); urllib.request.urlopen(req, timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: dspy-trainer-backend
+    environment:
+      DSPY_TRAINER_POSTGRES_DSN: postgresql://postgres:postgres@postgres:5432/dspy_trainer
+      DSPY_TRAINER_REDIS_URL: redis://redis:6379/0
+      DSPY_TRAINER_QUEUE_NAME: dspy-trainer:jobs
+      DSPY_TRAINER_MLFLOW_TRACKING_URI: http://mlflow:5000
+      DSPY_TRAINER_LITELLM_BASE_URL: http://litellm-proxy:4000
+      DSPY_TRAINER_LITELLM_API_KEY: ${LITELLM_MASTER_KEY:-sk-local-dev-master-key}
+      DSPY_TRAINER_BACKEND_HOST: 0.0.0.0
+      DSPY_TRAINER_BACKEND_PORT: 8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+      litellm-proxy:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: dspy-trainer-worker
+    command: ["python", "backend/worker.py"]
+    environment:
+      DSPY_TRAINER_POSTGRES_DSN: postgresql://postgres:postgres@postgres:5432/dspy_trainer
+      DSPY_TRAINER_REDIS_URL: redis://redis:6379/0
+      DSPY_TRAINER_QUEUE_NAME: dspy-trainer:jobs
+      DSPY_TRAINER_MLFLOW_TRACKING_URI: http://mlflow:5000
+      DSPY_TRAINER_LITELLM_BASE_URL: http://litellm-proxy:4000
+      DSPY_TRAINER_LITELLM_API_KEY: ${LITELLM_MASTER_KEY:-sk-local-dev-master-key}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+      litellm-proxy:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os, redis; redis.Redis.from_url(os.environ['DSPY_TRAINER_REDIS_URL']).ping()\""]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  web:
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+    container_name: dspy-trainer-web
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "3000:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost/health >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  postgres_data:
+  mlflow_artifacts:

@@ -1,0 +1,924 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+import random
+from typing import Any
+from uuid import uuid4
+
+import asyncpg
+import httpx
+import redis.asyncio as redis
+
+from app.config import Settings
+
+
+def _random_eval_name() -> str:
+    adjectives = ["brisk", "bright", "calm", "clever", "daring", "eager", "gentle", "lucky", "steady", "swift"]
+    colors = ["amber", "azure", "copper", "gold", "green", "indigo", "silver", "teal", "white", "yellow"]
+    nouns = ["atlas", "comet", "falcon", "harbor", "meadow", "orbit", "river", "sunrise", "thunder", "voyager"]
+    return f"{random.choice(adjectives)}-{random.choice(colors)}-{random.choice(nouns)}"
+
+
+@dataclass
+class ReadinessStatus:
+    postgres: bool
+    redis: bool
+    mlflow: bool
+    litellm: bool
+
+    @property
+    def ok(self) -> bool:
+        return self.postgres and self.redis and self.mlflow and self.litellm
+
+
+class AppServices:
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self.redis: redis.Redis | None = None
+        self.postgres_pool: asyncpg.Pool | None = None
+        self.http_client: httpx.AsyncClient | None = None
+
+    async def connect(self) -> None:
+        self.redis = redis.Redis.from_url(self.settings.redis_url, decode_responses=True)
+        self.postgres_pool = await asyncpg.create_pool(dsn=self.settings.postgres_dsn, min_size=1, max_size=3)
+        self.http_client = httpx.AsyncClient(timeout=5.0)
+        await self.init_db()
+
+    async def disconnect(self) -> None:
+        if self.http_client is not None:
+            await self.http_client.aclose()
+        if self.postgres_pool is not None:
+            await self.postgres_pool.close()
+        if self.redis is not None:
+            await self.redis.aclose()
+
+    async def readiness(self) -> ReadinessStatus:
+        postgres_ok = False
+        redis_ok = False
+        mlflow_ok = False
+        litellm_ok = False
+
+        if self.postgres_pool is not None:
+            try:
+                async with self.postgres_pool.acquire() as conn:
+                    await conn.execute("select 1")
+                postgres_ok = True
+            except Exception:
+                postgres_ok = False
+
+        if self.redis is not None:
+            try:
+                redis_ok = bool(self.redis.ping())
+            except Exception:
+                redis_ok = False
+
+        if self.http_client is not None:
+            try:
+                response = await self.http_client.get(self.settings.mlflow_tracking_uri)
+                mlflow_ok = response.status_code < 500
+            except Exception:
+                mlflow_ok = False
+
+            try:
+                headers = {}
+                if self.settings.litellm_api_key.strip():
+                    headers["Authorization"] = f"Bearer {self.settings.litellm_api_key}"
+                response = await self.http_client.get(
+                    f"{self.settings.litellm_base_url.rstrip('/')}/health",
+                    headers=headers,
+                )
+                litellm_ok = response.status_code < 500
+            except Exception:
+                litellm_ok = False
+
+        return ReadinessStatus(
+            postgres=postgres_ok,
+            redis=redis_ok,
+            mlflow=mlflow_ok,
+            litellm=litellm_ok,
+        )
+
+    async def init_db(self) -> None:
+        if self.postgres_pool is None:
+            return
+        async with self.postgres_pool.acquire() as conn:
+            await conn.execute(
+                """
+                create table if not exists module_imports (
+                  id text primary key,
+                  source text not null,
+                  source_ref text,
+                  version_hash text,
+                  status text not null,
+                  created_at timestamptz not null,
+                  updated_at timestamptz not null
+                );
+                """
+            )
+            await conn.execute(
+                """
+                create table if not exists runtime_bundles (
+                  module_import_id text primary key references module_imports(id) on delete cascade,
+                  validation_status text not null,
+                  smoke_status text not null,
+                  diagnostics jsonb not null default '[]'::jsonb,
+                  updated_at timestamptz not null
+                );
+                """
+            )
+            await conn.execute(
+                """
+                create table if not exists eval_jobs (
+                  id text primary key,
+                  status text not null,
+                  eval_name text not null,
+                  project_id text not null,
+                  module_import_id text not null references module_imports(id) on delete restrict,
+                  scenario_id text not null,
+                  dataset_version text not null,
+                  bundle_path text not null,
+                  repeat_count int not null default 1,
+                  num_threads int not null default 1,
+                  eval_inputs jsonb not null default '[]'::jsonb,
+                  mlflow_experiment_id text,
+                  mlflow_parent_run_id text,
+                  failure_reason text,
+                  created_at timestamptz not null,
+                  updated_at timestamptz not null
+                );
+                """
+            )
+            await conn.execute("alter table eval_jobs add column if not exists repeat_count int not null default 1;")
+            await conn.execute("alter table eval_jobs add column if not exists num_threads int not null default 1;")
+            await conn.execute("alter table eval_jobs add column if not exists eval_inputs jsonb not null default '[]'::jsonb;")
+            await conn.execute("alter table eval_jobs add column if not exists eval_name text;")
+            await conn.execute("update eval_jobs set eval_name = coalesce(eval_name, 'steady-bright-orbit') where eval_name is null;")
+            await conn.execute("alter table eval_jobs alter column eval_name set not null;")
+            await conn.execute("alter table eval_jobs add column if not exists bundle_path text;")
+            await conn.execute("alter table eval_jobs add column if not exists failure_reason text;")
+            await conn.execute(
+                """
+                create table if not exists eval_run_items (
+                  id text primary key,
+                  eval_job_id text not null references eval_jobs(id) on delete cascade,
+                  status text not null,
+                  project_id text not null,
+                  module_import_id text not null,
+                  scenario_id text not null,
+                  dataset_version text not null,
+                  mlflow_experiment_id text,
+                  mlflow_parent_run_id text,
+                  mlflow_item_run_id text,
+                  mlflow_trace_id text,
+                  repeat_index int,
+                  item_index int,
+                  score double precision,
+                  input_payload jsonb,
+                  prediction_payload jsonb,
+                  label_payload jsonb,
+                  rationale text,
+                  created_at timestamptz not null,
+                  updated_at timestamptz not null
+                );
+                """
+            )
+            await conn.execute("alter table eval_run_items add column if not exists repeat_index int;")
+            await conn.execute("alter table eval_run_items add column if not exists item_index int;")
+            await conn.execute("alter table eval_run_items add column if not exists score double precision;")
+            await conn.execute("alter table eval_run_items add column if not exists input_payload jsonb;")
+            await conn.execute("alter table eval_run_items add column if not exists prediction_payload jsonb;")
+            await conn.execute("alter table eval_run_items add column if not exists label_payload jsonb;")
+            await conn.execute("alter table eval_run_items add column if not exists rationale text;")
+            await conn.execute("alter table eval_run_items add column if not exists mlflow_item_run_id text;")
+            await conn.execute("alter table eval_run_items add column if not exists mlflow_trace_id text;")
+            await conn.execute(
+                """
+                create table if not exists optimization_jobs (
+                  id text primary key,
+                  status text not null,
+                  project_id text not null,
+                  module_import_id text not null references module_imports(id) on delete restrict,
+                  bundle_path text not null,
+                  train_inputs jsonb not null default '[]'::jsonb,
+                  val_inputs jsonb not null default '[]'::jsonb,
+                  num_threads int not null default 1,
+                  source_eval_job_id text,
+                  artifact_path text,
+                  failure_reason text,
+                  created_at timestamptz not null,
+                  updated_at timestamptz not null
+                );
+                """
+            )
+
+    async def create_module_import(self, source: str, source_ref: str | None, version_hash: str | None) -> dict[str, Any]:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        module_id = str(uuid4())
+        now = datetime.now(timezone.utc)
+        async with self.postgres_pool.acquire() as conn:
+            await conn.execute(
+                """
+                insert into module_imports (id, source, source_ref, version_hash, status, created_at, updated_at)
+                values ($1, $2, $3, $4, $5, $6, $7)
+                """,
+                module_id,
+                source,
+                source_ref,
+                version_hash,
+                "imported",
+                now,
+                now,
+            )
+            await conn.execute(
+                """
+                insert into runtime_bundles (module_import_id, validation_status, smoke_status, diagnostics, updated_at)
+                values ($1, $2, $3, $4::jsonb, $5)
+                """,
+                module_id,
+                "pending",
+                "pending",
+                "[]",
+                now,
+            )
+        return {"id": module_id, "status": "imported"}
+
+    async def set_validation_status(self, module_id: str, status: str, diagnostics: list[dict[str, Any]]) -> bool:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        now = datetime.now(timezone.utc)
+        async with self.postgres_pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                update runtime_bundles
+                set validation_status = $2, diagnostics = $3::jsonb, updated_at = $4
+                where module_import_id = $1
+                """,
+                module_id,
+                status,
+                __import__("json").dumps(diagnostics),
+                now,
+            )
+            await conn.execute(
+                """
+                update module_imports
+                set status = $2, updated_at = $3
+                where id = $1
+                """,
+                module_id,
+                "validated" if status == "passed" else "validation_failed",
+                now,
+            )
+        return result.endswith("1")
+
+    async def set_smoke_status(self, module_id: str, status: str, diagnostics: list[dict[str, Any]]) -> bool:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        now = datetime.now(timezone.utc)
+        async with self.postgres_pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                update runtime_bundles
+                set smoke_status = $2, diagnostics = $3::jsonb, updated_at = $4
+                where module_import_id = $1
+                """,
+                module_id,
+                status,
+                __import__("json").dumps(diagnostics),
+                now,
+            )
+            await conn.execute(
+                """
+                update module_imports
+                set status = $2, updated_at = $3
+                where id = $1
+                """,
+                module_id,
+                (
+                    "smoke_testing"
+                    if status == "running"
+                    else ("runnable" if status == "passed" else "smoke_failed")
+                ),
+                now,
+            )
+        return result.endswith("1")
+
+    async def get_diagnostics(self, module_id: str) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                select m.id, m.status, r.validation_status, r.smoke_status, r.diagnostics
+                from module_imports m
+                join runtime_bundles r on r.module_import_id = m.id
+                where m.id = $1
+                """,
+                module_id,
+            )
+        if row is None:
+            return None
+        return {
+            "id": row["id"],
+            "status": row["status"],
+            "validation_status": row["validation_status"],
+            "smoke_status": row["smoke_status"],
+            "diagnostics": row["diagnostics"],
+        }
+
+    async def create_eval_job(
+        self,
+        project_id: str,
+        module_import_id: str,
+        scenario_id: str,
+        dataset_version: str,
+        bundle_path: str,
+        repeat_count: int,
+        num_threads: int,
+        eval_inputs: list[dict[str, Any]],
+        mlflow_experiment_id: str | None,
+        mlflow_parent_run_id: str | None,
+    ) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        eval_job_id = str(uuid4())
+        eval_name = _random_eval_name()
+        now = datetime.now(timezone.utc)
+        async with self.postgres_pool.acquire() as conn:
+            module_exists = await conn.fetchval("select 1 from module_imports where id = $1", module_import_id)
+            if module_exists is None:
+                return None
+            await conn.execute(
+                """
+                insert into eval_jobs (
+                  id, status, eval_name, project_id, module_import_id, scenario_id,
+                  dataset_version, bundle_path, repeat_count, num_threads, eval_inputs,
+                  mlflow_experiment_id, mlflow_parent_run_id, created_at, updated_at
+                )
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14, $15)
+                """,
+                eval_job_id,
+                "queued",
+                eval_name,
+                project_id,
+                module_import_id,
+                scenario_id,
+                dataset_version,
+                bundle_path,
+                max(1, repeat_count),
+                max(1, num_threads),
+                __import__("json").dumps(eval_inputs),
+                mlflow_experiment_id,
+                mlflow_parent_run_id,
+                now,
+                now,
+            )
+        return await self.get_eval_job(eval_job_id)
+
+    async def get_eval_job(self, eval_job_id: str) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                select id, status, project_id, module_import_id, scenario_id,
+                       eval_name,
+                       dataset_version, bundle_path, repeat_count, num_threads, eval_inputs,
+                       mlflow_experiment_id, mlflow_parent_run_id, failure_reason,
+                       created_at, updated_at
+                from eval_jobs
+                where id = $1
+                """,
+                eval_job_id,
+            )
+        if row is None:
+            return None
+        return {
+            "id": row["id"],
+            "status": row["status"],
+            "eval_name": row["eval_name"],
+            "project_id": row["project_id"],
+            "module_import_id": row["module_import_id"],
+            "scenario_id": row["scenario_id"],
+            "dataset_version": row["dataset_version"],
+            "bundle_path": row["bundle_path"],
+            "repeat_count": row["repeat_count"],
+            "num_threads": row["num_threads"],
+            "eval_inputs": row["eval_inputs"],
+            "mlflow_experiment_id": row["mlflow_experiment_id"],
+            "mlflow_parent_run_id": row["mlflow_parent_run_id"],
+            "failure_reason": row["failure_reason"],
+            "eval_job_id": row["id"],
+            "created_at": row["created_at"].isoformat(),
+            "updated_at": row["updated_at"].isoformat(),
+        }
+
+    async def cancel_eval_job(self, eval_job_id: str) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        now = datetime.now(timezone.utc)
+        async with self.postgres_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                update eval_jobs
+                set status = 'canceled', failure_reason = null, updated_at = $2
+                where id = $1 and status in ('queued', 'running')
+                returning id, status, project_id, module_import_id, scenario_id, dataset_version,
+                          eval_name,
+                          bundle_path, repeat_count, num_threads, eval_inputs,
+                          mlflow_experiment_id, mlflow_parent_run_id, failure_reason,
+                          created_at, updated_at
+                """,
+                eval_job_id,
+                now,
+            )
+            if row is None:
+                row = await conn.fetchrow(
+                    """
+                    select id, status, project_id, module_import_id, scenario_id, dataset_version,
+                           eval_name,
+                           bundle_path, repeat_count, num_threads, eval_inputs,
+                           mlflow_experiment_id, mlflow_parent_run_id, failure_reason,
+                           created_at, updated_at
+                    from eval_jobs
+                    where id = $1
+                    """,
+                    eval_job_id,
+                )
+        if row is None:
+            return None
+        return {
+            "id": row["id"],
+            "status": row["status"],
+            "eval_name": row["eval_name"],
+            "project_id": row["project_id"],
+            "module_import_id": row["module_import_id"],
+            "scenario_id": row["scenario_id"],
+            "dataset_version": row["dataset_version"],
+            "bundle_path": row["bundle_path"],
+            "repeat_count": row["repeat_count"],
+            "num_threads": row["num_threads"],
+            "eval_inputs": row["eval_inputs"],
+            "mlflow_experiment_id": row["mlflow_experiment_id"],
+            "mlflow_parent_run_id": row["mlflow_parent_run_id"],
+            "failure_reason": row["failure_reason"],
+            "eval_job_id": row["id"],
+            "created_at": row["created_at"].isoformat(),
+            "updated_at": row["updated_at"].isoformat(),
+        }
+
+    async def seed_eval_run_items(
+        self,
+        eval_job_id: str,
+        count: int,
+        initial_status: str = "queued",
+    ) -> list[dict[str, Any]]:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        now = datetime.now(timezone.utc)
+        created_items: list[dict[str, Any]] = []
+        async with self.postgres_pool.acquire() as conn:
+            job = await conn.fetchrow(
+                """
+                select id, project_id, module_import_id, scenario_id,
+                       dataset_version, mlflow_experiment_id, mlflow_parent_run_id
+                from eval_jobs
+                where id = $1
+                """,
+                eval_job_id,
+            )
+            if job is None:
+                raise ValueError("eval job not found")
+            for _ in range(count):
+                item_id = str(uuid4())
+                await conn.execute(
+                    """
+                    insert into eval_run_items (
+                      id, eval_job_id, status, project_id, module_import_id, scenario_id,
+                      dataset_version, mlflow_experiment_id, mlflow_parent_run_id, mlflow_trace_id, created_at, updated_at
+                    )
+                    values ($1, $2, $3, $4, $5, $6, $7, $8, $9, null, $10, $11)
+                    """,
+                    item_id,
+                    eval_job_id,
+                    initial_status,
+                    job["project_id"],
+                    job["module_import_id"],
+                    job["scenario_id"],
+                    job["dataset_version"],
+                    job["mlflow_experiment_id"],
+                    job["mlflow_parent_run_id"],
+                    now,
+                    now,
+                )
+                created_items.append(
+                    {
+                        "id": item_id,
+                        "eval_run_item_id": item_id,
+                        "eval_job_id": eval_job_id,
+                        "status": initial_status,
+                        "project_id": job["project_id"],
+                        "module_import_id": job["module_import_id"],
+                        "scenario_id": job["scenario_id"],
+                        "dataset_version": job["dataset_version"],
+                        "mlflow_experiment_id": job["mlflow_experiment_id"],
+                        "mlflow_parent_run_id": job["mlflow_parent_run_id"],
+                        "mlflow_trace_id": None,
+                    }
+                )
+        return created_items
+
+    async def list_eval_run_items(self, eval_job_id: str, limit: int, offset: int) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            job_exists = await conn.fetchval("select 1 from eval_jobs where id = $1", eval_job_id)
+            if job_exists is None:
+                return None
+            rows = await conn.fetch(
+                """
+                select id, eval_job_id, status, project_id, module_import_id, scenario_id,
+                       dataset_version, mlflow_experiment_id, mlflow_parent_run_id, mlflow_item_run_id, mlflow_trace_id,
+                       repeat_index, item_index, score, input_payload, prediction_payload, label_payload, rationale,
+                       created_at, updated_at
+                from eval_run_items
+                where eval_job_id = $1
+                order by created_at asc, id asc
+                limit $2 offset $3
+                """,
+                eval_job_id,
+                limit,
+                offset,
+            )
+            total = await conn.fetchval("select count(*) from eval_run_items where eval_job_id = $1", eval_job_id)
+        items = [
+            {
+                "id": row["id"],
+                "eval_run_item_id": row["id"],
+                "eval_job_id": row["eval_job_id"],
+                "status": row["status"],
+                "project_id": row["project_id"],
+                "module_import_id": row["module_import_id"],
+                "scenario_id": row["scenario_id"],
+                "dataset_version": row["dataset_version"],
+                "mlflow_experiment_id": row["mlflow_experiment_id"],
+                "mlflow_parent_run_id": row["mlflow_parent_run_id"],
+                "mlflow_item_run_id": row["mlflow_item_run_id"],
+                "mlflow_trace_id": row["mlflow_trace_id"],
+                "repeat_index": row["repeat_index"],
+                "item_index": row["item_index"],
+                "score": row["score"],
+                "input_payload": row["input_payload"],
+                "prediction_payload": row["prediction_payload"],
+                "label_payload": row["label_payload"],
+                "rationale": row["rationale"],
+                "created_at": row["created_at"].isoformat(),
+                "updated_at": row["updated_at"].isoformat(),
+            }
+            for row in rows
+        ]
+        return {
+            "items": items,
+            "limit": limit,
+            "offset": offset,
+            "count": len(items),
+            "total": int(total),
+        }
+
+    async def set_eval_job_status(self, eval_job_id: str, status: str, failure_reason: str | None = None) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        now = datetime.now(timezone.utc)
+        async with self.postgres_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                update eval_jobs
+                set status = $2, failure_reason = $3, updated_at = $4
+                where id = $1
+                returning id
+                """,
+                eval_job_id,
+                status,
+                failure_reason,
+                now,
+            )
+        if row is None:
+            return None
+        return await self.get_eval_job(eval_job_id)
+
+    async def create_eval_run_item(
+        self,
+        eval_job_id: str,
+        status: str,
+        repeat_index: int,
+        item_index: int,
+        score: float,
+        input_payload: dict[str, Any],
+        prediction_payload: dict[str, Any],
+        label_payload: dict[str, Any],
+        rationale: str | None,
+        mlflow_item_run_id: str | None,
+        mlflow_trace_id: str | None,
+    ) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        now = datetime.now(timezone.utc)
+        item_id = str(uuid4())
+        async with self.postgres_pool.acquire() as conn:
+            job = await conn.fetchrow(
+                """
+                select project_id, module_import_id, scenario_id, dataset_version,
+                       mlflow_experiment_id, mlflow_parent_run_id
+                from eval_jobs where id = $1
+                """,
+                eval_job_id,
+            )
+            if job is None:
+                return None
+            await conn.execute(
+                """
+                    insert into eval_run_items (
+                      id, eval_job_id, status, project_id, module_import_id, scenario_id,
+                      dataset_version, mlflow_experiment_id, mlflow_parent_run_id, mlflow_item_run_id, mlflow_trace_id,
+                      repeat_index, item_index, score, input_payload, prediction_payload, label_payload, rationale,
+                      created_at, updated_at
+                    )
+                    values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb, $16::jsonb, $17::jsonb, $18, $19, $20)
+                """,
+                item_id,
+                eval_job_id,
+                status,
+                job["project_id"],
+                job["module_import_id"],
+                job["scenario_id"],
+                job["dataset_version"],
+                job["mlflow_experiment_id"],
+                job["mlflow_parent_run_id"],
+                mlflow_item_run_id,
+                mlflow_trace_id,
+                repeat_index,
+                item_index,
+                score,
+                __import__("json").dumps(input_payload),
+                __import__("json").dumps(prediction_payload),
+                __import__("json").dumps(label_payload),
+                rationale,
+                now,
+                now,
+            )
+        return {"id": item_id, "eval_run_item_id": item_id, "eval_job_id": eval_job_id, "status": status}
+
+    async def set_eval_job_mlflow(self, eval_job_id: str, mlflow_experiment_id: str, mlflow_parent_run_id: str) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        now = datetime.now(timezone.utc)
+        async with self.postgres_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                update eval_jobs
+                set mlflow_experiment_id = $2, mlflow_parent_run_id = $3, updated_at = $4
+                where id = $1
+                returning id
+                """,
+                eval_job_id,
+                mlflow_experiment_id,
+                mlflow_parent_run_id,
+                now,
+            )
+        if row is None:
+            return None
+        return await self.get_eval_job(eval_job_id)
+
+    async def set_eval_run_item_trace_id(self, eval_run_item_id: str, mlflow_trace_id: str) -> bool:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        now = datetime.now(timezone.utc)
+        async with self.postgres_pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                update eval_run_items
+                set mlflow_trace_id = $2, updated_at = $3
+                where id = $1
+                """,
+                eval_run_item_id,
+                mlflow_trace_id,
+                now,
+            )
+        return result.endswith("1")
+
+    async def set_eval_run_item_mlflow_run_id(self, eval_run_item_id: str, mlflow_item_run_id: str) -> bool:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        now = datetime.now(timezone.utc)
+        async with self.postgres_pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                update eval_run_items
+                set mlflow_item_run_id = $2, updated_at = $3
+                where id = $1
+                """,
+                eval_run_item_id,
+                mlflow_item_run_id,
+                now,
+            )
+        return result.endswith("1")
+
+    async def _mlflow_request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        if self.http_client is None:
+            raise RuntimeError("http client not initialized")
+        url = f"{self.settings.mlflow_tracking_uri.rstrip('/')}{path}"
+        response = await self.http_client.request(method, url, json=payload)
+        if response.status_code >= 400:
+            raise RuntimeError(f"MLflow {method} {path} failed ({response.status_code}): {response.text}")
+        data = response.json()
+        if not isinstance(data, dict):
+            raise RuntimeError(f"MLflow {method} {path} returned invalid payload")
+        return data
+
+    async def ensure_mlflow_experiment(self, project_id: str) -> str:
+        experiment_name = f"project:{project_id}"
+        if self.http_client is None:
+            raise RuntimeError("http client not initialized")
+        url = (
+            f"{self.settings.mlflow_tracking_uri.rstrip('/')}/api/2.0/mlflow/experiments/get-by-name"
+            f"?experiment_name={experiment_name}"
+        )
+        response = await self.http_client.get(url)
+        if response.status_code >= 500:
+            raise RuntimeError(f"MLflow get-by-name failed ({response.status_code}): {response.text}")
+        data = response.json() if response.status_code < 400 else {}
+        experiment = data.get("experiment") if isinstance(data, dict) else None
+        if isinstance(experiment, dict) and experiment.get("experiment_id"):
+            return str(experiment["experiment_id"])
+        create_data = await self._mlflow_request(
+            "POST",
+            "/api/2.0/mlflow/experiments/create",
+            {"name": experiment_name},
+        )
+        experiment_id = create_data.get("experiment_id")
+        if experiment_id is None:
+            raise RuntimeError("MLflow experiment create missing experiment_id")
+        return str(experiment_id)
+
+    async def create_mlflow_run(
+        self,
+        experiment_id: str,
+        run_name: str,
+        tags: dict[str, str],
+    ) -> str:
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        payload = {
+            "experiment_id": str(experiment_id),
+            "run_name": run_name,
+            "start_time": now_ms,
+            "tags": [{"key": key, "value": value} for key, value in tags.items()],
+        }
+        data = await self._mlflow_request("POST", "/api/2.0/mlflow/runs/create", payload)
+        run = data.get("run") if isinstance(data, dict) else None
+        info = run.get("info") if isinstance(run, dict) else None
+        run_id = info.get("run_id") if isinstance(info, dict) else None
+        if run_id is None:
+            raise RuntimeError("MLflow run create missing run_id")
+        return str(run_id)
+
+    async def set_mlflow_run_tag(self, run_id: str, key: str, value: str) -> None:
+        await self._mlflow_request(
+            "POST",
+            "/api/2.0/mlflow/runs/set-tag",
+            {"run_id": run_id, "key": key, "value": value},
+        )
+
+    async def finalize_mlflow_run(self, run_id: str, status: str = "FINISHED") -> None:
+        await self._mlflow_request(
+            "POST",
+            "/api/2.0/mlflow/runs/update",
+            {"run_id": run_id, "status": status},
+        )
+
+    async def create_optimization_job(
+        self,
+        project_id: str,
+        module_import_id: str,
+        bundle_path: str,
+        train_inputs: list[dict[str, Any]],
+        val_inputs: list[dict[str, Any]],
+        num_threads: int,
+        source_eval_job_id: str | None,
+    ) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        now = datetime.now(timezone.utc)
+        job_id = str(uuid4())
+        async with self.postgres_pool.acquire() as conn:
+            module_exists = await conn.fetchval("select 1 from module_imports where id = $1", module_import_id)
+            if module_exists is None:
+                return None
+            await conn.execute(
+                """
+                insert into optimization_jobs (
+                  id, status, project_id, module_import_id, bundle_path, train_inputs, val_inputs,
+                  num_threads, source_eval_job_id, artifact_path, failure_reason, created_at, updated_at
+                )
+                values ($1, 'queued', $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, null, null, $9, $10)
+                """,
+                job_id,
+                project_id,
+                module_import_id,
+                bundle_path,
+                __import__("json").dumps(train_inputs),
+                __import__("json").dumps(val_inputs),
+                max(1, num_threads),
+                source_eval_job_id,
+                now,
+                now,
+            )
+        return await self.get_optimization_job(job_id)
+
+    async def get_optimization_job(self, optimization_job_id: str) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                select id, status, project_id, module_import_id, bundle_path, train_inputs, val_inputs,
+                       num_threads, source_eval_job_id, artifact_path, failure_reason, created_at, updated_at
+                from optimization_jobs where id = $1
+                """,
+                optimization_job_id,
+            )
+        if row is None:
+            return None
+        return {
+            "id": row["id"],
+            "status": row["status"],
+            "project_id": row["project_id"],
+            "module_import_id": row["module_import_id"],
+            "bundle_path": row["bundle_path"],
+            "train_inputs": row["train_inputs"],
+            "val_inputs": row["val_inputs"],
+            "num_threads": row["num_threads"],
+            "source_eval_job_id": row["source_eval_job_id"],
+            "artifact_path": row["artifact_path"],
+            "failure_reason": row["failure_reason"],
+            "created_at": row["created_at"].isoformat(),
+            "updated_at": row["updated_at"].isoformat(),
+        }
+
+    async def cancel_optimization_job(self, optimization_job_id: str) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        now = datetime.now(timezone.utc)
+        async with self.postgres_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                update optimization_jobs set status='canceled', updated_at=$2
+                where id=$1 and status in ('queued','running')
+                returning id
+                """,
+                optimization_job_id,
+                now,
+            )
+        if row is None:
+            return await self.get_optimization_job(optimization_job_id)
+        return await self.get_optimization_job(optimization_job_id)
+
+    async def run_optimization_job(self, optimization_job_id: str) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        job = await self.get_optimization_job(optimization_job_id)
+        if job is None:
+            return None
+        if job["status"] == "canceled":
+            return job
+        now = datetime.now(timezone.utc)
+        async with self.postgres_pool.acquire() as conn:
+            await conn.execute("update optimization_jobs set status='running', updated_at=$2 where id=$1", optimization_job_id, now)
+
+        try:
+            from app.executor.module_runner import run_bundle_eval
+
+            result = run_bundle_eval(
+                bundle_path=job["bundle_path"],
+                eval_inputs=job["val_inputs"] or job["train_inputs"],
+                num_threads=job["num_threads"],
+            )
+            artifact_path = f"optimization://{optimization_job_id}/score-{result['score_pct']}"
+            now2 = datetime.now(timezone.utc)
+            async with self.postgres_pool.acquire() as conn:
+                await conn.execute(
+                    "update optimization_jobs set status='succeeded', artifact_path=$2, failure_reason=null, updated_at=$3 where id=$1",
+                    optimization_job_id,
+                    artifact_path,
+                    now2,
+                )
+        except Exception as exc:
+            now3 = datetime.now(timezone.utc)
+            async with self.postgres_pool.acquire() as conn:
+                await conn.execute(
+                    "update optimization_jobs set status='failed', failure_reason=$2, updated_at=$3 where id=$1",
+                    optimization_job_id,
+                    str(exc),
+                    now3,
+                )
+        return await self.get_optimization_job(optimization_job_id)

@@ -1,0 +1,18 @@
+[
+  {
+    "input": {
+      "question": "France capital?"
+    },
+    "label": {
+      "expected": "Paris"
+    }
+  },
+  {
+    "input": {
+      "question": "Capital city of France"
+    },
+    "label": {
+      "expected": "Paris"
+    }
+  }
+]

@@ -1,0 +1,13 @@
+model_list:
+  - model_name: codex-5.3
+    litellm_params:
+      model: "azure/codex-5.3-eval-deployment-1"
+      api_key: "os.environ/AZURE_OPENAI_API_KEY"
+      api_base: "os.environ/AZURE_OPENAI_API_BASE"
+      api_version: "os.environ/AZURE_OPENAI_API_VERSION"
+
+litellm_settings:
+  drop_params: true
+
+general_settings:
+  master_key: "os.environ/LITELLM_MASTER_KEY"
