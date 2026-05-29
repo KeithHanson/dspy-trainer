@@ -192,12 +192,10 @@ button { font-family: inherit; }
 .bundles-check-results { margin: 0; padding-left: 0; display: grid; gap: 6px; }
 .bundles-check-item { list-style: none; display: flex; gap: 8px; color: var(--text-2); }
 .bundles-row-btn {
-  all: unset;
   display: flex;
   flex-direction: column;
   gap: 2px;
   align-items: flex-start;
-  cursor: pointer;
   flex: 1;
 }
 .bundles-saved-row {

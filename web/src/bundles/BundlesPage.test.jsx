@@ -91,4 +91,39 @@ describe("BundlesPage", () => {
 
     vi.unstubAllGlobals();
   });
+
+  it("handles non-array diagnostics when viewing saved bundle", async () => {
+    const fetchMock = vi.fn((url) => {
+      if (String(url).endsWith("/modules")) {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([
+            {
+              id: "mod-2",
+              bundle_name: "support-triage-agent",
+              validation_status: "passed",
+              status: "imported",
+              diagnostics: { unexpected: true },
+            },
+          ]),
+        });
+      }
+      if (String(url).endsWith("/samples/module-bundle")) {
+        return Promise.resolve({ ok: true, blob: vi.fn().mockResolvedValue(new Blob(["zip"])) });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter>
+        <BundlesPage />
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(await screen.findByRole("button", { name: "View files" }));
+    expect(await screen.findByText("No diagnostics")).toBeInTheDocument();
+
+    vi.unstubAllGlobals();
+  });
 });

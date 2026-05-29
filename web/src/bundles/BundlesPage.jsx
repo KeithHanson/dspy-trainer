@@ -164,6 +164,12 @@ const PREP_STEPS = [
   "Zip the folder root, then upload for validation.",
 ];
 
+const BUNDLE_FILE_TEMPLATES = {
+  "module.py": VALIDATION_CHECKS.find((check) => check.id === "module_file")?.snippet || "# module.py not available",
+  "metric.py": VALIDATION_CHECKS.find((check) => check.id === "metric_file")?.snippet || "# metric.py not available",
+  "bundle.toml": VALIDATION_CHECKS.find((check) => check.id === "bundle_toml_file")?.snippet || "# bundle.toml not available",
+};
+
 export function BundlesPage() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
@@ -251,6 +257,7 @@ function SavedBundlesPanel({ modulesUrl }) {
   const [savedBundles, setSavedBundles] = useState([]);
   const [isLoadingBundles, setIsLoadingBundles] = useState(false);
   const [selectedBundle, setSelectedBundle] = useState(null);
+  const [activeFileName, setActiveFileName] = useState("module.py");
 
   const loadBundles = async () => {
     setIsLoadingBundles(true);
@@ -303,11 +310,16 @@ function SavedBundlesPanel({ modulesUrl }) {
               <div className="bundles-saved-icon center">
                 <Icon name="box" size={18} />
               </div>
-              <button type="button" className="bundles-row-btn" onClick={() => setSelectedBundle(bundle)}>
+              <div className="bundles-row-btn">
                 <span className="t-sm">{bundle.bundle_name || bundle.source_ref || bundle.id}</span>
                 <span className="cap"><span className="mono">{bundle.validation_status}</span> · {bundle.status}</span>
                 {bundle.bundle_version ? <span className="cap">v{bundle.bundle_version}</span> : null}
-              </button>
+                {bundle.created_at ? <span className="cap mono">Uploaded {formatDateTime(bundle.created_at)}</span> : null}
+              </div>
+              <Button size="sm" onClick={() => {
+                setActiveFileName("module.py");
+                setSelectedBundle(bundle);
+              }}>View files</Button>
               <Button size="sm" className="bundles-delete-btn" onClick={() => deleteBundle(bundle.id)}>Delete</Button>
             </div>
           ))}
@@ -321,9 +333,34 @@ function SavedBundlesPanel({ modulesUrl }) {
             <span className="t-label">{selectedBundle.validation_status}</span>
           </div>
           <p className="cap" style={{ marginBottom: 8 }}>ID: <span className="faint">{selectedBundle.id}</span></p>
-          {selectedBundle.diagnostics?.length ? (
+          <div className="bundles-check-report" style={{ marginBottom: 12 }}>
+            <div className="t-label" style={{ marginBottom: 8 }}>Validation checklist</div>
+            <ul className="bundles-check-results">
+              {buildValidationChecks(selectedBundle).map((check) => (
+                <li key={`${selectedBundle.id}-${check.id}`} className="bundles-check-item">
+                  <span aria-hidden="true">{check.passed ? "✅" : "❌"}</span>
+                  <span>{check.label}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          <div className="bundles-check-detail-list" style={{ marginBottom: 12 }}>
+            <div className="t-label" style={{ marginBottom: 8 }}>Bundle files</div>
+            <p className="cap" style={{ marginBottom: 8 }}>Source file preview from the validation view.</p>
+            <div className="row gap-2" style={{ marginBottom: 10 }}>
+              {Object.keys(BUNDLE_FILE_TEMPLATES).map((fileName) => (
+                <Button key={`${selectedBundle.id}-${fileName}`} size="sm" variant={activeFileName === fileName ? "primary" : "ghost"} onClick={() => setActiveFileName(fileName)}>
+                  {fileName}
+                </Button>
+              ))}
+            </div>
+            <pre className="bundles-snippet"><code>{renderHighlightedPython(BUNDLE_FILE_TEMPLATES[activeFileName])}</code></pre>
+          </div>
+
+          {normalizeDiagnostics(selectedBundle.diagnostics).length ? (
             <ul className="bundles-diags">
-              {selectedBundle.diagnostics.map((diag, idx) => (
+              {normalizeDiagnostics(selectedBundle.diagnostics).map((diag, idx) => (
                 <li key={`${selectedBundle.id}-${diag.code}-${idx}`}>{diag.code}: {diag.message}</li>
               ))}
             </ul>
@@ -334,6 +371,30 @@ function SavedBundlesPanel({ modulesUrl }) {
       ) : null}
     </div>
   );
+}
+
+function normalizeDiagnostics(value) {
+  if (Array.isArray(value)) {
+    return value;
+  }
+  if (!value || typeof value !== "object") {
+    return [];
+  }
+  return [];
+}
+
+function formatDateTime(value) {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return "unknown";
+  }
+  return parsed.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 async function parseError(response, fallback) {
@@ -506,7 +567,7 @@ function UploadValidatePanel({ modulesUrl, onBack, onCreatePlan }) {
 }
 
 function buildValidationChecks(result) {
-  const codes = new Set((result?.diagnostics || []).map((diag) => diag.code));
+  const codes = new Set(normalizeDiagnostics(result?.diagnostics).map((diag) => diag.code));
   return VALIDATION_CHECKS.map((check) => ({
     ...check,
     passed: check.failCodes.every((code) => !codes.has(code)),
