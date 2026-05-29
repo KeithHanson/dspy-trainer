@@ -17,6 +17,40 @@ def _load_module(name: str, file_path: Path) -> ModuleType:
     return module
 
 
+def _normalize_judge_result(raw_result: Any, item_index: int) -> dict[str, Any]:
+    if not isinstance(raw_result, dict):
+        raise RuntimeError(
+            f"judge_metric must return a dict with keys score, rationale, flags, raw_response (item_index={item_index})"
+        )
+
+    required_keys = {"score", "rationale", "flags", "raw_response"}
+    actual_keys = set(raw_result.keys())
+    if actual_keys != required_keys:
+        raise RuntimeError(
+            "judge_metric returned invalid keys "
+            f"(item_index={item_index}, expected={sorted(required_keys)}, actual={sorted(actual_keys)})"
+        )
+
+    score = raw_result["score"]
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        raise RuntimeError(f"judge_metric score must be a number (item_index={item_index})")
+
+    rationale = raw_result["rationale"]
+    if not isinstance(rationale, str):
+        raise RuntimeError(f"judge_metric rationale must be a string (item_index={item_index})")
+
+    flags = raw_result["flags"]
+    if not isinstance(flags, list) or any(not isinstance(flag, str) for flag in flags):
+        raise RuntimeError(f"judge_metric flags must be a list of strings (item_index={item_index})")
+
+    return {
+        "score": float(score),
+        "rationale": rationale,
+        "flags": flags,
+        "raw_response": raw_result["raw_response"],
+    }
+
+
 def run_bundle_eval(bundle_path: str, eval_inputs: list[dict[str, Any]], num_threads: int = 1) -> dict[str, Any]:
     root = Path(bundle_path).expanduser().resolve()
     module_mod = _load_module("user_module", root / "module.py")
@@ -29,7 +63,15 @@ def run_bundle_eval(bundle_path: str, eval_inputs: list[dict[str, Any]], num_thr
 
     program = module_mod.build_program()
     lm = module_mod.build_lm() if hasattr(module_mod, "build_lm") else None
-    metric_fn = metric_mod.judge_metric
+    raw_metric_fn = metric_mod.judge_metric
+
+    metric_call_index = [0]
+
+    def metric_fn(example: Any, prediction: Any) -> float:
+        item_index = metric_call_index[0]
+        normalized = _normalize_judge_result(raw_metric_fn(example, prediction), item_index)
+        metric_call_index[0] = item_index + 1
+        return normalized["score"]
 
     devset = []
     for item in eval_inputs:
@@ -53,13 +95,17 @@ def run_bundle_eval(bundle_path: str, eval_inputs: list[dict[str, Any]], num_thr
 
     normalized = []
     for idx, (example, prediction, score) in enumerate(result.results):
+        judge_result = _normalize_judge_result(raw_metric_fn(example, prediction), idx)
         normalized.append(
             {
                 "item_index": idx,
-                "score": 1.0 if score is True else (0.0 if score is False else float(score)),
+                "score": judge_result["score"],
                 "input": example.inputs().toDict(),
                 "label": example.labels().toDict(),
                 "prediction": prediction.toDict() if hasattr(prediction, "toDict") else {"value": str(prediction)},
+                "rationale": judge_result["rationale"],
+                "flags": judge_result["flags"],
+                "raw_response": judge_result["raw_response"],
             }
         )
 

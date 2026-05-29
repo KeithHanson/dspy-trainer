@@ -9,7 +9,7 @@ All settings use the `DSPY_TRAINER_` prefix.
 - `DSPY_TRAINER_POSTGRES_DSN` (required)
 - `DSPY_TRAINER_REDIS_URL` (default: `redis://localhost:6379/0`)
 - `DSPY_TRAINER_QUEUE_NAME` (default: `dspy-trainer:jobs`)
-- `DSPY_TRAINER_MLFLOW_TRACKING_URI` (default: `http://localhost:5000`)
+- `DSPY_TRAINER_MLFLOW_TRACKING_URI` (default: `http://localhost:5001`)
 - `DSPY_TRAINER_LITELLM_BASE_URL` (default: `http://localhost:4000`)
 - `DSPY_TRAINER_LITELLM_API_KEY` (optional; required when LiteLLM health endpoint is protected)
 - `DSPY_TRAINER_BACKEND_HOST` (default: `0.0.0.0`)

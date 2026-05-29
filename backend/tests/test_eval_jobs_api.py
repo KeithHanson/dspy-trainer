@@ -385,6 +385,7 @@ def test_eval_job_run_repeats_and_persists_items(monkeypatch):
                     "input": {"question": "a"},
                     "label": {"expected": "Paris"},
                     "prediction": {"answer": "Paris"},
+                    "rationale": "exact_match",
                 },
                 {
                     "item_index": 1,
@@ -392,6 +393,7 @@ def test_eval_job_run_repeats_and_persists_items(monkeypatch):
                     "input": {"question": "b"},
                     "label": {"expected": "Paris"},
                     "prediction": {"answer": "Paris"},
+                    "rationale": "exact_match",
                 },
             ],
         },

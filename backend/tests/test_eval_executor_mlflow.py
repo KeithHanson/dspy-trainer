@@ -10,7 +10,7 @@ from app.executor.eval import run_eval_job
 
 class FakeServices:
     def __init__(self, with_existing_mlflow=False, fail_trace=False):
-        self.settings = type("S", (), {"mlflow_tracking_uri": "http://localhost:5000"})()
+        self.settings = type("S", (), {"mlflow_tracking_uri": "http://localhost:5001"})()
         self.job = {
             "id": "job-1",
             "status": "queued",
@@ -92,6 +92,7 @@ def test_run_eval_job_emits_parent_and_item_trace_with_correlation_tags(monkeypa
                     "input": {"question": "a"},
                     "label": {"expected": "a"},
                     "prediction": {"answer": "a"},
+                    "rationale": "exact_match",
                 }
             ],
         },
@@ -123,6 +124,7 @@ def test_run_eval_job_reuses_existing_mlflow_job_ids(monkeypatch):
                     "input": {"question": "a"},
                     "label": {"expected": "a"},
                     "prediction": {"answer": "a"},
+                    "rationale": "exact_match",
                 }
             ],
         },
@@ -151,6 +153,7 @@ def test_run_eval_job_fails_with_diagnostics_when_trace_emission_fails(monkeypat
                     "input": {"question": "a"},
                     "label": {"expected": "a"},
                     "prediction": {"answer": "a"},
+                    "rationale": "exact_match",
                 }
             ],
         },

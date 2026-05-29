@@ -158,7 +158,8 @@ def _cleanup_duplicate_judge_assessments(tracking_uri: str, trace_id: str, paren
         return
     assessments = getattr(getattr(trace, "info", None), "assessments", None) or []
     for assessment in assessments:
-        if getattr(assessment, "assessment_name", "") != judge_name:
+        assessment_name = getattr(assessment, "name", None) or getattr(assessment, "assessment_name", "")
+        if assessment_name != judge_name:
             continue
         metadata = getattr(assessment, "metadata", None) or {}
         if metadata.get("mlflow.assessment.sourceRunId") == parent_run_id:
@@ -170,6 +171,25 @@ def _cleanup_duplicate_judge_assessments(tracking_uri: str, trace_id: str, paren
             mlflow.delete_assessment(trace_id=trace_id, assessment_id=assessment_id)
         except Exception:
             continue
+
+
+def _normalize_judge_assessments_for_run(
+    tracking_uri: str,
+    experiment_id: str,
+    parent_run_id: str,
+    judge_name: str = "judge_metric",
+) -> None:
+    traces = _list_parent_run_traces(tracking_uri, experiment_id, parent_run_id)
+    for trace in traces:
+        trace_id = getattr(getattr(trace, "info", None), "trace_id", None)
+        if not trace_id:
+            continue
+        _cleanup_duplicate_judge_assessments(
+            tracking_uri=tracking_uri,
+            trace_id=str(trace_id),
+            parent_run_id=parent_run_id,
+            judge_name=judge_name,
+        )
 
 
 async def run_eval_job(services: Any, eval_job_id: str) -> dict[str, Any] | None:
@@ -268,13 +288,15 @@ async def run_eval_job(services: Any, eval_job_id: str) -> dict[str, Any] | None
                     input_payload=item["input"],
                     prediction_payload=item["prediction"],
                     label_payload=item["label"],
-                    rationale=None,
+                    rationale=item["rationale"],
                     mlflow_item_run_id=None,
                     mlflow_trace_id=None,
                 )
 
                 item_id = str(item_result["id"])
                 created_items.append({"item_id": item_id, "input": item["input"], "score": float(item["score"])})
+                created_items[-1]["prediction"] = item["prediction"]
+                created_items[-1]["label"] = item["label"]
                 # DSPy + MLflow autologging emits the canonical traces.
                 # We intentionally avoid emitting additional synthetic traces here.
         if tracking_uri and str(job.get("mlflow_parent_run_id") or "") and experiment_id_for_trace:
@@ -311,6 +333,11 @@ async def run_eval_job(services: Any, eval_job_id: str) -> dict[str, Any] | None
                     trace_id=trace_id,
                     parent_run_id=str(job["mlflow_parent_run_id"]),
                 )
+            _normalize_judge_assessments_for_run(
+                tracking_uri=tracking_uri,
+                experiment_id=experiment_id_for_trace,
+                parent_run_id=str(job["mlflow_parent_run_id"]),
+            )
     except Exception as exc:
         if job.get("mlflow_parent_run_id"):
             try:

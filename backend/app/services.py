@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import json
 import random
 from typing import Any
 from uuid import uuid4
@@ -206,6 +207,48 @@ class AppServices:
                   source_eval_job_id text,
                   artifact_path text,
                   failure_reason text,
+                  created_at timestamptz not null,
+                  updated_at timestamptz not null
+                );
+                """
+            )
+            await conn.execute(
+                """
+                create table if not exists agent_run_plans (
+                  id text primary key,
+                  status text not null,
+                  project_id text not null,
+                  module_import_id text not null references module_imports(id) on delete restrict,
+                  scenario_id text not null,
+                  dataset_version text not null,
+                  bundle_path text not null,
+                  eval_inputs jsonb not null default '[]'::jsonb,
+                  runs_per_question int not null default 1,
+                  max_workers int not null default 1,
+                  total_tasks int not null default 0,
+                  completed_tasks int not null default 0,
+                  failed_tasks int not null default 0,
+                  failure_reason text,
+                  created_at timestamptz not null,
+                  updated_at timestamptz not null
+                );
+                """
+            )
+            await conn.execute(
+                """
+                create table if not exists agent_run_tasks (
+                  id text primary key,
+                  plan_id text not null references agent_run_plans(id) on delete cascade,
+                  status text not null,
+                  question_index int not null,
+                  attempt_index int not null,
+                  input_payload jsonb not null,
+                  label_payload jsonb not null,
+                  prediction_payload jsonb,
+                  score double precision,
+                  rationale text,
+                  error text,
+                  worker_id text,
                   created_at timestamptz not null,
                   updated_at timestamptz not null
                 );
@@ -922,3 +965,389 @@ class AppServices:
                     now3,
                 )
         return await self.get_optimization_job(optimization_job_id)
+
+    async def create_agent_run_plan(
+        self,
+        project_id: str,
+        module_import_id: str,
+        scenario_id: str,
+        dataset_version: str,
+        bundle_path: str,
+        eval_inputs: list[dict[str, Any]],
+        runs_per_question: int,
+        max_workers: int,
+    ) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        now = datetime.now(timezone.utc)
+        plan_id = str(uuid4())
+        async with self.postgres_pool.acquire() as conn:
+            module_exists = await conn.fetchval("select 1 from module_imports where id = $1", module_import_id)
+            if module_exists is None:
+                return None
+            await conn.execute(
+                """
+                insert into agent_run_plans (
+                  id, status, project_id, module_import_id, scenario_id, dataset_version,
+                  bundle_path, eval_inputs, runs_per_question, max_workers,
+                  total_tasks, completed_tasks, failed_tasks, failure_reason,
+                  created_at, updated_at
+                )
+                values ($1, 'draft', $2, $3, $4, $5, $6, $7::jsonb, $8, $9, 0, 0, 0, null, $10, $11)
+                """,
+                plan_id,
+                project_id,
+                module_import_id,
+                scenario_id,
+                dataset_version,
+                bundle_path,
+                __import__("json").dumps(eval_inputs),
+                max(1, runs_per_question),
+                max(1, max_workers),
+                now,
+                now,
+            )
+        return await self.get_agent_run_plan(plan_id)
+
+    @staticmethod
+    def _json_list(value: Any) -> list[dict[str, Any]]:
+        if isinstance(value, list):
+            return value
+        if isinstance(value, str):
+            try:
+                loaded = json.loads(value)
+            except json.JSONDecodeError:
+                return []
+            return loaded if isinstance(loaded, list) else []
+        return []
+
+    @staticmethod
+    def _json_dict(value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            try:
+                loaded = json.loads(value)
+            except json.JSONDecodeError:
+                return {}
+            return loaded if isinstance(loaded, dict) else {}
+        return {}
+
+    async def get_agent_run_plan(self, plan_id: str) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                select id, status, project_id, module_import_id, scenario_id, dataset_version,
+                       bundle_path, eval_inputs, runs_per_question, max_workers,
+                       total_tasks, completed_tasks, failed_tasks, failure_reason,
+                       created_at, updated_at
+                from agent_run_plans
+                where id = $1
+                """,
+                plan_id,
+            )
+        if row is None:
+            return None
+        eval_inputs = self._json_list(row["eval_inputs"])
+        return {
+            "id": row["id"],
+            "status": row["status"],
+            "project_id": row["project_id"],
+            "module_import_id": row["module_import_id"],
+            "scenario_id": row["scenario_id"],
+            "dataset_version": row["dataset_version"],
+            "bundle_path": row["bundle_path"],
+            "eval_inputs": eval_inputs,
+            "runs_per_question": row["runs_per_question"],
+            "max_workers": row["max_workers"],
+            "total_tasks": row["total_tasks"],
+            "completed_tasks": row["completed_tasks"],
+            "failed_tasks": row["failed_tasks"],
+            "failure_reason": row["failure_reason"],
+            "created_at": row["created_at"].isoformat(),
+            "updated_at": row["updated_at"].isoformat(),
+        }
+
+    async def enqueue_agent_run_plan(self, plan_id: str) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        if self.redis is None:
+            raise RuntimeError("queue not initialized")
+        now = datetime.now(timezone.utc)
+        async with self.postgres_pool.acquire() as conn:
+            plan = await conn.fetchrow(
+                """
+                select id, eval_inputs, runs_per_question, max_workers
+                from agent_run_plans where id = $1
+                """,
+                plan_id,
+            )
+            if plan is None:
+                return None
+            existing = await conn.fetchval("select count(*) from agent_run_tasks where plan_id = $1", plan_id)
+            if int(existing) == 0:
+                eval_inputs = self._json_list(plan["eval_inputs"])
+                for question_index, item in enumerate(eval_inputs):
+                    for attempt_index in range(max(1, int(plan["runs_per_question"]))):
+                        task_id = str(uuid4())
+                        await conn.execute(
+                            """
+                            insert into agent_run_tasks (
+                              id, plan_id, status, question_index, attempt_index,
+                              input_payload, label_payload, prediction_payload, score, rationale, error, worker_id,
+                              created_at, updated_at
+                            )
+                            values ($1, $2, 'pending', $3, $4, $5::jsonb, $6::jsonb, null, null, null, null, null, $7, $8)
+                            """,
+                            task_id,
+                            plan_id,
+                            question_index,
+                            attempt_index,
+                            __import__("json").dumps(item.get("input", {})),
+                            __import__("json").dumps(item.get("label", {})),
+                            now,
+                            now,
+                        )
+            total_tasks = await conn.fetchval("select count(*) from agent_run_tasks where plan_id = $1", plan_id)
+            queued_or_running = await conn.fetchval(
+                "select count(*) from agent_run_tasks where plan_id = $1 and status in ('queued','running')",
+                plan_id,
+            )
+            slots = max(0, int(plan["max_workers"]) - int(queued_or_running))
+            tasks_to_queue = []
+            if slots > 0:
+                tasks_to_queue = await conn.fetch(
+                    """
+                    select id from agent_run_tasks
+                    where plan_id = $1 and status = 'pending'
+                    order by question_index asc, attempt_index asc
+                    limit $2
+                    """,
+                    plan_id,
+                    slots,
+                )
+                for row in tasks_to_queue:
+                    await conn.execute(
+                        "update agent_run_tasks set status='queued', updated_at=$2 where id=$1",
+                        row["id"],
+                        now,
+                    )
+            await conn.execute(
+                """
+                update agent_run_plans
+                set status='queued', total_tasks=$2, updated_at=$3
+                where id=$1
+                """,
+                plan_id,
+                int(total_tasks),
+                now,
+            )
+        for row in tasks_to_queue:
+            await self.redis.execute_command(
+                "LPUSH",
+                self.settings.queue_name,
+                __import__("json").dumps({"type": "agent_run_task", "task_id": row["id"]}),
+            )
+        return await self.get_agent_run_plan(plan_id)
+
+    async def list_agent_run_tasks(self, plan_id: str, limit: int, offset: int) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            plan_exists = await conn.fetchval("select 1 from agent_run_plans where id = $1", plan_id)
+            if plan_exists is None:
+                return None
+            rows = await conn.fetch(
+                """
+                select id, plan_id, status, question_index, attempt_index,
+                       input_payload, label_payload, prediction_payload,
+                       score, rationale, error, worker_id, created_at, updated_at
+                from agent_run_tasks
+                where plan_id = $1
+                order by question_index asc, attempt_index asc, created_at asc
+                limit $2 offset $3
+                """,
+                plan_id,
+                limit,
+                offset,
+            )
+            total = await conn.fetchval("select count(*) from agent_run_tasks where plan_id = $1", plan_id)
+        return {
+            "items": [
+                {
+                    "id": row["id"],
+                    "plan_id": row["plan_id"],
+                    "status": row["status"],
+                    "question_index": row["question_index"],
+                    "attempt_index": row["attempt_index"],
+                    "input_payload": self._json_dict(row["input_payload"]),
+                    "label_payload": self._json_dict(row["label_payload"]),
+                    "prediction_payload": self._json_dict(row["prediction_payload"]) if row["prediction_payload"] is not None else None,
+                    "score": row["score"],
+                    "rationale": row["rationale"],
+                    "error": row["error"],
+                    "worker_id": row["worker_id"],
+                    "created_at": row["created_at"].isoformat(),
+                    "updated_at": row["updated_at"].isoformat(),
+                }
+                for row in rows
+            ],
+            "limit": limit,
+            "offset": offset,
+            "count": len(rows),
+            "total": int(total),
+        }
+
+    async def run_agent_run_task(self, task_id: str, worker_id: str) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        now = datetime.now(timezone.utc)
+        async with self.postgres_pool.acquire() as conn:
+            task = await conn.fetchrow(
+                """
+                select t.id, t.plan_id, t.status, t.input_payload, t.label_payload,
+                       p.bundle_path, p.max_workers
+                from agent_run_tasks t
+                join agent_run_plans p on p.id = t.plan_id
+                where t.id = $1
+                """,
+                task_id,
+            )
+            if task is None:
+                return None
+            if task["status"] not in {"queued", "pending"}:
+                return await conn.fetchrow("select id, status from agent_run_tasks where id = $1", task_id)
+            running_count = await conn.fetchval(
+                "select count(*) from agent_run_tasks where plan_id = $1 and status = 'running'",
+                task["plan_id"],
+            )
+            if int(running_count) >= int(task["max_workers"]):
+                return {"id": task_id, "status": "throttled"}
+            await conn.execute(
+                "update agent_run_tasks set status='running', worker_id=$2, updated_at=$3 where id=$1",
+                task_id,
+                worker_id,
+                now,
+            )
+            await conn.execute(
+                "update agent_run_plans set status='running', updated_at=$2 where id=$1 and status in ('queued','draft')",
+                task["plan_id"],
+                now,
+            )
+        try:
+            from app.executor.module_runner import run_bundle_eval
+
+            result = run_bundle_eval(
+                bundle_path=str(task["bundle_path"]),
+                eval_inputs=[
+                    {
+                        "input": self._json_dict(task["input_payload"]),
+                        "label": self._json_dict(task["label_payload"]),
+                    }
+                ],
+                num_threads=1,
+            )
+            item = result["items"][0]
+            async with self.postgres_pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    update agent_run_tasks
+                    set status='succeeded', prediction_payload=$2::jsonb, score=$3, rationale=$4, error=null, updated_at=$5
+                    where id=$1
+                    """,
+                    task_id,
+                    __import__("json").dumps(item["prediction"]),
+                    float(item["score"]),
+                    str(item["rationale"]),
+                    datetime.now(timezone.utc),
+                )
+        except Exception as exc:
+            async with self.postgres_pool.acquire() as conn:
+                await conn.execute(
+                    "update agent_run_tasks set status='failed', error=$2, updated_at=$3 where id=$1",
+                    task_id,
+                    str(exc),
+                    datetime.now(timezone.utc),
+                )
+
+        await self._reconcile_agent_run_plan(str(task["plan_id"]))
+        await self._queue_more_agent_run_tasks(str(task["plan_id"]))
+        async with self.postgres_pool.acquire() as conn:
+            return await conn.fetchrow("select id, status from agent_run_tasks where id = $1", task_id)
+
+    async def _reconcile_agent_run_plan(self, plan_id: str) -> None:
+        if self.postgres_pool is None:
+            return
+        now = datetime.now(timezone.utc)
+        async with self.postgres_pool.acquire() as conn:
+            total = int(await conn.fetchval("select count(*) from agent_run_tasks where plan_id = $1", plan_id) or 0)
+            completed = int(await conn.fetchval("select count(*) from agent_run_tasks where plan_id = $1 and status = 'succeeded'", plan_id) or 0)
+            failed = int(await conn.fetchval("select count(*) from agent_run_tasks where plan_id = $1 and status = 'failed'", plan_id) or 0)
+            pending_or_active = int(
+                await conn.fetchval(
+                    "select count(*) from agent_run_tasks where plan_id = $1 and status in ('pending','queued','running')",
+                    plan_id,
+                )
+                or 0
+            )
+            status = "running"
+            if pending_or_active == 0 and total > 0:
+                status = "failed" if failed > 0 else "succeeded"
+            await conn.execute(
+                """
+                update agent_run_plans
+                set status=$2, total_tasks=$3, completed_tasks=$4, failed_tasks=$5, updated_at=$6
+                where id=$1
+                """,
+                plan_id,
+                status,
+                total,
+                completed,
+                failed,
+                now,
+            )
+
+    async def _queue_more_agent_run_tasks(self, plan_id: str) -> None:
+        if self.postgres_pool is None or self.redis is None:
+            return
+        now = datetime.now(timezone.utc)
+        tasks_to_queue: list[str] = []
+        async with self.postgres_pool.acquire() as conn:
+            plan = await conn.fetchrow("select max_workers from agent_run_plans where id = $1", plan_id)
+            if plan is None:
+                return
+            active = int(
+                await conn.fetchval(
+                    "select count(*) from agent_run_tasks where plan_id = $1 and status in ('queued','running')",
+                    plan_id,
+                )
+                or 0
+            )
+            slots = max(0, int(plan["max_workers"]) - active)
+            if slots == 0:
+                return
+            rows = await conn.fetch(
+                """
+                select id from agent_run_tasks
+                where plan_id = $1 and status = 'pending'
+                order by question_index asc, attempt_index asc
+                limit $2
+                """,
+                plan_id,
+                slots,
+            )
+            for row in rows:
+                tasks_to_queue.append(str(row["id"]))
+                await conn.execute(
+                    "update agent_run_tasks set status='queued', updated_at=$2 where id=$1",
+                    str(row["id"]),
+                    now,
+                )
+        for task_id in tasks_to_queue:
+            await self.redis.execute_command(
+                "LPUSH",
+                self.settings.queue_name,
+                __import__("json").dumps({"type": "agent_run_task", "task_id": task_id}),
+            )

@@ -63,6 +63,17 @@ class OptimizationJobCreateRequest(BaseModel):
     source_eval_job_id: str | None = None
 
 
+class AgentRunPlanCreateRequest(BaseModel):
+    project_id: str
+    module_import_id: str
+    scenario_id: str
+    dataset_version: str
+    bundle_path: str
+    eval_inputs: list[dict[str, Any]] = Field(default_factory=list)
+    runs_per_question: int = 1
+    max_workers: int = 1
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -263,4 +274,51 @@ async def run_optimization_job_endpoint(optimization_job_id: str, request: Reque
     result = await services.run_optimization_job(optimization_job_id)
     if result is None:
         return JSONResponse(status_code=404, content={"error": "optimization job not found"})
+    return result
+
+
+@app.post("/agent-run-plans")
+async def create_agent_run_plan(request: Request, payload: AgentRunPlanCreateRequest):
+    services: AppServices = request.app.state.services
+    result = await services.create_agent_run_plan(
+        project_id=payload.project_id,
+        module_import_id=payload.module_import_id,
+        scenario_id=payload.scenario_id,
+        dataset_version=payload.dataset_version,
+        bundle_path=payload.bundle_path,
+        eval_inputs=payload.eval_inputs,
+        runs_per_question=payload.runs_per_question,
+        max_workers=payload.max_workers,
+    )
+    if result is None:
+        return JSONResponse(status_code=404, content={"error": "module not found"})
+    return result
+
+
+@app.get("/agent-run-plans/{plan_id}")
+async def get_agent_run_plan(plan_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    result = await services.get_agent_run_plan(plan_id)
+    if result is None:
+        return JSONResponse(status_code=404, content={"error": "agent run plan not found"})
+    return result
+
+
+@app.post("/agent-run-plans/{plan_id}/enqueue")
+async def enqueue_agent_run_plan(plan_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    result = await services.enqueue_agent_run_plan(plan_id)
+    if result is None:
+        return JSONResponse(status_code=404, content={"error": "agent run plan not found"})
+    return result
+
+
+@app.get("/agent-run-plans/{plan_id}/tasks")
+async def list_agent_run_plan_tasks(plan_id: str, request: Request, limit: int = 50, offset: int = 0):
+    services: AppServices = request.app.state.services
+    safe_limit = max(1, min(limit, 500))
+    safe_offset = max(0, offset)
+    result = await services.list_agent_run_tasks(plan_id, safe_limit, safe_offset)
+    if result is None:
+        return JSONResponse(status_code=404, content={"error": "agent run plan not found"})
     return result

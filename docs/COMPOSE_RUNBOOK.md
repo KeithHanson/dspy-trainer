@@ -10,7 +10,7 @@ References:
 
 - `postgres` (`5432`)
 - `redis` (`6379`)
-- `mlflow` (`5000`)
+- `mlflow` (`5001`)
 - `litellm-proxy` (`4000`)
 - `backend` (`8000`)
 - `worker` (no host port)

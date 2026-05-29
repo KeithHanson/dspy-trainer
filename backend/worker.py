@@ -10,12 +10,20 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [worke
 logger = logging.getLogger(__name__)
 
 
-async def process_job(raw_payload: str) -> None:
+async def process_job(services: AppServices, raw_payload: str) -> None:
     try:
         payload = json.loads(raw_payload)
     except json.JSONDecodeError:
         payload = {"raw": raw_payload}
     logger.info("Pulled job from queue: %s", payload)
+    job_type = payload.get("type") if isinstance(payload, dict) else None
+    if job_type == "agent_run_task":
+        task_id = payload.get("task_id")
+        if not task_id:
+            logger.error("Missing task_id in agent_run_task payload")
+            return
+        result = await services.run_agent_run_task(str(task_id), worker_id="worker")
+        logger.info("Processed agent run task: %s", result)
 
 
 async def run_worker() -> None:
@@ -29,7 +37,7 @@ async def run_worker() -> None:
             if result is None:
                 continue
             _, raw_payload = result
-            await process_job(raw_payload)
+            await process_job(services, raw_payload)
     finally:
         await services.disconnect()
 
