@@ -7,6 +7,7 @@ This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get sta
 - `AGENTS.md`: Operator and agent workflow rules for this repository.
 - `.beads/`: Local beads issue database, hooks, and interaction history.
 - `README.md`: Project overview and high-level goals.
+- `.env.sample`: Source of truth for required environment variables.
 - `docs/NAIVE_PLAN.md`: Product and architecture planning baseline.
 
 ## Quick Reference
@@ -137,6 +138,22 @@ bd close bd-42 --reason "Completed" --json
    - Every epic bead should include a `Definition of Done` section in its description.
    - The section should state concrete completion criteria, including functionality delivered, test expectations, and dependency/acceptance criteria for child beads.
 
+8. **Human validation checkpoint after each bead implementation**
+   - After a subagent completes meaningful work on a bead, STOP and report results.
+   - Provide exact manual verification steps for the operator to validate with their own eyes.
+   - Do not begin major implementation for the next bead until the operator reviews and responds.
+   - Unit tests are necessary but not sufficient; operator UX review is required before proceeding.
+
+9. **Commit and push cadence (per bead)**
+   - After the agent verifies bead changes locally (tests/build pass), commit and push to keep the repo clean.
+   - Perform this commit/push before operator polish review unless the operator explicitly asks to batch multiple beads.
+   - Keep commits scoped and readable; avoid carrying unrelated changes between beads.
+
+10. **Environment variable and onboarding docs policy**
+   - Any change that introduces, removes, or alters environment variables MUST update `.env.sample` in the same bead.
+   - The `README.md` MUST be updated whenever behavior, setup, commands, architecture, or required configuration changes.
+   - README should always be accurate for a fresh clone and first-time setup.
+
 ### Auto-Sync
 
 bd automatically syncs with git:
@@ -144,6 +161,8 @@ bd automatically syncs with git:
 - Exports to `.beads/issues.jsonl` after changes (5s debounce)
 - Imports from JSONL when newer (e.g., after `git pull`)
 - No manual export/import needed!
+
+Note: if your local `bd` binary does not support `bd sync`, do not block work on it; use available `bd` commands and continue the required git push workflow.
 
 ### Important Rules
 
