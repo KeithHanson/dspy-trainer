@@ -1,6 +1,7 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Button } from "../components/primitives/Button";
+import { Icon } from "../components/Icon";
 import { EmptyState } from "../components/states/EmptyState";
 import { ErrorState } from "../components/states/ErrorState";
 import { LoadingState } from "../components/states/LoadingState";
@@ -203,12 +204,12 @@ export function BundlesPage() {
       <div className="page-body bundles-wrap">
         <header className="row between bundles-head">
           <div className="col gap-1">
-            <h1 className="t-display">Prepare your first DSPy module bundle</h1>
-            <p className="muted t-sm">Start with a working sample, adapt it to your signature, then move to upload and validation.</p>
+            <h1 className="t-display" style={{ fontSize: 22 }}>Module Bundles</h1>
+            <p className="muted t-sm">Agent code packages - <span className="mono">module.py</span> + <span className="mono">metric.py</span> - validated in a sandbox.</p>
           </div>
           <div className="row gap-2">
             <Button onClick={handleDownload} disabled={isDownloading}>
-              {isDownloading ? "Downloading..." : "Download sample bundle"}
+              {isDownloading ? "Downloading..." : "Example bundle"}
             </Button>
             <Button variant="primary" onClick={() => navigate("/bundles?upload=1")}>Upload bundle</Button>
           </div>
@@ -216,29 +217,122 @@ export function BundlesPage() {
 
         {downloadError ? <ErrorState title="Download failed" description={downloadError} /> : null}
 
-        <section className="panel card-pad bundles-section">
-          <div className="row between">
-            <h2 className="t-h2">Expected bundle structure</h2>
-            <span className="t-label">Required</span>
-          </div>
-          <pre className="bundles-structure">{`example-bundle.zip
+        {showUploadIntent ? (
+          <>
+            <section className="panel card-pad bundles-section">
+              <div className="row between">
+                <h2 className="t-h2">Expected bundle structure</h2>
+                <span className="t-label">Required</span>
+              </div>
+              <pre className="bundles-structure">{`example-bundle.zip
 ├── module.py   # DSPy module + build_program()
 ├── metric.py   # judge_metric(example, prediction, trace=None)
 └── bundle.toml # name, version, lm_target`}</pre>
-        </section>
+            </section>
 
-        <section className="panel card-pad bundles-section">
-          <h2 className="t-h2">Preparation checklist</h2>
-          <ol className="bundles-checklist">
-            {PREP_STEPS.map((step) => (
-              <li key={step}>{step}</li>
-            ))}
-          </ol>
-        </section>
+            <section className="panel card-pad bundles-section">
+              <h2 className="t-h2">Preparation checklist</h2>
+              <ol className="bundles-checklist">
+                {PREP_STEPS.map((step) => (
+                  <li key={step}>{step}</li>
+                ))}
+              </ol>
+            </section>
 
-        {showUploadIntent ? <UploadValidatePanel modulesUrl={validateUrl} onBack={() => navigate("/bundles")} /> : null}
+            <UploadValidatePanel modulesUrl={validateUrl} onBack={() => navigate("/bundles")} onCreatePlan={() => navigate("/plans?new=1")} />
+          </>
+        ) : <SavedBundlesPanel modulesUrl={validateUrl} />}
       </div>
     </section>
+  );
+}
+
+function SavedBundlesPanel({ modulesUrl }) {
+  const [savedBundles, setSavedBundles] = useState([]);
+  const [isLoadingBundles, setIsLoadingBundles] = useState(false);
+  const [selectedBundle, setSelectedBundle] = useState(null);
+
+  const loadBundles = async () => {
+    setIsLoadingBundles(true);
+    try {
+      const response = await fetch(modulesUrl, { method: "GET" });
+      if (!response.ok) {
+        throw new Error("Could not load bundles");
+      }
+      const payload = await response.json();
+      const bundles = Array.isArray(payload) ? payload : [];
+      setSavedBundles(bundles);
+      if (selectedBundle) {
+        const refreshed = bundles.find((item) => item.id === selectedBundle.id);
+        setSelectedBundle(refreshed || null);
+      }
+    } catch {
+      setSavedBundles([]);
+    } finally {
+      setIsLoadingBundles(false);
+    }
+  };
+
+  const deleteBundle = async (bundleId) => {
+    const response = await fetch(`${modulesUrl}/${bundleId}`, { method: "DELETE" });
+    if (!response.ok) {
+      return;
+    }
+    if (selectedBundle?.id === bundleId) {
+      setSelectedBundle(null);
+    }
+    await loadBundles();
+  };
+
+  useEffect(() => {
+    loadBundles();
+  }, []);
+
+  return (
+    <div className="panel card-pad bundles-validation-result">
+      <div className="row between" style={{ marginBottom: 10 }}>
+        <h3 className="t-h2">Saved bundles</h3>
+        <Button size="sm" onClick={loadBundles} disabled={isLoadingBundles}>{isLoadingBundles ? "Refreshing..." : "Refresh"}</Button>
+      </div>
+      {!savedBundles.length ? (
+        <EmptyState title="No bundles saved yet" description="Upload and validate a bundle to save it." />
+      ) : (
+        <div className="col gap-2">
+          {savedBundles.map((bundle) => (
+            <div key={bundle.id} className="bundles-saved-row">
+              <div className="bundles-saved-icon center">
+                <Icon name="box" size={18} />
+              </div>
+              <button type="button" className="bundles-row-btn" onClick={() => setSelectedBundle(bundle)}>
+                <span className="t-sm">{bundle.bundle_name || bundle.source_ref || bundle.id}</span>
+                <span className="cap"><span className="mono">{bundle.validation_status}</span> · {bundle.status}</span>
+                {bundle.bundle_version ? <span className="cap">v{bundle.bundle_version}</span> : null}
+              </button>
+              <Button size="sm" className="bundles-delete-btn" onClick={() => deleteBundle(bundle.id)}>Delete</Button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {selectedBundle ? (
+        <div className="panel card-pad bundles-validation-result">
+          <div className="row between" style={{ marginBottom: 8 }}>
+            <h4 className="t-h2">Bundle detail</h4>
+            <span className="t-label">{selectedBundle.validation_status}</span>
+          </div>
+          <p className="cap" style={{ marginBottom: 8 }}>ID: <span className="faint">{selectedBundle.id}</span></p>
+          {selectedBundle.diagnostics?.length ? (
+            <ul className="bundles-diags">
+              {selectedBundle.diagnostics.map((diag, idx) => (
+                <li key={`${selectedBundle.id}-${diag.code}-${idx}`}>{diag.code}: {diag.message}</li>
+              ))}
+            </ul>
+          ) : (
+            <EmptyState title="No diagnostics" description="This bundle passed without warnings." />
+          )}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -254,7 +348,7 @@ async function parseError(response, fallback) {
   return fallback;
 }
 
-function UploadValidatePanel({ modulesUrl, onBack }) {
+function UploadValidatePanel({ modulesUrl, onBack, onCreatePlan }) {
   const [bundleFile, setBundleFile] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState("");
@@ -275,7 +369,7 @@ function UploadValidatePanel({ modulesUrl, onBack }) {
       const importResp = await fetch(`${modulesUrl}/import`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ source: "upload" }),
+        body: JSON.stringify({ source: "upload", source_ref: bundleFile.name }),
       });
       if (!importResp.ok) {
         throw new Error(await parseError(importResp, `Import failed (${importResp.status})`));
@@ -358,8 +452,22 @@ function UploadValidatePanel({ modulesUrl, onBack }) {
               ))}
             </ul>
           ) : (
-            <EmptyState title="No diagnostics" description="Validation passed without warnings." />
+            <div className="state-card col center bundles-no-diag-card">
+              <p className="t-h2">No diagnostics</p>
+              <p className="muted">Validation passed without warnings.</p>
+              <hr className="hr bundles-no-diag-hr" />
+              {result.validation_status === "passed" ? (
+                <Button className="bundles-plan-cta" variant="primary" size="lg" onClick={onCreatePlan}>Create Evaluation Plan</Button>
+              ) : null}
+            </div>
           )}
+
+          {result.validation_status === "passed" && result.diagnostics?.length ? (
+            <div className="bundles-success-wrap">
+              <div className="bundles-success-banner" role="status">Bundle validated and saved successfully.</div>
+              <Button className="bundles-plan-cta" variant="primary" size="lg" onClick={onCreatePlan}>Create Evaluation Plan</Button>
+            </div>
+          ) : null}
         </div>
       ) : null}
 

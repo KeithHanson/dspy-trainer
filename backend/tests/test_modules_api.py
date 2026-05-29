@@ -67,6 +67,13 @@ async def fake_get_diagnostics(self, module_id):
     return STORE.get(module_id)
 
 
+async def fake_set_module_bundle_metadata(self, module_id, bundle_name, bundle_version):
+    if module_id not in STORE:
+        return
+    STORE[module_id]["bundle_name"] = bundle_name
+    STORE[module_id]["bundle_version"] = bundle_version
+
+
 def _patch_services(monkeypatch):
     monkeypatch.setenv("DSPY_TRAINER_POSTGRES_DSN", "postgresql://postgres:postgres@localhost:5432/dspy_trainer")
     monkeypatch.setattr(main_mod.AppServices, "connect", fake_connect)
@@ -76,6 +83,7 @@ def _patch_services(monkeypatch):
     monkeypatch.setattr(main_mod.AppServices, "set_validation_status", fake_set_validation_status)
     monkeypatch.setattr(main_mod.AppServices, "set_smoke_status", fake_set_smoke_status)
     monkeypatch.setattr(main_mod.AppServices, "get_diagnostics", fake_get_diagnostics)
+    monkeypatch.setattr(main_mod.AppServices, "set_module_bundle_metadata", fake_set_module_bundle_metadata)
 
 
 def test_module_import_and_status_flow(monkeypatch):

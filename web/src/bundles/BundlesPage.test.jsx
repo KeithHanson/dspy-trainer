@@ -7,7 +7,15 @@ import { BundlesPage } from "./BundlesPage";
 describe("BundlesPage", () => {
   it("downloads sample bundle when action is clicked", async () => {
     const blob = new Blob(["zip"], { type: "application/zip" });
-    const fetchMock = vi.fn().mockResolvedValue({ ok: true, blob: vi.fn().mockResolvedValue(blob) });
+    const fetchMock = vi.fn((url) => {
+      if (String(url).endsWith("/samples/module-bundle")) {
+        return Promise.resolve({ ok: true, blob: vi.fn().mockResolvedValue(blob) });
+      }
+      if (String(url).endsWith("/modules")) {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
     if (!URL.createObjectURL) {
       URL.createObjectURL = vi.fn();
     }
@@ -26,7 +34,7 @@ describe("BundlesPage", () => {
       </MemoryRouter>,
     );
 
-    await userEvent.click(screen.getByRole("button", { name: "Download sample bundle" }));
+    await userEvent.click(screen.getByRole("button", { name: "Example bundle" }));
 
     expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/samples\/module-bundle$/), { method: "GET" });
     expect(urlMock).toHaveBeenCalledTimes(1);

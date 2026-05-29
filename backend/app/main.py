@@ -206,10 +206,39 @@ async def import_module(request: Request, payload: ModuleImportRequest):
     return {"id": result["id"], "status": result["status"]}
 
 
+@app.get("/modules")
+async def list_modules(request: Request):
+    services: AppServices = request.app.state.services
+    return await services.list_modules()
+
+
+@app.get("/modules/{module_id}")
+async def get_module(module_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    result = await services.get_module(module_id)
+    if result is None:
+        return JSONResponse(status_code=404, content={"error": "module not found"})
+    return result
+
+
+@app.delete("/modules/{module_id}")
+async def delete_module(module_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    deleted = await services.delete_module(module_id)
+    if not deleted:
+        return JSONResponse(status_code=404, content={"error": "module not found"})
+    return {"id": module_id, "deleted": True}
+
+
 @app.post("/modules/{module_id}/validate")
 async def validate_module(module_id: str, request: Request, payload: ValidateRequest):
     services: AppServices = request.app.state.services
     report = validate_bundle(payload.bundle_path)
+    await services.set_module_bundle_metadata(
+        module_id,
+        report.metadata.get("name") if isinstance(report.metadata.get("name"), str) else None,
+        report.metadata.get("version") if isinstance(report.metadata.get("version"), str) else None,
+    )
     status = "passed" if report.passed else "failed"
     found = await services.set_validation_status(module_id, status, report.diagnostics)
     if not found:
@@ -242,6 +271,12 @@ async def validate_module_upload(module_id: str, request: Request, bundle: Uploa
             report = validate_bundle(str(bundle_root))
     except Exception:
         return JSONResponse(status_code=400, content={"error": "invalid zip bundle"})
+
+    await services.set_module_bundle_metadata(
+        module_id,
+        report.metadata.get("name") if isinstance(report.metadata.get("name"), str) else None,
+        report.metadata.get("version") if isinstance(report.metadata.get("version"), str) else None,
+    )
 
     status = "passed" if report.passed else "failed"
     found = await services.set_validation_status(module_id, status, report.diagnostics)

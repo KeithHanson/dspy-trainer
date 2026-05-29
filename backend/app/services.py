@@ -111,12 +111,16 @@ class AppServices:
                   source text not null,
                   source_ref text,
                   version_hash text,
+                  bundle_name text,
+                  bundle_version text,
                   status text not null,
                   created_at timestamptz not null,
                   updated_at timestamptz not null
                 );
                 """
             )
+            await conn.execute("alter table module_imports add column if not exists bundle_name text;")
+            await conn.execute("alter table module_imports add column if not exists bundle_version text;")
             await conn.execute(
                 """
                 create table if not exists runtime_bundles (
@@ -383,6 +387,67 @@ class AppServices:
             "smoke_status": row["smoke_status"],
             "diagnostics": row["diagnostics"],
         }
+
+    async def list_modules(self) -> list[dict[str, Any]]:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                select m.id, m.source, m.source_ref, m.version_hash, m.bundle_name, m.bundle_version, m.status, m.created_at,
+                       r.validation_status, r.smoke_status, r.diagnostics
+                from module_imports m
+                join runtime_bundles r on r.module_import_id = m.id
+                order by m.created_at desc
+                """
+            )
+        return [
+            {
+                "id": row["id"],
+                "source": row["source"],
+                "source_ref": row["source_ref"],
+                "version_hash": row["version_hash"],
+                "bundle_name": row["bundle_name"],
+                "bundle_version": row["bundle_version"],
+                "status": row["status"],
+                "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                "validation_status": row["validation_status"],
+                "smoke_status": row["smoke_status"],
+                "diagnostics": row["diagnostics"],
+            }
+            for row in rows
+        ]
+
+    async def get_module(self, module_id: str) -> dict[str, Any] | None:
+        modules = await self.list_modules()
+        for item in modules:
+            if item["id"] == module_id:
+                return item
+        return None
+
+    async def delete_module(self, module_id: str) -> bool:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            result = await conn.execute("delete from module_imports where id = $1", module_id)
+        return result.endswith("1")
+
+    async def set_module_bundle_metadata(self, module_id: str, bundle_name: str | None, bundle_version: str | None) -> None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            await conn.execute(
+                """
+                update module_imports
+                set bundle_name = coalesce($2, bundle_name),
+                    bundle_version = coalesce($3, bundle_version),
+                    updated_at = now()
+                where id = $1
+                """,
+                module_id,
+                bundle_name,
+                bundle_version,
+            )
 
     async def create_eval_job(
         self,

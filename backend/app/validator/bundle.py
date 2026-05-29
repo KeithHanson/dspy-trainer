@@ -16,6 +16,7 @@ class ValidationReport:
     passed: bool
     diagnostics: list[dict[str, Any]]
     summary: str
+    metadata: dict[str, Any]
 
 
 def validate_bundle(bundle_path: str) -> ValidationReport:
@@ -24,14 +25,15 @@ def validate_bundle(bundle_path: str) -> ValidationReport:
 
     if not root.exists():
         diagnostics.append(_diag("error", "bundle_path_missing", "Bundle path does not exist", str(root)))
-        return ValidationReport(False, diagnostics, _summary(diagnostics))
+        return ValidationReport(False, diagnostics, _summary(diagnostics), {})
     if not root.is_dir():
         diagnostics.append(_diag("error", "bundle_path_not_dir", "Bundle path must be a directory", str(root)))
-        return ValidationReport(False, diagnostics, _summary(diagnostics))
+        return ValidationReport(False, diagnostics, _summary(diagnostics), {})
 
     module_file = root / MODULE_FILE
     metric_file = root / METRIC_FILE
     toml_file = root / TOML_FILE
+    metadata: dict[str, Any] = {}
 
     if not module_file.exists() or not module_file.is_file():
         diagnostics.append(_diag("error", "module_missing", "Missing required file: module.py", MODULE_FILE))
@@ -45,10 +47,10 @@ def validate_bundle(bundle_path: str) -> ValidationReport:
     if metric_file.exists() and metric_file.is_file():
         _validate_metric_contract(metric_file, diagnostics)
     if toml_file.exists() and toml_file.is_file():
-        _validate_bundle_toml(toml_file, diagnostics)
+        metadata.update(_validate_bundle_toml(toml_file, diagnostics))
 
     passed = not any(item["severity"] == "error" for item in diagnostics)
-    return ValidationReport(passed, diagnostics, _summary(diagnostics))
+    return ValidationReport(passed, diagnostics, _summary(diagnostics), metadata)
 
 
 def _validate_module_contract(module_file: Path, diagnostics: list[dict[str, Any]]) -> None:
@@ -124,21 +126,26 @@ def _parse_python(path: Path, diagnostics: list[dict[str, Any]], label: str) -> 
         return None
 
 
-def _validate_bundle_toml(toml_file: Path, diagnostics: list[dict[str, Any]]) -> None:
+def _validate_bundle_toml(toml_file: Path, diagnostics: list[dict[str, Any]]) -> dict[str, Any]:
     try:
         payload = tomllib.loads(toml_file.read_text(encoding="utf-8"))
     except OSError as exc:
         diagnostics.append(_diag("error", "bundle_toml_read_error", f"Unable to read bundle.toml: {exc}", TOML_FILE))
-        return
+        return {}
     except tomllib.TOMLDecodeError as exc:
         diagnostics.append(_diag("error", "bundle_toml_invalid", f"bundle.toml is not valid TOML: {exc}", TOML_FILE))
-        return
+        return {}
 
     required_keys = ["name", "version", "lm_target"]
     for key in required_keys:
         value = payload.get(key)
         if not isinstance(value, str) or not value.strip():
             diagnostics.append(_diag("error", f"bundle_toml_{key}_missing", f"bundle.toml must define a non-empty '{key}' string", TOML_FILE))
+    return {
+        "name": payload.get("name"),
+        "version": payload.get("version"),
+        "lm_target": payload.get("lm_target"),
+    }
 
 
 def _name_of(node: ast.AST) -> str:
