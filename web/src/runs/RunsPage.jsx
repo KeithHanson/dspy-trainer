@@ -195,8 +195,8 @@ export function RunsPage() {
               <div className="row gap-2">
                 {[
                   ["all", "All"],
-                  ["succeeded", "Pass"],
-                  ["failed", "Fail"],
+                  ["succeeded", "Succeeded"],
+                  ["failed", "Errored"],
                   ["running", "Running"],
                 ].map(([value, label]) => (
                   <Button key={value} size="sm" variant={filter === value ? "primary" : "ghost"} onClick={() => setFilter(value)}>{label}</Button>
