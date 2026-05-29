@@ -125,6 +125,7 @@ export function RunsPage() {
                 <table className="dashboard-table">
                   <thead>
                     <tr>
+                      <th>Plan Name</th>
                       <th>Plan ID</th>
                       <th>Run Status</th>
                       <th>Successful Runs</th>
@@ -138,6 +139,7 @@ export function RunsPage() {
                   <tbody>
                     {plans.map((plan) => (
                       <tr key={plan.id} className="runs-row-click" onClick={() => navigate(`/runs?plan=${encodeURIComponent(plan.id)}`)}>
+                        <td>{plan.plan_name || "RunPlan"}</td>
                         <td className="mono">{shortId(plan.id)}</td>
                         <td><StatusPill status={plan.status} /></td>
                         <td className="mono">{plan.completed_tasks ?? 0}/{plan.total_tasks ?? 0}</td>
@@ -216,6 +218,7 @@ export function RunsPage() {
                 <h2 className="t-h2">Run summary</h2>
                 <StatusPill status={runPlan.status} />
               </div>
+              <p className="cap mono" style={{ marginBottom: 8 }}>Plan: {runPlan.plan_name || "RunPlan"}</p>
               <div className="runs-kpis">
                 <Kpi
                   label="Pass/Fail"

@@ -130,8 +130,9 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    container_name: dspy-trainer-worker
     command: ["python", "backend/worker.py"]
+    deploy:
+      replicas: 8
     environment:
       DSPY_TRAINER_POSTGRES_DSN: postgresql://postgres:postgres@postgres:5432/dspy_trainer
       DSPY_TRAINER_REDIS_URL: redis://redis:6379/0

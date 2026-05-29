@@ -116,7 +116,8 @@ button { font-family: inherit; }
 
 .dashboard-wrap { max-width: 1120px; }
 .dashboard-head { margin-bottom: 20px; align-items: flex-start; }
-.dashboard-live { width: 100%; text-align: left; border: 1px solid var(--accent-line); border-radius: var(--r-lg); background: linear-gradient(180deg, var(--panel), var(--bg-deep)); color: var(--text); padding: 16px; margin-bottom: 16px; cursor: pointer; }
+.dashboard-live { width: 100%; text-align: left; border: 1px solid var(--accent-line); border-radius: var(--r-lg); background: linear-gradient(180deg, var(--panel), var(--bg-deep)); color: var(--text); padding: 16px; margin-bottom: 24px; cursor: pointer; }
+.dashboard-live-empty { margin-bottom: 24px; }
 .dashboard-live:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 2px; }
 .dashboard-progress-track { height: 7px; margin-top: 12px; background: var(--surface); border-radius: 999px; overflow: hidden; }
 .dashboard-progress-fill { display: block; height: 100%; background: var(--accent); }

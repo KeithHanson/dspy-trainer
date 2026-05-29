@@ -1364,6 +1364,16 @@ class AppServices:
                          from agent_run_tasks t
                          where t.plan_id = agent_run_plans.id and t.score is not null
                        ) as average_score,
+                       (
+                         select count(*)
+                         from agent_run_tasks t
+                         where t.plan_id = agent_run_plans.id and t.eval_pass is true
+                       ) as eval_pass_count,
+                       (
+                         select count(*)
+                         from agent_run_tasks t
+                         where t.plan_id = agent_run_plans.id and t.eval_pass is false
+                       ) as eval_fail_count,
                        total_tasks, completed_tasks, failed_tasks, failure_reason,
                        created_at, updated_at
                 from agent_run_plans
@@ -1390,6 +1400,8 @@ class AppServices:
                 "max_workers": row["max_workers"],
                 "running_tasks": int((row["running_tasks"] if "running_tasks" in row else 0) or 0),
                 "average_score": float(row["average_score"]) if row["average_score"] is not None else None,
+                "eval_pass_count": int(row["eval_pass_count"] or 0),
+                "eval_fail_count": int(row["eval_fail_count"] or 0),
                 "total_tasks": row["total_tasks"],
                 "completed_tasks": row["completed_tasks"],
                 "failed_tasks": row["failed_tasks"],
@@ -1662,9 +1674,7 @@ class AppServices:
 
             if parent_run_id and experiment_id and tracking_uri:
                 try:
-                    from app.executor.eval import _cleanup_duplicate_judge_assessments
                     from app.executor.eval import _list_parent_run_traces
-                    from app.executor.eval import _log_trace_feedback
                     from app.executor.eval import _match_trace_id_for_item
 
                     parent_traces = _list_parent_run_traces(
@@ -1675,23 +1685,11 @@ class AppServices:
                     used_trace_ids: set[str] = set()
                     if trace_ids_before:
                         used_trace_ids = {str(tid) for tid in trace_ids_before}
-                    trace_id = _match_trace_id_for_item(
+                    _match_trace_id_for_item(
                         item_input=self._json_dict(task["input_payload"]),
                         traces=parent_traces,
                         used=used_trace_ids,
                     )
-                    if trace_id:
-                        _log_trace_feedback(
-                            tracking_uri=tracking_uri,
-                            trace_id=trace_id,
-                            parent_run_id=parent_run_id,
-                            score=score,
-                        )
-                        _cleanup_duplicate_judge_assessments(
-                            tracking_uri=tracking_uri,
-                            trace_id=trace_id,
-                            parent_run_id=parent_run_id,
-                        )
                 except Exception:
                     pass
 

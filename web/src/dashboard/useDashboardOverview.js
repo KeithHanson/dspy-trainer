@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { createDashboardDataAdapter } from "./data/dashboardDataAdapter";
-import { mockDashboardProvider } from "./data/mockDashboardProvider";
+import { createLiveDashboardProvider } from "./data/liveDashboardProvider";
 
-const defaultAdapter = createDashboardDataAdapter(mockDashboardProvider);
+const defaultAdapter = createDashboardDataAdapter(
+  createLiveDashboardProvider(import.meta.env.VITE_API_BASE_URL || "http://localhost:8000"),
+);
 
 export function useDashboardOverview(adapter = defaultAdapter) {
   const stableAdapter = useMemo(() => adapter, [adapter]);

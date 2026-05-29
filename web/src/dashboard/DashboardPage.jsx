@@ -7,7 +7,7 @@ import { useDashboardOverview } from "./useDashboardOverview";
 
 function statusLabel(status) {
   if (status === "running") return "Running";
-  if (status === "complete") return "Complete";
+  if (status === "succeeded" || status === "complete") return "Complete";
   if (status === "failed") return "Failed";
   return "Queued";
 }
@@ -29,7 +29,7 @@ export function DashboardPage({ adapter, onOpenRun, user }) {
       onOpenRun(runId);
       return;
     }
-    navigate(`/runs/${runId}`);
+    navigate(`/runs?plan=${encodeURIComponent(runId)}`);
   };
 
   const greetingName = user?.name?.split(" ")[0] || data.greetingName;
@@ -84,7 +84,7 @@ export function DashboardPage({ adapter, onOpenRun, user }) {
             </div>
           </div>
         ) : (
-          <div className="panel dashboard-zero" role="status">No live eval job running.</div>
+          <div className="panel dashboard-zero dashboard-live-empty" role="status">No live eval job running.</div>
         )}
 
         <section className="dashboard-kpis">
