@@ -66,10 +66,12 @@ def run_bundle_eval(bundle_path: str, eval_inputs: list[dict[str, Any]], num_thr
     raw_metric_fn = metric_mod.judge_metric
 
     metric_call_index = [0]
+    judge_results: list[dict[str, Any]] = []
 
     def metric_fn(example: Any, prediction: Any) -> float:
         item_index = metric_call_index[0]
         normalized = _normalize_judge_result(raw_metric_fn(example, prediction), item_index)
+        judge_results.append(normalized)
         metric_call_index[0] = item_index + 1
         return normalized["score"]
 
@@ -95,7 +97,7 @@ def run_bundle_eval(bundle_path: str, eval_inputs: list[dict[str, Any]], num_thr
 
     normalized = []
     for idx, (example, prediction, score) in enumerate(result.results):
-        judge_result = _normalize_judge_result(raw_metric_fn(example, prediction), idx)
+        judge_result = judge_results[idx] if idx < len(judge_results) else _normalize_judge_result(raw_metric_fn(example, prediction), idx)
         normalized.append(
             {
                 "item_index": idx,

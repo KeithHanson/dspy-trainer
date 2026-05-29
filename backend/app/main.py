@@ -45,6 +45,7 @@ app.add_middleware(
 
 SAMPLE_BUNDLE_FILES: dict[str, str] = {
     "example-bundle/module.py": """import dspy
+import os
 
 
 class TicketSignature(dspy.Signature):
@@ -68,11 +69,44 @@ class TriageAgent(dspy.Module):
 
 def build_program():
     return TriageAgent()
+
+
+def build_lm() -> dspy.LM:
+    litellm_base_url = os.getenv("DSPY_TRAINER_LITELLM_BASE_URL", "http://litellm-proxy:4000")
+    litellm_api_key = os.getenv("DSPY_TRAINER_LITELLM_API_KEY", "")
+    model_name = os.getenv("DSPY_TRAINER_LITELLM_MODEL", "codex-5.3")
+
+    if not litellm_api_key:
+        raise RuntimeError("DSPY_TRAINER_LITELLM_API_KEY is required for example bundle execution")
+
+    return dspy.LM(
+        model=model_name,
+        api_base=litellm_base_url,
+        api_key=litellm_api_key,
+        model_type="responses",
+    )
 """,
     "example-bundle/metric.py": """JUDGE_INSTRUCTIONS = '''
-Return a score from 0.0-1.0 based on whether category, priority,
-and reply quality match expectations.
+Use an LLM judge to score output quality from 0.0-1.0.
+Output score, concise rationale, and any failure flags.
 '''
+
+import dspy
+
+
+class JudgeSignature(dspy.Signature):
+    \"\"\"Evaluate agent output against label expectations.\"\"\"
+
+    question = dspy.InputField()
+    expected_category = dspy.InputField()
+    expected_priority = dspy.InputField()
+    predicted_category = dspy.InputField()
+    predicted_priority = dspy.InputField()
+    predicted_reply = dspy.InputField()
+
+    score = dspy.OutputField(desc="Float 0.0 to 1.0")
+    rationale = dspy.OutputField(desc="One short sentence")
+    flags_csv = dspy.OutputField(desc="Comma-separated failure flags, or none")
 
 
 def judge_metric(example, prediction, trace=None):
@@ -87,20 +121,40 @@ def judge_metric(example, prediction, trace=None):
     priority = str(getattr(prediction, "priority", "")).strip().lower()
     reply = str(getattr(prediction, "reply", "")).strip()
 
-    checks = {
-        "category_match": category == expected_category,
-        "priority_match": priority == expected_priority,
-        "has_reply": bool(reply),
-    }
-    score = sum(1 for ok in checks.values() if ok) / float(len(checks))
-    failed_flags = [name for name, ok in checks.items() if not ok]
+    question = str(getattr(example, "ticket", ""))
+    judge = dspy.Predict(JudgeSignature)
+    verdict = judge(
+        question=question,
+        expected_category=expected_category,
+        expected_priority=expected_priority,
+        predicted_category=category,
+        predicted_priority=priority,
+        predicted_reply=reply,
+    )
+
+    try:
+        score = float(str(getattr(verdict, "score", "0")).strip())
+    except ValueError:
+        score = 0.0
+    score = min(1.0, max(0.0, score))
+
+    flags_raw = str(getattr(verdict, "flags_csv", "")).strip()
+    failed_flags = []
+    if flags_raw and flags_raw.lower() not in {"none", "n/a", "na"}:
+        failed_flags = [item.strip() for item in flags_raw.split(",") if item.strip()]
+
+    rationale = str(getattr(verdict, "rationale", "")).strip() or "No rationale provided"
 
     return {
         "score": score,
-        "rationale": "All checks passed" if not failed_flags else f"Failed checks: {', '.join(failed_flags)}",
+        "rationale": rationale,
         "flags": failed_flags,
         "raw_response": {
-            "checks": checks,
+            "expected_category": expected_category,
+            "expected_priority": expected_priority,
+            "predicted_category": category,
+            "predicted_priority": priority,
+            "predicted_reply": reply,
         },
     }
 """,
