@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import tomllib
 from types import ModuleType
 from typing import Any
 
@@ -53,6 +54,17 @@ def _normalize_judge_result(raw_result: Any, item_index: int) -> dict[str, Any]:
 
 def run_bundle_eval(bundle_path: str, eval_inputs: list[dict[str, Any]], num_threads: int = 1) -> dict[str, Any]:
     root = Path(bundle_path).expanduser().resolve()
+    pass_threshold = 0.5
+    toml_path = root / "bundle.toml"
+    if toml_path.exists():
+        try:
+            payload = tomllib.loads(toml_path.read_text(encoding="utf-8"))
+            threshold_value = payload.get("score_pass_threshold")
+            if isinstance(threshold_value, (int, float)) and not isinstance(threshold_value, bool):
+                pass_threshold = min(1.0, max(0.0, float(threshold_value)))
+        except Exception:
+            pass
+
     module_mod = _load_module("user_module", root / "module.py")
     metric_mod = _load_module("user_metric", root / "metric.py")
 
@@ -97,11 +109,18 @@ def run_bundle_eval(bundle_path: str, eval_inputs: list[dict[str, Any]], num_thr
 
     normalized = []
     for idx, (example, prediction, score) in enumerate(result.results):
-        judge_result = judge_results[idx] if idx < len(judge_results) else _normalize_judge_result(raw_metric_fn(example, prediction), idx)
+        if idx < len(judge_results):
+            judge_result = judge_results[idx]
+        elif lm is not None:
+            with dspy.context(lm=lm):
+                judge_result = _normalize_judge_result(raw_metric_fn(example, prediction), idx)
+        else:
+            judge_result = _normalize_judge_result(raw_metric_fn(example, prediction), idx)
         normalized.append(
             {
                 "item_index": idx,
                 "score": judge_result["score"],
+                "passed": bool(judge_result["score"] >= pass_threshold),
                 "input": example.inputs().toDict(),
                 "label": example.labels().toDict(),
                 "prediction": prediction.toDict() if hasattr(prediction, "toDict") else {"value": str(prediction)},
@@ -114,5 +133,6 @@ def run_bundle_eval(bundle_path: str, eval_inputs: list[dict[str, Any]], num_thr
     return {
         "score_pct": result.score,
         "items": normalized,
+        "score_pass_threshold": pass_threshold,
         "judge_instructions": getattr(metric_mod, "JUDGE_INSTRUCTIONS", ""),
     }

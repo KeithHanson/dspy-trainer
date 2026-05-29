@@ -27,7 +27,7 @@ class SimpleAgent(dspy.Module):
 def build_lm() -> dspy.LM:
     litellm_base_url = os.getenv("DSPY_TRAINER_LITELLM_BASE_URL", "http://litellm-proxy:4000")
     litellm_api_key = os.getenv("DSPY_TRAINER_LITELLM_API_KEY", "")
-    model_name = os.getenv("DSPY_TRAINER_LITELLM_MODEL", "codex-5.3")
+    model_name = os.getenv("DSPY_TRAINER_LITELLM_MODEL", "openai/codex-5.3")
 
     if not litellm_api_key:
         raise RuntimeError("DSPY_TRAINER_LITELLM_API_KEY is required for example bundle execution")

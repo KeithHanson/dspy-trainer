@@ -58,6 +58,14 @@ class TicketSignature(dspy.Signature):
     reply = dspy.OutputField(desc=\"Suggested customer response\")
 
 
+class ParseIssueSignature(dspy.Signature):
+    \"\"\"Parse a user issue into triage fields.\"\"\"
+
+    question = dspy.InputField(desc=\"Raw user issue\")
+    ticket = dspy.OutputField(desc=\"Normalized ticket summary\")
+    history = dspy.OutputField(desc=\"Prior context if present, else empty\")
+
+
 class TriageAgent(dspy.Module):
     def __init__(self):
         super().__init__()
@@ -67,14 +75,32 @@ class TriageAgent(dspy.Module):
         return self.respond(ticket=ticket, history=history)
 
 
+class SingleInputTriageAgent(dspy.Module):
+    def __init__(self):
+        super().__init__()
+        self.parse_issue = dspy.ChainOfThought(ParseIssueSignature)
+        self.agent = TriageAgent()
+
+    def forward(self, question: str):
+        parsed = self.parse_issue(question=question)
+        ticket = str(getattr(parsed, \"ticket\", \"\")).strip()
+        history = str(getattr(parsed, \"history\", \"\")).strip()
+        prediction = self.agent(ticket=ticket, history=history)
+        return dspy.Prediction(
+            category=getattr(prediction, "category", ""),
+            priority=getattr(prediction, "priority", ""),
+            reply=getattr(prediction, "reply", ""),
+        )
+
+
 def build_program():
-    return TriageAgent()
+    return SingleInputTriageAgent()
 
 
 def build_lm() -> dspy.LM:
     litellm_base_url = os.getenv("DSPY_TRAINER_LITELLM_BASE_URL", "http://litellm-proxy:4000")
     litellm_api_key = os.getenv("DSPY_TRAINER_LITELLM_API_KEY", "")
-    model_name = os.getenv("DSPY_TRAINER_LITELLM_MODEL", "codex-5.3")
+    model_name = os.getenv("DSPY_TRAINER_LITELLM_MODEL", "openai/codex-5.3")
 
     if not litellm_api_key:
         raise RuntimeError("DSPY_TRAINER_LITELLM_API_KEY is required for example bundle execution")
@@ -98,8 +124,7 @@ class JudgeSignature(dspy.Signature):
     \"\"\"Evaluate agent output against label expectations.\"\"\"
 
     question = dspy.InputField()
-    expected_category = dspy.InputField()
-    expected_priority = dspy.InputField()
+    expected_answer = dspy.InputField()
     predicted_category = dspy.InputField()
     predicted_priority = dspy.InputField()
     predicted_reply = dspy.InputField()
@@ -114,19 +139,17 @@ def judge_metric(example, prediction, trace=None):
     if not isinstance(expected, dict):
         expected = {}
 
-    expected_category = str(expected.get("expected_category", "")).strip().lower()
-    expected_priority = str(expected.get("expected_priority", "")).strip().lower()
+    expected_answer = str(expected.get("expected", "")).strip()
 
     category = str(getattr(prediction, "category", "")).strip().lower()
     priority = str(getattr(prediction, "priority", "")).strip().lower()
     reply = str(getattr(prediction, "reply", "")).strip()
 
-    question = str(getattr(example, "ticket", ""))
+    question = str(getattr(example, "question", ""))
     judge = dspy.Predict(JudgeSignature)
     verdict = judge(
         question=question,
-        expected_category=expected_category,
-        expected_priority=expected_priority,
+        expected_answer=expected_answer,
         predicted_category=category,
         predicted_priority=priority,
         predicted_reply=reply,
@@ -150,8 +173,7 @@ def judge_metric(example, prediction, trace=None):
         "rationale": rationale,
         "flags": failed_flags,
         "raw_response": {
-            "expected_category": expected_category,
-            "expected_priority": expected_priority,
+            "expected_answer": expected_answer,
             "predicted_category": category,
             "predicted_priority": priority,
             "predicted_reply": reply,
@@ -161,6 +183,7 @@ def judge_metric(example, prediction, trace=None):
     "example-bundle/bundle.toml": """name = \"support-triage-agent\"
 version = \"0.1.0\"
 lm_target = \"gpt-4.1-mini\"
+score_pass_threshold = 0.8
 dspy_version = \">=2.5,<3.0\"
 """,
     "example-bundle/README.md": """# Example DSPy Bundle

@@ -12,12 +12,12 @@ const DATASET_VERSION = "v1";
 
 const SAMPLE_ROWS = [
   {
-    input: "A customer says: 'I was charged twice for order #8842.'",
-    expected: "Acknowledge duplicate charge concern and ask for transaction details.",
+    input: "Ticket: I was charged twice for order #8842.\nHistory: Customer already contacted support yesterday and shared the order receipt.",
+    expected: "Category=billing_dispute; Priority=high; Reply acknowledges duplicate charge concern, confirms review, and requests transaction ID + charge timestamps.",
   },
   {
-    input: "Classify this request as urgent or non-urgent: 'My account is locked and payroll runs in 30 min.'",
-    expected: "urgent",
+    input: "Ticket: My account is locked and payroll runs in 30 minutes.\nHistory: First contact, no troubleshooting steps completed yet.",
+    expected: "Category=account_access; Priority=high; Reply gives immediate unlock steps and offers escalation path.",
   },
 ];
 

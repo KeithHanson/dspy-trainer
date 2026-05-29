@@ -116,7 +116,7 @@ def test_module_import_and_status_flow(monkeypatch):
                 encoding="utf-8",
             )
             (bundle_dir / "bundle.toml").write_text(
-                "name='test-bundle'\nversion='0.1.0'\nlm_target='gpt-4.1-mini'\n",
+                "name='test-bundle'\nversion='0.1.0'\nlm_target='gpt-4.1-mini'\nscore_pass_threshold=0.8\n",
                 encoding="utf-8",
             )
 
@@ -242,7 +242,7 @@ def test_module_validate_upload_zip(monkeypatch):
                 )
                 archive.writestr(
                     "example-bundle/bundle.toml",
-                    "name='zip-bundle'\nversion='0.1.0'\nlm_target='gpt-4.1-mini'\n",
+                    "name='zip-bundle'\nversion='0.1.0'\nlm_target='gpt-4.1-mini'\nscore_pass_threshold=0.8\n",
                 )
 
             with zip_path.open("rb") as handle:

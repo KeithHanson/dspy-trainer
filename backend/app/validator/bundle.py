@@ -141,10 +141,31 @@ def _validate_bundle_toml(toml_file: Path, diagnostics: list[dict[str, Any]]) ->
         value = payload.get(key)
         if not isinstance(value, str) or not value.strip():
             diagnostics.append(_diag("error", f"bundle_toml_{key}_missing", f"bundle.toml must define a non-empty '{key}' string", TOML_FILE))
+    score_pass_threshold = payload.get("score_pass_threshold")
+    if isinstance(score_pass_threshold, bool) or not isinstance(score_pass_threshold, (int, float)):
+        diagnostics.append(
+            _diag(
+                "error",
+                "bundle_toml_score_pass_threshold_invalid",
+                "bundle.toml must define numeric 'score_pass_threshold' between 0.0 and 1.0",
+                TOML_FILE,
+            )
+        )
+    elif float(score_pass_threshold) < 0.0 or float(score_pass_threshold) > 1.0:
+        diagnostics.append(
+            _diag(
+                "error",
+                "bundle_toml_score_pass_threshold_invalid",
+                "bundle.toml 'score_pass_threshold' must be between 0.0 and 1.0",
+                TOML_FILE,
+            )
+        )
+
     return {
         "name": payload.get("name"),
         "version": payload.get("version"),
         "lm_target": payload.get("lm_target"),
+        "score_pass_threshold": float(score_pass_threshold) if isinstance(score_pass_threshold, (int, float)) and not isinstance(score_pass_threshold, bool) else None,
     }
 
 

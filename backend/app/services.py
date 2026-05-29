@@ -301,6 +301,7 @@ class AppServices:
                   label_payload jsonb not null,
                   prediction_payload jsonb,
                   score double precision,
+                  eval_pass boolean,
                   rationale text,
                   error text,
                   worker_log text,
@@ -311,6 +312,7 @@ class AppServices:
                 """
             )
             await conn.execute("alter table agent_run_tasks add column if not exists worker_log text;")
+            await conn.execute("alter table agent_run_tasks add column if not exists eval_pass boolean;")
 
     async def create_module_import(self, source: str, source_ref: str | None, version_hash: str | None) -> dict[str, Any]:
         if self.postgres_pool is None:
@@ -1475,7 +1477,7 @@ class AppServices:
                 """
                 select id, plan_id, status, question_index, attempt_index,
                        input_payload, label_payload, prediction_payload,
-                       score, rationale, error, worker_log, worker_id, created_at, updated_at
+                       score, eval_pass, rationale, error, worker_log, worker_id, created_at, updated_at
                 from agent_run_tasks
                 where plan_id = $1
                 order by question_index asc, attempt_index asc, created_at asc
@@ -1498,6 +1500,7 @@ class AppServices:
                     "label_payload": self._json_dict(row["label_payload"]),
                     "prediction_payload": self._json_dict(row["prediction_payload"]) if row["prediction_payload"] is not None else None,
                     "score": row["score"],
+                    "eval_pass": row["eval_pass"],
                     "rationale": row["rationale"],
                     "error": row["error"],
                     "worker_log": row["worker_log"],
@@ -1572,12 +1575,13 @@ class AppServices:
                 await conn.execute(
                     """
                     update agent_run_tasks
-                    set status='succeeded', prediction_payload=$2::jsonb, score=$3, rationale=$4, error=null, worker_log=$5, updated_at=$6
+                    set status='succeeded', prediction_payload=$2::jsonb, score=$3, eval_pass=$4, rationale=$5, error=null, worker_log=$6, updated_at=$7
                     where id=$1
                     """,
                     task_id,
                     __import__("json").dumps(item["prediction"]),
                     float(item["score"]),
+                    bool(item.get("passed", False)),
                     str(item["rationale"]),
                     "\n".join(log_lines),
                     datetime.now(timezone.utc),

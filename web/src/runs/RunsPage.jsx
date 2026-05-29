@@ -182,8 +182,17 @@ export function RunsPage() {
                 <StatusPill status={runPlan.status} />
               </div>
               <div className="runs-kpis">
+                <Kpi
+                  label="Pass/Fail"
+                  value={(
+                    <span className="mono runs-passfail-value">
+                      <span className="runs-passfail-pass">{counts.evalPass}</span>
+                      <span className="runs-passfail-sep">/</span>
+                      <span className="runs-passfail-fail">{counts.evalFail}</span>
+                    </span>
+                  )}
+                />
                 <Kpi label="Successful Runs" value={`${counts.succeeded}/${totalRuns}`} tone="pass" />
-                <Kpi label="Completed" value={counts.done} />
                 <Kpi label="Errors" value={`${counts.failed}/${totalRuns}`} tone="fail" />
                 <Kpi label="Running" value={counts.running} tone="run" />
               </div>
@@ -207,14 +216,15 @@ export function RunsPage() {
             <section className="panel" style={{ overflow: "hidden" }}>
               <table className="dashboard-table">
                 <thead>
-                  <tr>
-                    <th style={{ width: 36 }}></th>
-                    <th>Question</th>
-                    <th>Attempt</th>
-                    <th>Status</th>
-                    <th>Score</th>
-                    <th>Worker</th>
-                  </tr>
+                    <tr>
+                      <th style={{ width: 36 }}></th>
+                      <th>Question</th>
+                      <th>Attempt</th>
+                      <th>Status</th>
+                      <th>Eval</th>
+                      <th>Score</th>
+                      <th>Worker</th>
+                    </tr>
                 </thead>
                 <tbody>
                   {filteredTasks.map((task) => (
@@ -223,6 +233,7 @@ export function RunsPage() {
                       <td className="mono">Q{task.question_index + 1}</td>
                       <td className="mono">{task.attempt_index + 1}</td>
                       <td><StatusPill status={task.status} /></td>
+                      <td className="mono">{task.status === "succeeded" ? (task.eval_pass ? "pass" : "fail") : "-"}</td>
                       <td className="mono">{task.score ?? "-"}</td>
                       <td className="mono">{task.worker_id || "-"}</td>
                     </tr>
@@ -243,10 +254,34 @@ export function RunsPage() {
                 <Button size="sm" variant="ghost" onClick={() => setSelectedTask(null)}>Close</Button>
               </div>
               <div className="col gap-2">
-                <div className="row between"><span className="cap">Status</span><StatusPill status={selectedTask.status} /></div>
-                <div className="row between"><span className="cap">Score</span><span className="mono">{selectedTask.score ?? "-"}</span></div>
-                <div className="row between"><span className="cap">Worker</span><span className="mono">{selectedTask.worker_id || "-"}</span></div>
-                <div className="row between"><span className="cap">Error</span><span className="mono">{selectedTask.error || "-"}</span></div>
+                <section className="runs-drawer-summary">
+                  <div className="runs-drawer-summary-grid">
+                    <div className="runs-drawer-stat">
+                      <span className="runs-drawer-stat-label">Status</span>
+                      <span><StatusPill status={selectedTask.status} /></span>
+                    </div>
+                    <div className="runs-drawer-stat">
+                      <span className="runs-drawer-stat-label">Score</span>
+                      <span className="runs-drawer-stat-value mono">{selectedTask.score ?? "-"}</span>
+                    </div>
+                    <div className="runs-drawer-stat">
+                      <span className="runs-drawer-stat-label">Eval</span>
+                      <span className="runs-drawer-stat-value mono">{selectedTask.status === "succeeded" ? (selectedTask.eval_pass ? "pass" : "fail") : "-"}</span>
+                    </div>
+                    <div className="runs-drawer-stat">
+                      <span className="runs-drawer-stat-label">Worker</span>
+                      <span className="runs-drawer-stat-value mono">{selectedTask.worker_id || "-"}</span>
+                    </div>
+                    <div className="runs-drawer-stat">
+                      <span className="runs-drawer-stat-label">Error</span>
+                      <span className="runs-drawer-stat-value mono">{selectedTask.error || "-"}</span>
+                    </div>
+                  </div>
+                  <div className="runs-drawer-rationale">
+                    <div className="runs-drawer-stat-label">Rationale</div>
+                    <p className="runs-drawer-rationale-copy">{selectedTask.rationale || "-"}</p>
+                  </div>
+                </section>
                 <hr className="hr" />
                 <div>
                   <div className="row between" style={{ marginBottom: 6 }}>
@@ -308,11 +343,15 @@ function taskCounts(tasks) {
   const failed = tasks.filter((task) => task.status === "failed").length;
   const running = tasks.filter((task) => task.status === "running").length;
   const queued = tasks.filter((task) => task.status === "queued" || task.status === "pending").length;
+  const evalPass = tasks.filter((task) => task.status === "succeeded" && task.eval_pass === true).length;
+  const evalFail = tasks.filter((task) => task.status === "succeeded" && task.eval_pass === false).length;
   return {
     succeeded,
     failed,
     running,
     queued,
+    evalPass,
+    evalFail,
     done: succeeded + failed,
   };
 }

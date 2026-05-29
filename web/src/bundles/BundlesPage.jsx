@@ -37,20 +37,29 @@ def build_program():
     id: "metric_file",
     label: "metric.py exists",
     failCodes: ["metric_missing"],
-    help: "Add a metric.py file at the bundle root with JUDGE_INSTRUCTIONS and judge_metric(example, prediction, trace=None).",
+    help: "Add a metric.py file at the bundle root with JUDGE_INSTRUCTIONS and judge_metric(example, prediction, trace=None). judge_metric must return a dict with score/rationale/flags/raw_response.",
     snippet: `JUDGE_INSTRUCTIONS = """
-Pass when category and priority match expected values and the reply is helpful.
+Use an LLM judge to score output quality from 0.0 to 1.0.
 """
 
 def judge_metric(example, prediction, trace=None):
-    expected_category = str(example.get("expected_category", "")).strip().lower()
-    expected_priority = str(example.get("expected_priority", "")).strip().lower()
+    expected_answer = str(example.label.get("expected", "")).strip()
 
     category = str(getattr(prediction, "category", "")).strip().lower()
     priority = str(getattr(prediction, "priority", "")).strip().lower()
     reply = str(getattr(prediction, "reply", "")).strip()
 
-    return bool(reply) and category == expected_category and priority == expected_priority
+    score = 1.0 if reply else 0.0
+    return {
+        "score": score,
+        "rationale": "has_reply" if reply else "missing_reply",
+        "flags": [] if reply else ["missing_reply"],
+        "raw_response": {
+            "expected_answer": expected_answer,
+            "category": category,
+            "priority": priority,
+        },
+    }
 `,
   },
   {
@@ -61,6 +70,7 @@ def judge_metric(example, prediction, trace=None):
     snippet: `name = "support-triage-agent"
 version = "0.1.0"
 lm_target = "gpt-4.1-mini"
+score_pass_threshold = 0.8
 `,
   },
   {
@@ -114,16 +124,24 @@ Fail when output is unsafe, missing, or mismatched.
     id: "judge_metric",
     label: "judge_metric(example, prediction) exists",
     failCodes: ["judge_metric_missing", "judge_metric_signature_invalid"],
-    help: "Define judge_metric(example, prediction, trace=None) in metric.py and return a boolean indicating pass/fail.",
+    help: "Define judge_metric(example, prediction, trace=None) in metric.py and return a dict with keys: score, rationale, flags, raw_response.",
     snippet: `def judge_metric(example, prediction, trace=None):
-    expected_category = str(example.get("expected_category", "")).strip().lower()
-    expected_priority = str(example.get("expected_priority", "")).strip().lower()
+    expected_answer = str(example.label.get("expected", "")).strip()
 
     category = str(getattr(prediction, "category", "")).strip().lower()
     priority = str(getattr(prediction, "priority", "")).strip().lower()
     reply = str(getattr(prediction, "reply", "")).strip()
 
-    return bool(reply) and category == expected_category and priority == expected_priority
+    return {
+        "score": 1.0 if reply else 0.0,
+        "rationale": "has_reply" if reply else "missing_reply",
+        "flags": [] if reply else ["missing_reply"],
+        "raw_response": {
+            "expected_answer": expected_answer,
+            "category": category,
+            "priority": priority,
+        },
+    }
 `,
   },
   {
@@ -140,11 +158,12 @@ python -m py_compile module.py metric.py
   {
     id: "bundle_toml_fields",
     label: "bundle.toml has required fields",
-    failCodes: ["bundle_toml_invalid", "bundle_toml_name_missing", "bundle_toml_version_missing", "bundle_toml_lm_target_missing"],
-    help: "bundle.toml must be valid TOML and include non-empty name, version, and lm_target string values.",
+    failCodes: ["bundle_toml_invalid", "bundle_toml_name_missing", "bundle_toml_version_missing", "bundle_toml_lm_target_missing", "bundle_toml_score_pass_threshold_invalid"],
+    help: "bundle.toml must be valid TOML and include non-empty name/version/lm_target plus numeric score_pass_threshold between 0.0 and 1.0.",
     snippet: `name = "support-triage-agent"
 version = "0.1.0"
 lm_target = "gpt-4.1-mini"
+score_pass_threshold = 0.8
 `,
   },
 ];
@@ -160,7 +179,7 @@ const PREP_STEPS = [
   "Copy the sample folder and rename it for your module.",
   "Update module.py with your DSPy signature and module class.",
   "Update metric.py with your evaluation contract.",
-  "Set bundle.toml name/version/lm_target values.",
+  "Set bundle.toml name/version/lm_target and score_pass_threshold.",
   "Zip the folder root, then upload for validation.",
 ];
 
