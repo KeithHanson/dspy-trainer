@@ -73,6 +73,15 @@ function PlansList({ onCreate, onEdit, onRunNavigate, showSavedNotice }) {
       if (!plan.module_import_id) {
         throw new Error("This plan has no saved module bundle. Edit the plan and select a bundle before running.");
       }
+      const moduleResp = await fetch(`${(import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, "")}/modules/${plan.module_import_id}`, { method: "GET" });
+      if (!moduleResp.ok) {
+        throw new Error("Could not load the module bundle for this plan. Re-open the plan and reselect a bundle, then retry.");
+      }
+      const modulePayload = await moduleResp.json();
+      const bundlePath = modulePayload?.source_ref;
+      if (!bundlePath || typeof bundlePath !== "string") {
+        throw new Error("This plan's module bundle has no runnable source path. Re-upload the bundle and update the plan.");
+      }
       const createRunResp = await fetch(`${(import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, "")}/agent-run-plans`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -81,7 +90,7 @@ function PlansList({ onCreate, onEdit, onRunNavigate, showSavedNotice }) {
           module_import_id: plan.module_import_id,
           scenario_id: plan.scenario_id || SCENARIO_ID,
           dataset_version: plan.dataset_version || DATASET_VERSION,
-          bundle_path: "saved-bundle",
+          bundle_path: bundlePath,
           eval_inputs: [],
           evaluation_plan_id: plan.id,
           runs_per_question: plan.runs_per_question || 1,

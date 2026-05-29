@@ -16,6 +16,11 @@ References:
 - `worker` (no host port)
 - `web` (`3000`)
 
+Named volumes:
+- `postgres_data` for PostgreSQL data
+- `mlflow_artifacts` for MLflow artifacts
+- `bundles_data` shared between `backend` and `worker` at `/tmp/dspy-trainer/bundles` for uploaded module bundles
+
 ## Developer Bootstrap
 
 Run from repository root:

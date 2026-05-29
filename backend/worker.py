@@ -1,6 +1,8 @@
 import asyncio
 import json
 import logging
+import os
+import socket
 
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
@@ -12,7 +14,20 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [worke
 logger = logging.getLogger(__name__)
 
 
-async def process_job(services: AppServices, raw_payload: str) -> None:
+async def _heartbeat(services: AppServices, worker_id: str, status: str, task_id: str | None = None) -> None:
+    if services.redis is None:
+        return
+    key = f"{services.settings.worker_registry_prefix}:{worker_id}"
+    payload = {
+        "worker_id": worker_id,
+        "status": status,
+        "task_id": task_id,
+        "last_seen": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+    }
+    await services.redis.set(key, json.dumps(payload), ex=15)
+
+
+async def process_job(services: AppServices, raw_payload: str, worker_id: str) -> None:
     try:
         payload = json.loads(raw_payload)
     except json.JSONDecodeError:
@@ -24,25 +39,31 @@ async def process_job(services: AppServices, raw_payload: str) -> None:
         if not task_id:
             logger.error("Missing task_id in agent_run_task payload")
             return
-        result = await services.run_agent_run_task(str(task_id), worker_id="worker")
+        await _heartbeat(services, worker_id, "running", str(task_id))
+        result = await services.run_agent_run_task(str(task_id), worker_id=worker_id)
+        await _heartbeat(services, worker_id, "listening")
         logger.info("Processed agent run task: %s", result)
 
 
 async def run_worker() -> None:
     settings = get_settings()
     services = AppServices(settings)
+    worker_id = os.getenv("DSPY_TRAINER_WORKER_ID", f"{socket.gethostname()}-{os.getpid()}")
     await services.connect()
     logger.info("Worker started; waiting on queue '%s'", settings.queue_name)
+    logger.info("Worker id: %s", worker_id)
     try:
+        await _heartbeat(services, worker_id, "listening")
         while True:
             try:
+                await _heartbeat(services, worker_id, "listening")
                 result = await services.redis.execute_command("BRPOP", settings.queue_name, 5) if services.redis else None
             except RedisTimeoutError:
                 continue
             if result is None:
                 continue
             _, raw_payload = result
-            await process_job(services, raw_payload)
+            await process_job(services, raw_payload, worker_id)
     finally:
         await services.disconnect()
 

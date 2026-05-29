@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 from io import BytesIO
 import os
 from pathlib import Path
+import shutil
 from tempfile import TemporaryDirectory
 from typing import Any
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -69,24 +70,39 @@ def build_program():
     return TriageAgent()
 """,
     "example-bundle/metric.py": """JUDGE_INSTRUCTIONS = '''
-Return true only when the output classifies category and priority correctly
-and the response is safe and actionable.
+Return a score from 0.0-1.0 based on whether category, priority,
+and reply quality match expectations.
 '''
 
 
 def judge_metric(example, prediction, trace=None):
-    expected_category = str(example.get("expected_category", "")).strip().lower()
-    expected_priority = str(example.get("expected_priority", "")).strip().lower()
+    expected = getattr(example, "label", {}) if hasattr(example, "label") else {}
+    if not isinstance(expected, dict):
+        expected = {}
+
+    expected_category = str(expected.get("expected_category", "")).strip().lower()
+    expected_priority = str(expected.get("expected_priority", "")).strip().lower()
 
     category = str(getattr(prediction, "category", "")).strip().lower()
     priority = str(getattr(prediction, "priority", "")).strip().lower()
     reply = str(getattr(prediction, "reply", "")).strip()
 
-    return (
-        bool(reply)
-        and category == expected_category
-        and priority == expected_priority
-    )
+    checks = {
+        "category_match": category == expected_category,
+        "priority_match": priority == expected_priority,
+        "has_reply": bool(reply),
+    }
+    score = sum(1 for ok in checks.values() if ok) / float(len(checks))
+    failed_flags = [name for name, ok in checks.items() if not ok]
+
+    return {
+        "score": score,
+        "rationale": "All checks passed" if not failed_flags else f"Failed checks: {', '.join(failed_flags)}",
+        "flags": failed_flags,
+        "raw_response": {
+            "checks": checks,
+        },
+    }
 """,
     "example-bundle/bundle.toml": """name = \"support-triage-agent\"
 version = \"0.1.0\"
@@ -105,6 +121,25 @@ Use it as a baseline, update the signature and metric contract for your use case
 then upload the bundle in the web app for validation.
 """,
 }
+
+
+def _resolve_bundle_root(extract_root: Path) -> Path:
+    direct = extract_root / "module.py"
+    if direct.exists():
+        return extract_root
+
+    candidates: list[tuple[int, Path]] = []
+    for module_file in extract_root.rglob("module.py"):
+        parent = module_file.parent
+        if (parent / "metric.py").exists():
+            score = 1 if (parent / "bundle.toml").exists() else 0
+            candidates.append((score, parent))
+
+    if not candidates:
+        return extract_root
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
 
 
 class ModuleImportRequest(BaseModel):
@@ -193,6 +228,12 @@ async def ready(request: Request):
     return JSONResponse(status_code=503, content=payload)
 
 
+@app.get("/workers")
+async def list_workers(request: Request):
+    services: AppServices = request.app.state.services
+    return await services.list_workers()
+
+
 @app.get("/samples/module-bundle")
 async def download_module_bundle_sample():
     bundle = BytesIO()
@@ -269,10 +310,17 @@ async def validate_module_upload(module_id: str, request: Request, bundle: Uploa
                 archive.extractall(temp_dir)
 
             root = Path(temp_dir)
-            dirs = [entry for entry in root.iterdir() if entry.is_dir()]
-            bundle_root = dirs[0] if len(dirs) == 1 else root
+            bundle_root = _resolve_bundle_root(root)
 
             report = validate_bundle(str(bundle_root))
+            if report.passed:
+                bundles_dir = Path("/tmp/dspy-trainer/bundles")
+                bundles_dir.mkdir(parents=True, exist_ok=True)
+                target_dir = bundles_dir / module_id
+                if target_dir.exists():
+                    shutil.rmtree(target_dir)
+                shutil.copytree(bundle_root, target_dir)
+                await services.set_module_source_ref(module_id, str(target_dir))
     except Exception:
         return JSONResponse(status_code=400, content={"error": "invalid zip bundle"})
 
@@ -478,6 +526,12 @@ async def get_agent_run_plan(plan_id: str, request: Request):
     if result is None:
         return JSONResponse(status_code=404, content={"error": "agent run plan not found"})
     return result
+
+
+@app.get("/agent-run-plans")
+async def list_agent_run_plans(request: Request, limit: int = 50, offset: int = 0):
+    services: AppServices = request.app.state.services
+    return await services.list_agent_run_plans(limit=limit, offset=offset)
 
 
 @app.post("/agent-run-plans/{plan_id}/enqueue")

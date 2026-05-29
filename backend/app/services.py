@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import random
+import traceback
 from typing import Any
 from uuid import uuid4
 
@@ -100,6 +101,32 @@ class AppServices:
             litellm=litellm_ok,
         )
 
+    async def list_workers(self) -> list[dict[str, Any]]:
+        if self.redis is None:
+            return []
+        prefix = f"{self.settings.worker_registry_prefix}:"
+        keys = await self.redis.keys(f"{prefix}*")
+        workers: list[dict[str, Any]] = []
+        for key in keys:
+            raw = await self.redis.get(key)
+            if not raw:
+                continue
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            worker_id = payload.get("worker_id") or key.replace(prefix, "", 1)
+            workers.append(
+                {
+                    "worker_id": str(worker_id),
+                    "status": str(payload.get("status") or "unknown"),
+                    "task_id": payload.get("task_id"),
+                    "last_seen": payload.get("last_seen"),
+                }
+            )
+        workers.sort(key=lambda item: item["worker_id"])
+        return workers
+
     async def init_db(self) -> None:
         if self.postgres_pool is None:
             return
@@ -114,6 +141,7 @@ class AppServices:
                   bundle_name text,
                   bundle_version text,
                   status text not null,
+                  deleted_at timestamptz,
                   created_at timestamptz not null,
                   updated_at timestamptz not null
                 );
@@ -121,6 +149,7 @@ class AppServices:
             )
             await conn.execute("alter table module_imports add column if not exists bundle_name text;")
             await conn.execute("alter table module_imports add column if not exists bundle_version text;")
+            await conn.execute("alter table module_imports add column if not exists deleted_at timestamptz;")
             await conn.execute(
                 """
                 create table if not exists runtime_bundles (
@@ -274,12 +303,14 @@ class AppServices:
                   score double precision,
                   rationale text,
                   error text,
+                  worker_log text,
                   worker_id text,
                   created_at timestamptz not null,
                   updated_at timestamptz not null
                 );
                 """
             )
+            await conn.execute("alter table agent_run_tasks add column if not exists worker_log text;")
 
     async def create_module_import(self, source: str, source_ref: str | None, version_hash: str | None) -> dict[str, Any]:
         if self.postgres_pool is None:
@@ -406,6 +437,7 @@ class AppServices:
                        r.validation_status, r.smoke_status, r.diagnostics
                 from module_imports m
                 join runtime_bundles r on r.module_import_id = m.id
+                where m.deleted_at is null
                 order by m.created_at desc
                 """
             )
@@ -437,7 +469,16 @@ class AppServices:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
         async with self.postgres_pool.acquire() as conn:
-            result = await conn.execute("delete from module_imports where id = $1", module_id)
+            result = await conn.execute(
+                """
+                update module_imports
+                set deleted_at = now(),
+                    updated_at = now(),
+                    status = 'deleted'
+                where id = $1 and deleted_at is null
+                """,
+                module_id,
+            )
         return result.endswith("1")
 
     async def set_module_bundle_metadata(self, module_id: str, bundle_name: str | None, bundle_version: str | None) -> None:
@@ -455,6 +496,21 @@ class AppServices:
                 module_id,
                 bundle_name,
                 bundle_version,
+            )
+
+    async def set_module_source_ref(self, module_id: str, source_ref: str) -> None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            await conn.execute(
+                """
+                update module_imports
+                set source_ref = $2,
+                    updated_at = now()
+                where id = $1
+                """,
+                module_id,
+                source_ref,
             )
 
     async def create_eval_job(
@@ -1248,6 +1304,7 @@ class AppServices:
                 """
                 select id, status, project_id, module_import_id, scenario_id, dataset_version,
                        bundle_path, eval_inputs, runs_per_question, max_workers,
+                       (select count(*) from agent_run_tasks t where t.plan_id = agent_run_plans.id and t.status = 'running') as running_tasks,
                        total_tasks, completed_tasks, failed_tasks, failure_reason,
                        created_at, updated_at
                 from agent_run_plans
@@ -1276,6 +1333,54 @@ class AppServices:
             "created_at": row["created_at"].isoformat(),
             "updated_at": row["updated_at"].isoformat(),
         }
+
+    async def list_agent_run_plans(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        safe_limit = max(1, min(int(limit), 500))
+        safe_offset = max(0, int(offset))
+        async with self.postgres_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                select id, status, project_id, module_import_id, scenario_id, dataset_version,
+                       bundle_path, eval_inputs, runs_per_question, max_workers,
+                       (
+                         select avg(t.score)
+                         from agent_run_tasks t
+                         where t.plan_id = agent_run_plans.id and t.score is not null
+                       ) as average_score,
+                       total_tasks, completed_tasks, failed_tasks, failure_reason,
+                       created_at, updated_at
+                from agent_run_plans
+                order by created_at desc
+                limit $1 offset $2
+                """,
+                safe_limit,
+                safe_offset,
+            )
+        return [
+            {
+                "id": row["id"],
+                "status": row["status"],
+                "project_id": row["project_id"],
+                "module_import_id": row["module_import_id"],
+                "scenario_id": row["scenario_id"],
+                "dataset_version": row["dataset_version"],
+                "bundle_path": row["bundle_path"],
+                "eval_inputs": self._json_list(row["eval_inputs"]),
+                "runs_per_question": row["runs_per_question"],
+                "max_workers": row["max_workers"],
+                "running_tasks": int((row["running_tasks"] if "running_tasks" in row else 0) or 0),
+                "average_score": float(row["average_score"]) if row["average_score"] is not None else None,
+                "total_tasks": row["total_tasks"],
+                "completed_tasks": row["completed_tasks"],
+                "failed_tasks": row["failed_tasks"],
+                "failure_reason": row["failure_reason"],
+                "created_at": row["created_at"].isoformat(),
+                "updated_at": row["updated_at"].isoformat(),
+            }
+            for row in rows
+        ]
 
     async def enqueue_agent_run_plan(self, plan_id: str) -> dict[str, Any] | None:
         if self.postgres_pool is None:
@@ -1370,7 +1475,7 @@ class AppServices:
                 """
                 select id, plan_id, status, question_index, attempt_index,
                        input_payload, label_payload, prediction_payload,
-                       score, rationale, error, worker_id, created_at, updated_at
+                       score, rationale, error, worker_log, worker_id, created_at, updated_at
                 from agent_run_tasks
                 where plan_id = $1
                 order by question_index asc, attempt_index asc, created_at asc
@@ -1395,6 +1500,7 @@ class AppServices:
                     "score": row["score"],
                     "rationale": row["rationale"],
                     "error": row["error"],
+                    "worker_log": row["worker_log"],
                     "worker_id": row["worker_id"],
                     "created_at": row["created_at"].isoformat(),
                     "updated_at": row["updated_at"].isoformat(),
@@ -1411,6 +1517,7 @@ class AppServices:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
         now = datetime.now(timezone.utc)
+        log_lines = [f"worker={worker_id}", f"task={task_id}", "status=starting"]
         async with self.postgres_pool.acquire() as conn:
             task = await conn.fetchrow(
                 """
@@ -1432,10 +1539,12 @@ class AppServices:
             )
             if int(running_count) >= int(task["max_workers"]):
                 return {"id": task_id, "status": "throttled"}
+            log_lines.append("status=running")
             await conn.execute(
-                "update agent_run_tasks set status='running', worker_id=$2, updated_at=$3 where id=$1",
+                "update agent_run_tasks set status='running', worker_id=$2, worker_log=$3, updated_at=$4 where id=$1",
                 task_id,
                 worker_id,
+                "\n".join(log_lines),
                 now,
             )
             await conn.execute(
@@ -1457,25 +1566,32 @@ class AppServices:
                 num_threads=1,
             )
             item = result["items"][0]
+            log_lines.append("status=succeeded")
+            log_lines.append(f"score={float(item['score']):.4f}")
             async with self.postgres_pool.acquire() as conn:
                 await conn.execute(
                     """
                     update agent_run_tasks
-                    set status='succeeded', prediction_payload=$2::jsonb, score=$3, rationale=$4, error=null, updated_at=$5
+                    set status='succeeded', prediction_payload=$2::jsonb, score=$3, rationale=$4, error=null, worker_log=$5, updated_at=$6
                     where id=$1
                     """,
                     task_id,
                     __import__("json").dumps(item["prediction"]),
                     float(item["score"]),
                     str(item["rationale"]),
+                    "\n".join(log_lines),
                     datetime.now(timezone.utc),
                 )
         except Exception as exc:
+            log_lines.append("status=failed")
+            log_lines.append("traceback:")
+            log_lines.append(traceback.format_exc())
             async with self.postgres_pool.acquire() as conn:
                 await conn.execute(
-                    "update agent_run_tasks set status='failed', error=$2, updated_at=$3 where id=$1",
+                    "update agent_run_tasks set status='failed', error=$2, worker_log=$3, updated_at=$4 where id=$1",
                     task_id,
                     str(exc),
+                    "\n".join(log_lines),
                     datetime.now(timezone.utc),
                 )
 

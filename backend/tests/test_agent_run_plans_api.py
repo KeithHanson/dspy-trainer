@@ -73,6 +73,11 @@ async def fake_get_agent_run_plan(self, plan_id):
     return PLANS.get(plan_id)
 
 
+async def fake_list_agent_run_plans(self, limit=50, offset=0):
+    items = list(PLANS.values())[::-1]
+    return items[offset : offset + limit]
+
+
 async def fake_enqueue_agent_run_plan(self, plan_id):
     plan = PLANS.get(plan_id)
     if plan is None:
@@ -124,6 +129,7 @@ def _patch_services(monkeypatch):
     monkeypatch.setattr(main_mod.AppServices, "disconnect", fake_disconnect)
     monkeypatch.setattr(main_mod.AppServices, "create_agent_run_plan", fake_create_agent_run_plan)
     monkeypatch.setattr(main_mod.AppServices, "get_agent_run_plan", fake_get_agent_run_plan)
+    monkeypatch.setattr(main_mod.AppServices, "list_agent_run_plans", fake_list_agent_run_plans)
     monkeypatch.setattr(main_mod.AppServices, "enqueue_agent_run_plan", fake_enqueue_agent_run_plan)
     monkeypatch.setattr(main_mod.AppServices, "list_agent_run_tasks", fake_list_agent_run_tasks)
 
@@ -166,6 +172,10 @@ def test_agent_run_plan_create_enqueue_and_list(monkeypatch):
         tasks = client.get(f"/agent-run-plans/{plan_id}/tasks")
         assert tasks.status_code == 200
         assert tasks.json()["total"] == 6
+
+        listed = client.get("/agent-run-plans")
+        assert listed.status_code == 200
+        assert len(listed.json()) == 1
 
 
 def test_agent_run_plan_not_found_paths(monkeypatch):

@@ -13,6 +13,7 @@ class Settings(BaseSettings):
 
     redis_url: str = Field(default="redis://localhost:6379/0")
     queue_name: str = Field(default="dspy-trainer:jobs")
+    worker_registry_prefix: str = Field(default="dspy-trainer:workers")
 
     postgres_dsn: str = Field(default="")
 
