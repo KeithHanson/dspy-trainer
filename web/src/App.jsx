@@ -7,6 +7,7 @@ import { ErrorState } from "./components/states/ErrorState";
 import { AuthScreen } from "./auth/AuthScreen";
 import { DashboardPage } from "./dashboard/DashboardPage";
 import { BundlesPage } from "./bundles/BundlesPage";
+import { PlansPage } from "./plans/PlansPage";
 
 function PlaceholderPage({ title, description }) {
   return (
@@ -61,7 +62,7 @@ export function App() {
         <Route path="/" element={<Navigate to="/dashboard" replace />} />
         <Route path="/dashboard" element={<DashboardPage user={user} />} />
         <Route path="/bundles" element={<BundlesPage />} />
-        <Route path="/plans" element={<PlaceholderPage title="Evaluation Plans" description="Plan builder and run orchestration will be layered next." />} />
+        <Route path="/plans" element={<PlansPage />} />
         <Route path="/runs" element={<PlaceholderPage title="Eval Jobs" description="Run monitor foundation now has routed shell support." />} />
         <Route path="/team" element={<PlaceholderPage title="Team" description="Team management screen is scaffolded for implementation." />} />
         <Route path="/settings" element={<PlaceholderPage title="Settings" description="Workspace settings foundation is available." />} />

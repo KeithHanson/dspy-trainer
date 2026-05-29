@@ -224,12 +224,20 @@ class AppServices:
                   project_id text not null,
                   scenario_id text not null,
                   dataset_version text not null,
+                  name text not null default 'Untitled plan',
+                  runs_per_question int not null default 1,
+                  max_workers int not null default 1,
+                  module_import_id text,
                   eval_inputs jsonb not null default '[]'::jsonb,
                   created_at timestamptz not null,
                   updated_at timestamptz not null
                 );
                 """
             )
+            await conn.execute("alter table evaluation_plans add column if not exists name text not null default 'Untitled plan';")
+            await conn.execute("alter table evaluation_plans add column if not exists runs_per_question int not null default 1;")
+            await conn.execute("alter table evaluation_plans add column if not exists max_workers int not null default 1;")
+            await conn.execute("alter table evaluation_plans add column if not exists module_import_id text;")
             await conn.execute(
                 """
                 create table if not exists agent_run_plans (
@@ -1110,6 +1118,10 @@ class AppServices:
         project_id: str,
         scenario_id: str,
         dataset_version: str,
+        name: str,
+        runs_per_question: int,
+        max_workers: int,
+        module_import_id: str | None,
         eval_inputs: list[dict[str, Any]],
     ) -> dict[str, Any]:
         if self.postgres_pool is None:
@@ -1120,14 +1132,18 @@ class AppServices:
             await conn.execute(
                 """
                 insert into evaluation_plans (
-                  id, project_id, scenario_id, dataset_version, eval_inputs, created_at, updated_at
+                  id, project_id, scenario_id, dataset_version, name, runs_per_question, max_workers, module_import_id, eval_inputs, created_at, updated_at
                 )
-                values ($1, $2, $3, $4, $5::jsonb, $6, $7)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11)
                 """,
                 plan_id,
                 project_id,
                 scenario_id,
                 dataset_version,
+                name.strip() if name.strip() else "Untitled plan",
+                max(1, runs_per_question),
+                max(1, max_workers),
+                module_import_id,
                 __import__("json").dumps(eval_inputs),
                 now,
                 now,
@@ -1143,7 +1159,7 @@ class AppServices:
         async with self.postgres_pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                select id, project_id, scenario_id, dataset_version, eval_inputs, created_at, updated_at
+                select id, project_id, scenario_id, dataset_version, name, runs_per_question, max_workers, module_import_id, eval_inputs, created_at, updated_at
                 from evaluation_plans
                 where id = $1
                 """,
@@ -1156,10 +1172,49 @@ class AppServices:
             "project_id": row["project_id"],
             "scenario_id": row["scenario_id"],
             "dataset_version": row["dataset_version"],
+            "name": row["name"],
+            "runs_per_question": row["runs_per_question"],
+            "max_workers": row["max_workers"],
+            "module_import_id": row["module_import_id"],
             "eval_inputs": self._json_list(row["eval_inputs"]),
             "created_at": row["created_at"].isoformat(),
             "updated_at": row["updated_at"].isoformat(),
         }
+
+    async def list_evaluation_plans(self) -> list[dict[str, Any]]:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                select id, project_id, scenario_id, dataset_version, name, runs_per_question, max_workers, module_import_id, eval_inputs, created_at, updated_at
+                from evaluation_plans
+                order by created_at desc
+                """
+            )
+        return [
+            {
+                "id": row["id"],
+                "project_id": row["project_id"],
+                "scenario_id": row["scenario_id"],
+                "dataset_version": row["dataset_version"],
+                "name": row["name"],
+                "runs_per_question": row["runs_per_question"],
+                "max_workers": row["max_workers"],
+                "module_import_id": row["module_import_id"],
+                "eval_inputs": self._json_list(row["eval_inputs"]),
+                "created_at": row["created_at"].isoformat(),
+                "updated_at": row["updated_at"].isoformat(),
+            }
+            for row in rows
+        ]
+
+    async def delete_evaluation_plan(self, evaluation_plan_id: str) -> bool:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            result = await conn.execute("delete from evaluation_plans where id = $1", evaluation_plan_id)
+        return result.endswith("1")
 
     @staticmethod
     def _json_list(value: Any) -> list[dict[str, Any]]:

@@ -163,6 +163,10 @@ class EvaluationPlanCreateRequest(BaseModel):
     project_id: str
     scenario_id: str
     dataset_version: str
+    name: str = "Untitled plan"
+    runs_per_question: int = 1
+    max_workers: int = 1
+    module_import_id: str | None = None
     eval_inputs: list[dict[str, Any]] = Field(default_factory=list)
 
 
@@ -503,9 +507,19 @@ async def create_evaluation_plan(request: Request, payload: EvaluationPlanCreate
         project_id=payload.project_id,
         scenario_id=payload.scenario_id,
         dataset_version=payload.dataset_version,
+        name=payload.name,
+        runs_per_question=payload.runs_per_question,
+        max_workers=payload.max_workers,
+        module_import_id=payload.module_import_id,
         eval_inputs=payload.eval_inputs,
     )
     return result
+
+
+@app.get("/evaluation-plans")
+async def list_evaluation_plans(request: Request):
+    services: AppServices = request.app.state.services
+    return await services.list_evaluation_plans()
 
 
 @app.get("/evaluation-plans/{evaluation_plan_id}")
@@ -515,3 +529,12 @@ async def get_evaluation_plan(evaluation_plan_id: str, request: Request):
     if result is None:
         return JSONResponse(status_code=404, content={"error": "evaluation plan not found"})
     return result
+
+
+@app.delete("/evaluation-plans/{evaluation_plan_id}")
+async def delete_evaluation_plan(evaluation_plan_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    deleted = await services.delete_evaluation_plan(evaluation_plan_id)
+    if not deleted:
+        return JSONResponse(status_code=404, content={"error": "evaluation plan not found"})
+    return {"id": evaluation_plan_id, "deleted": True}
