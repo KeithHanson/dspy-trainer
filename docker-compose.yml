@@ -56,10 +56,16 @@ services:
     command: ["--config", "/app/config.yaml", "--port", "4000", "--host", "0.0.0.0"]
     environment:
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-local-dev-master-key}
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/dspy_trainer?schema=litellm
+      LITELLM_SALT_KEY: ${LITELLM_SALT_KEY:-sk-local-dev-salt-key-32-chars-minimum}
+      LITELLM_MIGRATION_DIR: /tmp/litellm-migrations
       AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY}
       AZURE_OPENAI_API_BASE: ${AZURE_OPENAI_API_BASE}
       AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION}
       OPENAI_DEPLOYMENT_NAME: ${OPENAI_DEPLOYMENT_NAME}
+    depends_on:
+      postgres:
+        condition: service_healthy
     volumes:
       - ./ops/litellm-proxy/config.yaml:/app/config.yaml:ro
     ports:
@@ -68,8 +74,8 @@ services:
       test: ["CMD", "python", "-c", "import os, urllib.request; req=urllib.request.Request('http://localhost:4000/health', headers={'Authorization': 'Bearer ' + os.environ.get('LITELLM_MASTER_KEY', '')}); urllib.request.urlopen(req, timeout=3)"]
       interval: 15s
       timeout: 5s
-      retries: 10
-      start_period: 20s
+      retries: 30
+      start_period: 180s
 
   backend:
     build:
