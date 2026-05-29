@@ -17,7 +17,7 @@ bd ready              # Find available work
 bd show <id>          # View issue details
 bd update <id> --claim  # Claim work atomically
 bd close <id>         # Complete work
-bd sync               # Sync with git
+# Do not use `bd sync` in this repo (known broken)
 ```
 
 ## Non-Interactive Shell Commands
@@ -162,7 +162,7 @@ bd automatically syncs with git:
 - Imports from JSONL when newer (e.g., after `git pull`)
 - No manual export/import needed!
 
-Note: if your local `bd` binary does not support `bd sync`, do not block work on it; use available `bd` commands and continue the required git push workflow.
+Note: `bd sync` is known broken in this repo. Do not run it. Use available `bd` commands and continue the required git push workflow.
 
 ### Important Rules
 
@@ -188,7 +188,6 @@ For more details, see README.md and docs/QUICKSTART.md.
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
    git pull --rebase
-   bd sync
    git push
    git status  # MUST show "up to date with origin"
    ```
