@@ -1,6 +1,7 @@
 
 # Dolt database files (added by bd init)
 .dolt/
+.beads/
 *.db
 .env
 __pycache__/
