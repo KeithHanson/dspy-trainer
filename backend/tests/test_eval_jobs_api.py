@@ -36,6 +36,7 @@ async def fake_create_eval_job(
     repeat_count,
     num_threads,
     eval_inputs,
+    evaluation_plan_id,
     mlflow_experiment_id,
     mlflow_parent_run_id,
 ):
@@ -55,6 +56,7 @@ async def fake_create_eval_job(
         "repeat_count": repeat_count,
         "num_threads": num_threads,
         "eval_inputs": eval_inputs,
+        "evaluation_plan_id": evaluation_plan_id,
         "mlflow_experiment_id": mlflow_experiment_id,
         "mlflow_parent_run_id": mlflow_parent_run_id,
         "failure_reason": None,

@@ -4,6 +4,7 @@ set -euo pipefail
 API_BASE="${API_BASE:-http://localhost:8000}"
 BUNDLE_PATH="${BUNDLE_PATH:-examples/module_bundles/simple_echo_agent}"
 EVAL_INPUTS_PATH="${EVAL_INPUTS_PATH:-${BUNDLE_PATH}/eval_inputs.json}"
+EVALUATION_PLAN_ID="${EVALUATION_PLAN_ID:-}"
 PROJECT_ID="${PROJECT_ID:-example-project}"
 SCENARIO_ID="${SCENARIO_ID:-example-scenario}"
 DATASET_VERSION="${DATASET_VERSION:-v1}"
@@ -36,12 +37,15 @@ command -v python >/dev/null 2>&1 || fail "python is required"
 
 [[ -f "${BUNDLE_PATH}/module.py" ]] || fail "missing bundle file: ${BUNDLE_PATH}/module.py"
 [[ -f "${BUNDLE_PATH}/metric.py" ]] || fail "missing bundle file: ${BUNDLE_PATH}/metric.py"
-[[ -f "${EVAL_INPUTS_PATH}" ]] || fail "missing eval inputs file: ${EVAL_INPUTS_PATH}"
+if [[ -z "${EVALUATION_PLAN_ID}" ]]; then
+  [[ -f "${EVAL_INPUTS_PATH}" ]] || fail "missing eval inputs file: ${EVAL_INPUTS_PATH}"
+fi
 
 log "Starting agent-run-plan workflow"
 log "API_BASE=${API_BASE}"
 log "BUNDLE_PATH=${BUNDLE_PATH}"
 log "EVAL_INPUTS_PATH=${EVAL_INPUTS_PATH}"
+log "EVALUATION_PLAN_ID=${EVALUATION_PLAN_ID:-<auto-create>}"
 log "PROJECT_ID=${PROJECT_ID}, SCENARIO_ID=${SCENARIO_ID}, DATASET_VERSION=${DATASET_VERSION}"
 log "RUNS_PER_QUESTION=${RUNS_PER_QUESTION}, MAX_WORKERS=${MAX_WORKERS}"
 log "Checking backend health"
@@ -65,15 +69,54 @@ VALIDATION_STATUS="$(python -c 'import json,sys; print(json.load(sys.stdin).get(
 [[ "${VALIDATION_STATUS}" == "passed" ]] || fail "module validation failed"
 log "Validation passed"
 
-log "Step 3/5: Creating agent run plan"
-PLAN_JSON="$(python - "${API_BASE}" "${PROJECT_ID}" "${MODULE_ID}" "${SCENARIO_ID}" "${DATASET_VERSION}" "${BUNDLE_PATH}" "${EVAL_INPUTS_PATH}" "${RUNS_PER_QUESTION}" "${MAX_WORKERS}" <<'PY'
+if [[ -z "${EVALUATION_PLAN_ID}" ]]; then
+  log "Step 3/6: Creating evaluation plan"
+  EVALUATION_PLAN_JSON="$(python - "${API_BASE}" "${PROJECT_ID}" "${SCENARIO_ID}" "${DATASET_VERSION}" "${EVAL_INPUTS_PATH}" <<'PY'
 import json
 import subprocess
 import sys
 
-api_base, project_id, module_id, scenario_id, dataset_version, bundle_path, eval_inputs_path, runs_per_question, max_workers = sys.argv[1:10]
+api_base, project_id, scenario_id, dataset_version, eval_inputs_path = sys.argv[1:6]
 with open(eval_inputs_path, encoding="utf-8") as fh:
     eval_inputs = json.load(fh)
+
+payload = {
+    "project_id": project_id,
+    "scenario_id": scenario_id,
+    "dataset_version": dataset_version,
+    "eval_inputs": eval_inputs,
+}
+
+res = subprocess.run(
+    [
+        "curl",
+        "-sS",
+        "-X",
+        "POST",
+        f"{api_base}/evaluation-plans",
+        "-H",
+        "Content-Type: application/json",
+        "-d",
+        json.dumps(payload),
+    ],
+    check=True,
+    capture_output=True,
+    text=True,
+)
+print(res.stdout)
+PY
+  )"
+  EVALUATION_PLAN_ID="$(python -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<<"${EVALUATION_PLAN_JSON}")"
+  log "EVALUATION_PLAN_ID=${EVALUATION_PLAN_ID}"
+fi
+
+log "Step 4/6: Creating agent run plan"
+PLAN_JSON="$(python - "${API_BASE}" "${PROJECT_ID}" "${MODULE_ID}" "${SCENARIO_ID}" "${DATASET_VERSION}" "${BUNDLE_PATH}" "${EVALUATION_PLAN_ID}" "${RUNS_PER_QUESTION}" "${MAX_WORKERS}" <<'PY'
+import json
+import subprocess
+import sys
+
+api_base, project_id, module_id, scenario_id, dataset_version, bundle_path, evaluation_plan_id, runs_per_question, max_workers = sys.argv[1:10]
 
 payload = {
     "project_id": project_id,
@@ -81,7 +124,7 @@ payload = {
     "scenario_id": scenario_id,
     "dataset_version": dataset_version,
     "bundle_path": bundle_path,
-    "eval_inputs": eval_inputs,
+    "evaluation_plan_id": evaluation_plan_id,
     "runs_per_question": int(runs_per_question),
     "max_workers": int(max_workers),
 }
@@ -109,14 +152,14 @@ PLAN_ID="$(python -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<<"${
 log "PLAN_ID=${PLAN_ID}"
 python -m json.tool <<<"${PLAN_JSON}"
 
-log "Step 4/5: Enqueuing plan"
+log "Step 5/6: Enqueuing plan"
 ENQUEUE_JSON="$(curl -sS -X POST "${API_BASE}/agent-run-plans/${PLAN_ID}/enqueue")"
 python -m json.tool <<<"${ENQUEUE_JSON}" >/dev/null 2>&1 || fail "enqueue failed with non-JSON response: ${ENQUEUE_JSON}"
 python -m json.tool <<<"${ENQUEUE_JSON}"
 TOTAL_TASKS="$(python -c 'import json,sys; print(json.load(sys.stdin).get("total_tasks", 0))' <<<"${ENQUEUE_JSON}")"
 log "Enqueued plan with TOTAL_TASKS=${TOTAL_TASKS}"
 
-log "Step 5/5: Polling until plan is terminal or timeout"
+log "Step 6/6: Polling until plan is terminal or timeout"
 START_TS="$(date +%s)"
 while true; do
   PLAN_STATE_JSON="$(curl -sS "${API_BASE}/agent-run-plans/${PLAN_ID}")"

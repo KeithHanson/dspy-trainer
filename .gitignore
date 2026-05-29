@@ -4,5 +4,10 @@
 .beads/
 *.db
 .env
+.env.local
+web/.env.local
 __pycache__/
 *.pyc
+node_modules/
+web/node_modules/
+web/dist/

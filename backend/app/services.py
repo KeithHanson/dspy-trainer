@@ -158,6 +158,7 @@ class AppServices:
             await conn.execute("alter table eval_jobs alter column eval_name set not null;")
             await conn.execute("alter table eval_jobs add column if not exists bundle_path text;")
             await conn.execute("alter table eval_jobs add column if not exists failure_reason text;")
+            await conn.execute("alter table eval_jobs add column if not exists evaluation_plan_id text;")
             await conn.execute(
                 """
                 create table if not exists eval_run_items (
@@ -207,6 +208,19 @@ class AppServices:
                   source_eval_job_id text,
                   artifact_path text,
                   failure_reason text,
+                  created_at timestamptz not null,
+                  updated_at timestamptz not null
+                );
+                """
+            )
+            await conn.execute(
+                """
+                create table if not exists evaluation_plans (
+                  id text primary key,
+                  project_id text not null,
+                  scenario_id text not null,
+                  dataset_version text not null,
+                  eval_inputs jsonb not null default '[]'::jsonb,
                   created_at timestamptz not null,
                   updated_at timestamptz not null
                 );
@@ -380,6 +394,7 @@ class AppServices:
         repeat_count: int,
         num_threads: int,
         eval_inputs: list[dict[str, Any]],
+        evaluation_plan_id: str | None,
         mlflow_experiment_id: str | None,
         mlflow_parent_run_id: str | None,
     ) -> dict[str, Any] | None:
@@ -392,14 +407,20 @@ class AppServices:
             module_exists = await conn.fetchval("select 1 from module_imports where id = $1", module_import_id)
             if module_exists is None:
                 return None
+            effective_eval_inputs = eval_inputs
+            if evaluation_plan_id:
+                plan_inputs = await conn.fetchval("select eval_inputs from evaluation_plans where id = $1", evaluation_plan_id)
+                if plan_inputs is None:
+                    return None
+                effective_eval_inputs = self._json_list(plan_inputs)
             await conn.execute(
                 """
                 insert into eval_jobs (
                   id, status, eval_name, project_id, module_import_id, scenario_id,
                   dataset_version, bundle_path, repeat_count, num_threads, eval_inputs,
-                  mlflow_experiment_id, mlflow_parent_run_id, created_at, updated_at
+                  evaluation_plan_id, mlflow_experiment_id, mlflow_parent_run_id, created_at, updated_at
                 )
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14, $15)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14, $15, $16)
                 """,
                 eval_job_id,
                 "queued",
@@ -411,7 +432,8 @@ class AppServices:
                 bundle_path,
                 max(1, repeat_count),
                 max(1, num_threads),
-                __import__("json").dumps(eval_inputs),
+                __import__("json").dumps(effective_eval_inputs),
+                evaluation_plan_id,
                 mlflow_experiment_id,
                 mlflow_parent_run_id,
                 now,
@@ -428,7 +450,7 @@ class AppServices:
                 select id, status, project_id, module_import_id, scenario_id,
                        eval_name,
                        dataset_version, bundle_path, repeat_count, num_threads, eval_inputs,
-                       mlflow_experiment_id, mlflow_parent_run_id, failure_reason,
+                       evaluation_plan_id, mlflow_experiment_id, mlflow_parent_run_id, failure_reason,
                        created_at, updated_at
                 from eval_jobs
                 where id = $1
@@ -449,6 +471,7 @@ class AppServices:
             "repeat_count": row["repeat_count"],
             "num_threads": row["num_threads"],
             "eval_inputs": row["eval_inputs"],
+            "evaluation_plan_id": row["evaluation_plan_id"],
             "mlflow_experiment_id": row["mlflow_experiment_id"],
             "mlflow_parent_run_id": row["mlflow_parent_run_id"],
             "failure_reason": row["failure_reason"],
@@ -470,7 +493,7 @@ class AppServices:
                 returning id, status, project_id, module_import_id, scenario_id, dataset_version,
                           eval_name,
                           bundle_path, repeat_count, num_threads, eval_inputs,
-                          mlflow_experiment_id, mlflow_parent_run_id, failure_reason,
+                          evaluation_plan_id, mlflow_experiment_id, mlflow_parent_run_id, failure_reason,
                           created_at, updated_at
                 """,
                 eval_job_id,
@@ -482,7 +505,7 @@ class AppServices:
                     select id, status, project_id, module_import_id, scenario_id, dataset_version,
                            eval_name,
                            bundle_path, repeat_count, num_threads, eval_inputs,
-                           mlflow_experiment_id, mlflow_parent_run_id, failure_reason,
+                           evaluation_plan_id, mlflow_experiment_id, mlflow_parent_run_id, failure_reason,
                            created_at, updated_at
                     from eval_jobs
                     where id = $1
@@ -503,6 +526,7 @@ class AppServices:
             "repeat_count": row["repeat_count"],
             "num_threads": row["num_threads"],
             "eval_inputs": row["eval_inputs"],
+            "evaluation_plan_id": row["evaluation_plan_id"],
             "mlflow_experiment_id": row["mlflow_experiment_id"],
             "mlflow_parent_run_id": row["mlflow_parent_run_id"],
             "failure_reason": row["failure_reason"],
@@ -974,6 +998,7 @@ class AppServices:
         dataset_version: str,
         bundle_path: str,
         eval_inputs: list[dict[str, Any]],
+        evaluation_plan_id: str | None,
         runs_per_question: int,
         max_workers: int,
     ) -> dict[str, Any] | None:
@@ -985,6 +1010,12 @@ class AppServices:
             module_exists = await conn.fetchval("select 1 from module_imports where id = $1", module_import_id)
             if module_exists is None:
                 return None
+            effective_eval_inputs = eval_inputs
+            if evaluation_plan_id:
+                plan_inputs = await conn.fetchval("select eval_inputs from evaluation_plans where id = $1", evaluation_plan_id)
+                if plan_inputs is None:
+                    return None
+                effective_eval_inputs = self._json_list(plan_inputs)
             await conn.execute(
                 """
                 insert into agent_run_plans (
@@ -1001,13 +1032,69 @@ class AppServices:
                 scenario_id,
                 dataset_version,
                 bundle_path,
-                __import__("json").dumps(eval_inputs),
+                __import__("json").dumps(effective_eval_inputs),
                 max(1, runs_per_question),
                 max(1, max_workers),
                 now,
                 now,
             )
         return await self.get_agent_run_plan(plan_id)
+
+    async def create_evaluation_plan(
+        self,
+        project_id: str,
+        scenario_id: str,
+        dataset_version: str,
+        eval_inputs: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        now = datetime.now(timezone.utc)
+        plan_id = str(uuid4())
+        async with self.postgres_pool.acquire() as conn:
+            await conn.execute(
+                """
+                insert into evaluation_plans (
+                  id, project_id, scenario_id, dataset_version, eval_inputs, created_at, updated_at
+                )
+                values ($1, $2, $3, $4, $5::jsonb, $6, $7)
+                """,
+                plan_id,
+                project_id,
+                scenario_id,
+                dataset_version,
+                __import__("json").dumps(eval_inputs),
+                now,
+                now,
+            )
+        result = await self.get_evaluation_plan(plan_id)
+        if result is None:
+            raise RuntimeError("failed to load evaluation plan")
+        return result
+
+    async def get_evaluation_plan(self, evaluation_plan_id: str) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                select id, project_id, scenario_id, dataset_version, eval_inputs, created_at, updated_at
+                from evaluation_plans
+                where id = $1
+                """,
+                evaluation_plan_id,
+            )
+        if row is None:
+            return None
+        return {
+            "id": row["id"],
+            "project_id": row["project_id"],
+            "scenario_id": row["scenario_id"],
+            "dataset_version": row["dataset_version"],
+            "eval_inputs": self._json_list(row["eval_inputs"]),
+            "created_at": row["created_at"].isoformat(),
+            "updated_at": row["updated_at"].isoformat(),
+        }
 
     @staticmethod
     def _json_list(value: Any) -> list[dict[str, Any]]:

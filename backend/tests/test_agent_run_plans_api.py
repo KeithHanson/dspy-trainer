@@ -31,6 +31,7 @@ async def fake_create_agent_run_plan(
     dataset_version,
     bundle_path,
     eval_inputs,
+    evaluation_plan_id,
     runs_per_question,
     max_workers,
 ):
@@ -39,6 +40,12 @@ async def fake_create_agent_run_plan(
         return None
     plan_id = f"plan-{NEXT_PLAN_ID}"
     NEXT_PLAN_ID += 1
+    effective_eval_inputs = eval_inputs
+    if evaluation_plan_id:
+        effective_eval_inputs = [
+            {"input": {"question": "q1"}, "label": {"expected": "a1"}},
+            {"input": {"question": "q2"}, "label": {"expected": "a2"}},
+        ]
     plan = {
         "id": plan_id,
         "status": "draft",
@@ -47,7 +54,7 @@ async def fake_create_agent_run_plan(
         "scenario_id": scenario_id,
         "dataset_version": dataset_version,
         "bundle_path": bundle_path,
-        "eval_inputs": eval_inputs,
+        "eval_inputs": effective_eval_inputs,
         "runs_per_question": runs_per_question,
         "max_workers": max_workers,
         "total_tasks": 0,

@@ -49,6 +49,7 @@ class EvalJobCreateRequest(BaseModel):
     repeat_count: int = 1
     num_threads: int = 1
     eval_inputs: list[dict[str, Any]] = Field(default_factory=list)
+    evaluation_plan_id: str | None = None
     mlflow_experiment_id: str | None = None
     mlflow_parent_run_id: str | None = None
 
@@ -70,8 +71,16 @@ class AgentRunPlanCreateRequest(BaseModel):
     dataset_version: str
     bundle_path: str
     eval_inputs: list[dict[str, Any]] = Field(default_factory=list)
+    evaluation_plan_id: str | None = None
     runs_per_question: int = 1
     max_workers: int = 1
+
+
+class EvaluationPlanCreateRequest(BaseModel):
+    project_id: str
+    scenario_id: str
+    dataset_version: str
+    eval_inputs: list[dict[str, Any]] = Field(default_factory=list)
 
 
 @app.get("/health")
@@ -187,6 +196,7 @@ async def create_eval_job(request: Request, payload: EvalJobCreateRequest):
         repeat_count=payload.repeat_count,
         num_threads=payload.num_threads,
         eval_inputs=payload.eval_inputs,
+        evaluation_plan_id=payload.evaluation_plan_id,
         mlflow_experiment_id=payload.mlflow_experiment_id,
         mlflow_parent_run_id=payload.mlflow_parent_run_id,
     )
@@ -287,6 +297,7 @@ async def create_agent_run_plan(request: Request, payload: AgentRunPlanCreateReq
         dataset_version=payload.dataset_version,
         bundle_path=payload.bundle_path,
         eval_inputs=payload.eval_inputs,
+        evaluation_plan_id=payload.evaluation_plan_id,
         runs_per_question=payload.runs_per_question,
         max_workers=payload.max_workers,
     )
@@ -321,4 +332,25 @@ async def list_agent_run_plan_tasks(plan_id: str, request: Request, limit: int =
     result = await services.list_agent_run_tasks(plan_id, safe_limit, safe_offset)
     if result is None:
         return JSONResponse(status_code=404, content={"error": "agent run plan not found"})
+    return result
+
+
+@app.post("/evaluation-plans")
+async def create_evaluation_plan(request: Request, payload: EvaluationPlanCreateRequest):
+    services: AppServices = request.app.state.services
+    result = await services.create_evaluation_plan(
+        project_id=payload.project_id,
+        scenario_id=payload.scenario_id,
+        dataset_version=payload.dataset_version,
+        eval_inputs=payload.eval_inputs,
+    )
+    return result
+
+
+@app.get("/evaluation-plans/{evaluation_plan_id}")
+async def get_evaluation_plan(evaluation_plan_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    result = await services.get_evaluation_plan(evaluation_plan_id)
+    if result is None:
+        return JSONResponse(status_code=404, content={"error": "evaluation plan not found"})
     return result

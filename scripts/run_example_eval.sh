@@ -4,6 +4,9 @@ set -euo pipefail
 API_BASE="${API_BASE:-http://localhost:8000}"
 BUNDLE_PATH="${BUNDLE_PATH:-examples/module_bundles/simple_echo_agent}"
 EVAL_INPUTS_PATH="${EVAL_INPUTS_PATH:-${BUNDLE_PATH}/eval_inputs.json}"
+PROJECT_ID="${PROJECT_ID:-example-project}"
+SCENARIO_ID="${SCENARIO_ID:-example-scenario}"
+DATASET_VERSION="${DATASET_VERSION:-v1}"
 
 if [[ ! -f "${BUNDLE_PATH}/module.py" ]]; then
   echo "missing bundle file: ${BUNDLE_PATH}/module.py" >&2
@@ -41,24 +44,49 @@ if [[ "${VALIDATION_STATUS}" != "passed" ]]; then
 fi
 
 echo "Creating eval job"
-EVAL_JOB_ID="$(python - "${API_BASE}" "${MODULE_ID}" "${BUNDLE_PATH}" "${EVAL_INPUTS_PATH}" <<'PY'
+EVAL_JOB_ID="$(python - "${API_BASE}" "${MODULE_ID}" "${BUNDLE_PATH}" "${EVAL_INPUTS_PATH}" "${PROJECT_ID}" "${SCENARIO_ID}" "${DATASET_VERSION}" <<'PY'
 import json
 import subprocess
 import sys
 
-api_base, module_id, bundle_path, eval_inputs_path = sys.argv[1:5]
+api_base, module_id, bundle_path, eval_inputs_path, project_id, scenario_id, dataset_version = sys.argv[1:8]
 with open(eval_inputs_path, encoding="utf-8") as fh:
     eval_inputs = json.load(fh)
 
+plan_payload = {
+    "project_id": project_id,
+    "scenario_id": scenario_id,
+    "dataset_version": dataset_version,
+    "eval_inputs": eval_inputs,
+}
+
+plan_res = subprocess.run(
+    [
+        "curl",
+        "-sS",
+        "-X",
+        "POST",
+        f"{api_base}/evaluation-plans",
+        "-H",
+        "Content-Type: application/json",
+        "-d",
+        json.dumps(plan_payload),
+    ],
+    check=True,
+    capture_output=True,
+    text=True,
+)
+evaluation_plan_id = json.loads(plan_res.stdout)["id"]
+
 payload = {
-    "project_id": "example-project",
+    "project_id": project_id,
     "module_import_id": module_id,
-    "scenario_id": "example-scenario",
-    "dataset_version": "v1",
+    "scenario_id": scenario_id,
+    "dataset_version": dataset_version,
     "bundle_path": bundle_path,
     "repeat_count": 1,
     "num_threads": 1,
-    "eval_inputs": eval_inputs,
+    "evaluation_plan_id": evaluation_plan_id,
 }
 
 res = subprocess.run(
