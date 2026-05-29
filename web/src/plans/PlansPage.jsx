@@ -34,15 +34,16 @@ export function PlansPage() {
       return;
     }
     navigate(opts?.saved ? "/plans?saved=1" : "/plans");
-  }} planId={editingPlanId} /> : <PlansList onCreate={() => navigate("/plans?new=1")} onEdit={(id) => navigate(`/plans?new=1&id=${encodeURIComponent(id)}`)} showSavedNotice={savedFlag} />;
+  }} planId={editingPlanId} /> : <PlansList onCreate={() => navigate("/plans?new=1")} onEdit={(id) => navigate(`/plans?new=1&id=${encodeURIComponent(id)}`)} onRunNavigate={(id) => navigate(`/runs?plan=${encodeURIComponent(id)}`)} showSavedNotice={savedFlag} />;
 }
 
-function PlansList({ onCreate, onEdit, showSavedNotice }) {
+function PlansList({ onCreate, onEdit, onRunNavigate, showSavedNotice }) {
   const plansUrl = useMemo(() => `${(import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, "")}/evaluation-plans`, []);
   const [plans, setPlans] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
   const [deletingPlanId, setDeletingPlanId] = useState("");
+  const [runningPlanId, setRunningPlanId] = useState("");
 
   const loadPlans = async () => {
     setIsLoading(true);
@@ -64,6 +65,44 @@ function PlansList({ onCreate, onEdit, showSavedNotice }) {
   useEffect(() => {
     loadPlans();
   }, []);
+
+  const runPlan = async (plan) => {
+    setRunningPlanId(plan.id);
+    setError("");
+    try {
+      if (!plan.module_import_id) {
+        throw new Error("This plan has no saved module bundle. Edit the plan and select a bundle before running.");
+      }
+      const createRunResp = await fetch(`${(import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, "")}/agent-run-plans`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          project_id: PROJECT_ID,
+          module_import_id: plan.module_import_id,
+          scenario_id: plan.scenario_id || SCENARIO_ID,
+          dataset_version: plan.dataset_version || DATASET_VERSION,
+          bundle_path: "saved-bundle",
+          eval_inputs: [],
+          evaluation_plan_id: plan.id,
+          runs_per_question: plan.runs_per_question || 1,
+          max_workers: plan.max_workers || 1,
+        }),
+      });
+      if (!createRunResp.ok) {
+        throw new Error(`Could not start run (${createRunResp.status}). Please retry.`);
+      }
+      const runPlanPayload = await createRunResp.json();
+      const enqueueResp = await fetch(`${(import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, "")}/agent-run-plans/${runPlanPayload.id}/enqueue`, { method: "POST" });
+      if (!enqueueResp.ok) {
+        throw new Error(`Run was created but could not be queued (${enqueueResp.status}). Please retry.`);
+      }
+      onRunNavigate(runPlanPayload.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not start run");
+    } finally {
+      setRunningPlanId("");
+    }
+  };
 
   const deletePlan = async (planId) => {
     setDeletingPlanId(planId);
@@ -116,8 +155,11 @@ function PlansList({ onCreate, onEdit, showSavedNotice }) {
                       <span className="cap mono">{count} questions x {plan.runs_per_question || 1} runs = {count * (plan.runs_per_question || 1)} tasks · {plan.max_workers || 1} workers</span>
                     </div>
                     <div className="row gap-2">
-                      <Button size="sm" variant="primary" icon="activity" onClick={(event) => event.stopPropagation()}>
-                        Run
+                      <Button size="sm" variant="primary" icon="activity" onClick={(event) => {
+                        event.stopPropagation();
+                        runPlan(plan);
+                      }} disabled={runningPlanId === plan.id}>
+                        {runningPlanId === plan.id ? "Starting..." : "Run"}
                       </Button>
                       <Button size="sm" onClick={(event) => {
                         event.stopPropagation();
