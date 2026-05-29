@@ -1,0 +1,3 @@
+name = "wrong-contract-bundle"
+version = "0.1.0"
+lm_target = "gpt-4.1-mini"

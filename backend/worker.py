@@ -2,6 +2,8 @@ import asyncio
 import json
 import logging
 
+from redis.exceptions import TimeoutError as RedisTimeoutError
+
 from app.config import get_settings
 from app.services import AppServices
 
@@ -33,7 +35,10 @@ async def run_worker() -> None:
     logger.info("Worker started; waiting on queue '%s'", settings.queue_name)
     try:
         while True:
-            result = await services.redis.execute_command("BRPOP", settings.queue_name, 5) if services.redis else None
+            try:
+                result = await services.redis.execute_command("BRPOP", settings.queue_name, 5) if services.redis else None
+            except RedisTimeoutError:
+                continue
             if result is None:
                 continue
             _, raw_payload = result

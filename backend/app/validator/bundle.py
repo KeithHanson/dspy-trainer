@@ -3,10 +3,12 @@ from __future__ import annotations
 import ast
 from dataclasses import dataclass
 from pathlib import Path
+import tomllib
 from typing import Any
 
 MODULE_FILE = "module.py"
 METRIC_FILE = "metric.py"
+TOML_FILE = "bundle.toml"
 
 
 @dataclass(frozen=True)
@@ -29,16 +31,21 @@ def validate_bundle(bundle_path: str) -> ValidationReport:
 
     module_file = root / MODULE_FILE
     metric_file = root / METRIC_FILE
+    toml_file = root / TOML_FILE
 
     if not module_file.exists() or not module_file.is_file():
         diagnostics.append(_diag("error", "module_missing", "Missing required file: module.py", MODULE_FILE))
     if not metric_file.exists() or not metric_file.is_file():
         diagnostics.append(_diag("error", "metric_missing", "Missing required file: metric.py", METRIC_FILE))
+    if not toml_file.exists() or not toml_file.is_file():
+        diagnostics.append(_diag("error", "bundle_toml_missing", "Missing required file: bundle.toml", TOML_FILE))
 
     if module_file.exists() and module_file.is_file():
         _validate_module_contract(module_file, diagnostics)
     if metric_file.exists() and metric_file.is_file():
         _validate_metric_contract(metric_file, diagnostics)
+    if toml_file.exists() and toml_file.is_file():
+        _validate_bundle_toml(toml_file, diagnostics)
 
     passed = not any(item["severity"] == "error" for item in diagnostics)
     return ValidationReport(passed, diagnostics, _summary(diagnostics))
@@ -115,6 +122,23 @@ def _parse_python(path: Path, diagnostics: list[dict[str, Any]], label: str) -> 
     except SyntaxError as exc:
         diagnostics.append(_diag("error", "syntax_error", f"{label} is not valid Python: {exc.msg}", label))
         return None
+
+
+def _validate_bundle_toml(toml_file: Path, diagnostics: list[dict[str, Any]]) -> None:
+    try:
+        payload = tomllib.loads(toml_file.read_text(encoding="utf-8"))
+    except OSError as exc:
+        diagnostics.append(_diag("error", "bundle_toml_read_error", f"Unable to read bundle.toml: {exc}", TOML_FILE))
+        return
+    except tomllib.TOMLDecodeError as exc:
+        diagnostics.append(_diag("error", "bundle_toml_invalid", f"bundle.toml is not valid TOML: {exc}", TOML_FILE))
+        return
+
+    required_keys = ["name", "version", "lm_target"]
+    for key in required_keys:
+        value = payload.get(key)
+        if not isinstance(value, str) or not value.strip():
+            diagnostics.append(_diag("error", f"bundle_toml_{key}_missing", f"bundle.toml must define a non-empty '{key}' string", TOML_FILE))
 
 
 def _name_of(node: ast.AST) -> str:

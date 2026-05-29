@@ -1,10 +1,12 @@
 from contextlib import asynccontextmanager
 from io import BytesIO
 import os
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
@@ -208,6 +210,39 @@ async def import_module(request: Request, payload: ModuleImportRequest):
 async def validate_module(module_id: str, request: Request, payload: ValidateRequest):
     services: AppServices = request.app.state.services
     report = validate_bundle(payload.bundle_path)
+    status = "passed" if report.passed else "failed"
+    found = await services.set_validation_status(module_id, status, report.diagnostics)
+    if not found:
+        return JSONResponse(status_code=404, content={"error": "module not found"})
+    return {
+        "id": module_id,
+        "validation_status": status,
+        "diagnostics": report.diagnostics,
+        "summary": report.summary,
+    }
+
+
+@app.post("/modules/{module_id}/validate-upload")
+async def validate_module_upload(module_id: str, request: Request, bundle: UploadFile = File(...)):
+    services: AppServices = request.app.state.services
+    if not bundle.filename or not bundle.filename.lower().endswith(".zip"):
+        return JSONResponse(status_code=400, content={"error": "bundle must be a .zip file"})
+    payload = await bundle.read()
+    try:
+        with TemporaryDirectory() as temp_dir:
+            archive_path = Path(temp_dir) / "bundle.zip"
+            archive_path.write_bytes(payload)
+            with ZipFile(archive_path) as archive:
+                archive.extractall(temp_dir)
+
+            root = Path(temp_dir)
+            dirs = [entry for entry in root.iterdir() if entry.is_dir()]
+            bundle_root = dirs[0] if len(dirs) == 1 else root
+
+            report = validate_bundle(str(bundle_root))
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "invalid zip bundle"})
+
     status = "passed" if report.passed else "failed"
     found = await services.set_validation_status(module_id, status, report.diagnostics)
     if not found:

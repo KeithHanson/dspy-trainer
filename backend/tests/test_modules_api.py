@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from fastapi.testclient import TestClient
 
@@ -99,6 +100,10 @@ def test_module_import_and_status_flow(monkeypatch):
                 "JUDGE_INSTRUCTIONS='p/f'\ndef judge_metric(example, prediction):\n  return False\n",
                 encoding="utf-8",
             )
+            (bundle_dir / "bundle.toml").write_text(
+                "name='test-bundle'\nversion='0.1.0'\nlm_target='gpt-4.1-mini'\n",
+                encoding="utf-8",
+            )
 
             created = client.post(
                 "/modules/import",
@@ -195,3 +200,41 @@ def test_sample_bundle_download(monkeypatch):
         assert response.headers["content-type"] == "application/zip"
         assert "attachment; filename=\"example-bundle.zip\"" in response.headers["content-disposition"]
         assert len(response.content) > 0
+
+
+def test_module_validate_upload_zip(monkeypatch):
+    STORE.clear()
+    _patch_services(monkeypatch)
+
+    with TestClient(main_mod.app) as client:
+        module_id = client.post(
+            "/modules/import",
+            json={"source": "upload", "source_ref": "bundle.zip", "version_hash": "zip-1"},
+        ).json()["id"]
+
+        with TemporaryDirectory() as tmp_dir:
+            zip_path = Path(tmp_dir) / "bundle.zip"
+            with ZipFile(zip_path, mode="w", compression=ZIP_DEFLATED) as archive:
+                archive.writestr(
+                    "example-bundle/module.py",
+                    "import dspy\nclass Sig(dspy.Signature):\n  q=dspy.InputField()\n  a=dspy.OutputField()\n"
+                    "class Agent(dspy.Module):\n  def forward(self, q: str):\n    return dspy.Prediction(a='x')\n"
+                    "def build_program():\n  return Agent()\n",
+                )
+                archive.writestr(
+                    "example-bundle/metric.py",
+                    "JUDGE_INSTRUCTIONS='ok'\ndef judge_metric(example, prediction, trace=None):\n  return True\n",
+                )
+                archive.writestr(
+                    "example-bundle/bundle.toml",
+                    "name='zip-bundle'\nversion='0.1.0'\nlm_target='gpt-4.1-mini'\n",
+                )
+
+            with zip_path.open("rb") as handle:
+                response = client.post(
+                    f"/modules/{module_id}/validate-upload",
+                    files={"bundle": ("bundle.zip", handle, "application/zip")},
+                )
+
+        assert response.status_code == 200
+        assert response.json()["validation_status"] == "passed"

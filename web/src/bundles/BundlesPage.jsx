@@ -3,6 +3,150 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { Button } from "../components/primitives/Button";
 import { EmptyState } from "../components/states/EmptyState";
 import { ErrorState } from "../components/states/ErrorState";
+import { LoadingState } from "../components/states/LoadingState";
+
+const VALIDATION_CHECKS = [
+  {
+    id: "module_file",
+    label: "module.py exists",
+    failCodes: ["module_missing"],
+    help: "Add a module.py file at the bundle root. It should include your DSPy module implementation and build_program().",
+    snippet: `import dspy
+
+class TicketSignature(dspy.Signature):
+    ticket = dspy.InputField()
+    history = dspy.InputField()
+    category = dspy.OutputField()
+    priority = dspy.OutputField()
+    reply = dspy.OutputField()
+
+class TriageAgent(dspy.Module):
+    def __init__(self):
+        super().__init__()
+        self.respond = dspy.ChainOfThought(TicketSignature)
+
+    def forward(self, ticket: str, history: str):
+        return self.respond(ticket=ticket, history=history)
+
+def build_program():
+    return TriageAgent()
+`,
+  },
+  {
+    id: "metric_file",
+    label: "metric.py exists",
+    failCodes: ["metric_missing"],
+    help: "Add a metric.py file at the bundle root with JUDGE_INSTRUCTIONS and judge_metric(example, prediction, trace=None).",
+    snippet: `JUDGE_INSTRUCTIONS = """
+Pass when category and priority match expected values and the reply is helpful.
+"""
+
+def judge_metric(example, prediction, trace=None):
+    expected_category = str(example.get("expected_category", "")).strip().lower()
+    expected_priority = str(example.get("expected_priority", "")).strip().lower()
+
+    category = str(getattr(prediction, "category", "")).strip().lower()
+    priority = str(getattr(prediction, "priority", "")).strip().lower()
+    reply = str(getattr(prediction, "reply", "")).strip()
+
+    return bool(reply) and category == expected_category and priority == expected_priority
+`,
+  },
+  {
+    id: "bundle_toml_file",
+    label: "bundle.toml exists",
+    failCodes: ["bundle_toml_missing"],
+    help: "Add a bundle.toml file at the bundle root so the validator can read required metadata.",
+    snippet: `name = "support-triage-agent"
+version = "0.1.0"
+lm_target = "gpt-4.1-mini"
+`,
+  },
+  {
+    id: "signature",
+    label: "DSPy Signature declared",
+    failCodes: ["signature_missing"],
+    help: "Define at least one DSPy Signature class in module.py with InputField and OutputField members.",
+    snippet: `class TicketSignature(dspy.Signature):
+    ticket = dspy.InputField(desc="Incoming support ticket")
+    history = dspy.InputField(desc="Conversation history")
+    category = dspy.OutputField(desc="Issue category")
+    priority = dspy.OutputField(desc="low | medium | high")
+    reply = dspy.OutputField(desc="Customer response")
+`,
+  },
+  {
+    id: "module_class",
+    label: "dspy.Module subclass declared",
+    failCodes: ["module_missing_class"],
+    help: "Create a class in module.py that inherits from dspy.Module and implements your forward() behavior.",
+    snippet: `class TriageAgent(dspy.Module):
+    def __init__(self):
+        super().__init__()
+        self.respond = dspy.ChainOfThought(TicketSignature)
+
+    def forward(self, ticket: str, history: str):
+        return self.respond(ticket=ticket, history=history)
+`,
+  },
+  {
+    id: "build_program",
+    label: "build_program() exported",
+    failCodes: ["build_program_missing"],
+    help: "Export a build_program() function in module.py that returns an instance of your dspy.Module subclass.",
+    snippet: `def build_program():
+    return TriageAgent()
+`,
+  },
+  {
+    id: "judge_instructions",
+    label: "JUDGE_INSTRUCTIONS declared",
+    failCodes: ["judge_instructions_missing"],
+    help: "In metric.py, set JUDGE_INSTRUCTIONS to a clear string explaining pass/fail criteria for your judge metric.",
+    snippet: `JUDGE_INSTRUCTIONS = """
+Pass when category and priority are correct and the reply is actionable.
+Fail when output is unsafe, missing, or mismatched.
+"""
+`,
+  },
+  {
+    id: "judge_metric",
+    label: "judge_metric(example, prediction) exists",
+    failCodes: ["judge_metric_missing", "judge_metric_signature_invalid"],
+    help: "Define judge_metric(example, prediction, trace=None) in metric.py and return a boolean indicating pass/fail.",
+    snippet: `def judge_metric(example, prediction, trace=None):
+    expected_category = str(example.get("expected_category", "")).strip().lower()
+    expected_priority = str(example.get("expected_priority", "")).strip().lower()
+
+    category = str(getattr(prediction, "category", "")).strip().lower()
+    priority = str(getattr(prediction, "priority", "")).strip().lower()
+    reply = str(getattr(prediction, "reply", "")).strip()
+
+    return bool(reply) and category == expected_category and priority == expected_priority
+`,
+  },
+  {
+    id: "python_syntax",
+    label: "Python syntax is valid",
+    failCodes: ["syntax_error", "read_error"],
+    help: "Ensure module.py and metric.py are valid Python and UTF-8 readable. Run `python -m py_compile module.py metric.py` locally.",
+    snippet: `# run from your bundle directory
+python -m py_compile module.py metric.py
+
+# if successful, this command prints nothing and exits 0
+`,
+  },
+  {
+    id: "bundle_toml_fields",
+    label: "bundle.toml has required fields",
+    failCodes: ["bundle_toml_invalid", "bundle_toml_name_missing", "bundle_toml_version_missing", "bundle_toml_lm_target_missing"],
+    help: "bundle.toml must be valid TOML and include non-empty name, version, and lm_target string values.",
+    snippet: `name = "support-triage-agent"
+version = "0.1.0"
+lm_target = "gpt-4.1-mini"
+`,
+  },
+];
 
 function buildApiUrl(path) {
   const base = import.meta.env.VITE_API_BASE_URL?.trim();
@@ -27,6 +171,8 @@ export function BundlesPage() {
   const showUploadIntent = searchParams.get("upload") === "1";
 
   const sampleUrl = useMemo(() => buildApiUrl("/samples/module-bundle"), []);
+
+  const validateUrl = useMemo(() => buildApiUrl("/modules"), []);
 
   const handleDownload = async () => {
     setIsDownloading(true);
@@ -90,15 +236,194 @@ export function BundlesPage() {
           </ol>
         </section>
 
-        {showUploadIntent ? (
-          <section className="bundles-section">
-            <EmptyState
-              title="Upload flow is next in sequence"
-              description="You are on Step 1 today. Once sample prep is complete, proceed to Step 2: upload and validate your bundle."
-            />
-          </section>
-        ) : null}
+        {showUploadIntent ? <UploadValidatePanel modulesUrl={validateUrl} onBack={() => navigate("/bundles")} /> : null}
       </div>
     </section>
   );
+}
+
+async function parseError(response, fallback) {
+  try {
+    const body = await response.json();
+    if (body?.error) {
+      return `${fallback}: ${body.error}`;
+    }
+  } catch {
+    return fallback;
+  }
+  return fallback;
+}
+
+function UploadValidatePanel({ modulesUrl, onBack }) {
+  const [bundleFile, setBundleFile] = useState(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState("");
+  const [result, setResult] = useState(null);
+  const [activeHelpCheck, setActiveHelpCheck] = useState(null);
+  const [copied, setCopied] = useState(false);
+
+  const onSubmit = async (event) => {
+    event.preventDefault();
+    if (!bundleFile) {
+      setSubmitError("Please choose a .zip bundle file.");
+      return;
+    }
+    setIsSubmitting(true);
+    setSubmitError("");
+    setResult(null);
+    try {
+      const importResp = await fetch(`${modulesUrl}/import`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source: "upload" }),
+      });
+      if (!importResp.ok) {
+        throw new Error(await parseError(importResp, `Import failed (${importResp.status})`));
+      }
+      const imported = await importResp.json();
+
+      const formData = new FormData();
+      formData.append("bundle", bundleFile);
+      const validateResp = await fetch(`${modulesUrl}/${imported.id}/validate-upload`, {
+        method: "POST",
+        body: formData,
+      });
+      if (!validateResp.ok) {
+        throw new Error(await parseError(validateResp, `Validation failed (${validateResp.status})`));
+      }
+      const validated = await validateResp.json();
+      setResult({ moduleId: imported.id, ...validated });
+    } catch (error) {
+      setSubmitError(error instanceof Error ? error.message : "Upload failed");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <section className="panel card-pad bundles-section">
+      <div className="row between" style={{ marginBottom: 10 }}>
+        <h2 className="t-h2">Step 2: Upload and validate bundle</h2>
+        <Button variant="ghost" size="sm" onClick={onBack}>Back</Button>
+      </div>
+      <p className="cap" style={{ marginBottom: 14 }}>Upload a .zip bundle and run validation directly from archive contents.</p>
+
+      <form className="bundles-form col gap-2" onSubmit={onSubmit}>
+        <label className="bundles-label" htmlFor="bundle-file">Bundle zip</label>
+        <input
+          id="bundle-file"
+          className="bundles-file-input"
+          type="file"
+          accept=".zip,application/zip"
+          onChange={(event) => setBundleFile(event.target.files?.[0] || null)}
+          required
+        />
+
+        <div className="row" style={{ marginTop: 8 }}>
+          <button className="btn btn-primary" type="submit" disabled={isSubmitting || !bundleFile}>{isSubmitting ? "Validating..." : "Upload + validate"}</button>
+        </div>
+      </form>
+
+      {isSubmitting ? <LoadingState label="Running validation..." /> : null}
+      {submitError ? <ErrorState title="Validation failed" description={submitError} /> : null}
+
+      {result ? (
+        <div className="panel card-pad bundles-validation-result">
+          <div className="row between" style={{ marginBottom: 10 }}>
+            <h3 className="t-h2">Validation result</h3>
+            <span className="t-label">{result.validation_status}</span>
+          </div>
+          <p className="cap" style={{ marginBottom: 10 }}>Module ID: <span className="faint">{result.moduleId}</span></p>
+          <div className="bundles-check-report" style={{ marginBottom: 12 }}>
+            <div className="t-label" style={{ marginBottom: 8 }}>Validation checks</div>
+            <ul className="bundles-check-results">
+              {buildValidationChecks(result).map((check) => (
+                <li key={check.id} className="bundles-check-item">
+                  <button className="bundles-info-btn" type="button" onClick={() => setActiveHelpCheck(check)} aria-label={`How to pass ${check.label}`}>
+                    i
+                  </button>
+                  <span aria-hidden="true">{check.passed ? "✅" : "❌"}</span>
+                  <span>{check.label}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          {result.diagnostics?.length ? (
+            <ul className="bundles-diags">
+              {result.diagnostics.map((diag, idx) => (
+                <li key={`${diag.code}-${idx}`}>
+                  <span className="t-label">{diag.level || "info"}</span> {diag.code}: {diag.message}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <EmptyState title="No diagnostics" description="Validation passed without warnings." />
+          )}
+        </div>
+      ) : null}
+
+      {activeHelpCheck ? (
+        <div className="bundles-modal-backdrop" onClick={() => setActiveHelpCheck(null)}>
+          <div className="bundles-modal panel card-pad" role="dialog" aria-modal="true" aria-label={`${activeHelpCheck.label} guidance`} onClick={(event) => event.stopPropagation()}>
+            <div className="row between" style={{ marginBottom: 10 }}>
+              <h3 className="t-h2">{activeHelpCheck.label}</h3>
+              <button className="btn btn-ghost btn-sm" type="button" onClick={() => setActiveHelpCheck(null)}>Close</button>
+            </div>
+            <p className="t-sm muted">{activeHelpCheck.help}</p>
+            {activeHelpCheck.snippet ? (
+              <div className="bundles-snippet-wrap">
+                <div className="row between" style={{ marginBottom: 8 }}>
+                  <span className="t-label">Starter template</span>
+                  <button
+                    className="btn btn-sm"
+                    type="button"
+                    onClick={async () => {
+                      await navigator.clipboard.writeText(activeHelpCheck.snippet);
+                      setCopied(true);
+                      setTimeout(() => setCopied(false), 1000);
+                    }}
+                  >
+                    {copied ? "Copied" : "Copy"}
+                  </button>
+                </div>
+                <pre className="bundles-snippet"><code>{renderHighlightedPython(activeHelpCheck.snippet)}</code></pre>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function buildValidationChecks(result) {
+  const codes = new Set((result?.diagnostics || []).map((diag) => diag.code));
+  return VALIDATION_CHECKS.map((check) => ({
+    ...check,
+    passed: check.failCodes.every((code) => !codes.has(code)),
+  }));
+}
+
+function renderHighlightedPython(source) {
+  const tokenRegex = /(#[^\n]*|"""[\s\S]*?"""|"[^"\n]*"|'[^'\n]*'|\b(?:class|def|return|import|from|if|and|or|True|False|None)\b)/g;
+  const nodes = [];
+  let lastIndex = 0;
+  let match;
+
+  while ((match = tokenRegex.exec(source)) !== null) {
+    if (match.index > lastIndex) {
+      nodes.push(source.slice(lastIndex, match.index));
+    }
+    const token = match[0];
+    const cls = token.startsWith("#") ? "tok-com" : token.startsWith("\"") || token.startsWith("'") ? "tok-str" : "tok-kw";
+    nodes.push(<span key={`${match.index}-${token.length}`} className={cls}>{token}</span>);
+    lastIndex = tokenRegex.lastIndex;
+  }
+
+  if (lastIndex < source.length) {
+    nodes.push(source.slice(lastIndex));
+  }
+
+  return nodes;
 }
