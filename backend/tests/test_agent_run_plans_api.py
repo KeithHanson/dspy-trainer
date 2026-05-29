@@ -123,6 +123,14 @@ async def fake_list_agent_run_tasks(self, plan_id, limit, offset):
     }
 
 
+async def fake_delete_agent_run_plan(self, plan_id):
+    if plan_id not in PLANS:
+        return False
+    del PLANS[plan_id]
+    TASKS.pop(plan_id, None)
+    return True
+
+
 def _patch_services(monkeypatch):
     monkeypatch.setenv("DSPY_TRAINER_POSTGRES_DSN", "postgresql://postgres:postgres@localhost:5432/dspy_trainer")
     monkeypatch.setattr(main_mod.AppServices, "connect", fake_connect)
@@ -132,6 +140,7 @@ def _patch_services(monkeypatch):
     monkeypatch.setattr(main_mod.AppServices, "list_agent_run_plans", fake_list_agent_run_plans)
     monkeypatch.setattr(main_mod.AppServices, "enqueue_agent_run_plan", fake_enqueue_agent_run_plan)
     monkeypatch.setattr(main_mod.AppServices, "list_agent_run_tasks", fake_list_agent_run_tasks)
+    monkeypatch.setattr(main_mod.AppServices, "delete_agent_run_plan", fake_delete_agent_run_plan)
 
 
 def _reset_state():
@@ -199,3 +208,32 @@ def test_agent_run_plan_not_found_paths(monkeypatch):
         assert client.get("/agent-run-plans/missing").status_code == 404
         assert client.post("/agent-run-plans/missing/enqueue").status_code == 404
         assert client.get("/agent-run-plans/missing/tasks").status_code == 404
+        assert client.delete("/agent-run-plans/missing").status_code == 404
+
+
+def test_agent_run_plan_delete(monkeypatch):
+    _reset_state()
+    _patch_services(monkeypatch)
+    with TestClient(main_mod.app) as client:
+        created = client.post(
+            "/agent-run-plans",
+            json={
+                "project_id": "proj-1",
+                "module_import_id": "mod-1",
+                "scenario_id": "scn-1",
+                "dataset_version": "v1",
+                "bundle_path": "examples/module_bundles/simple_echo_agent",
+                "eval_inputs": [],
+                "runs_per_question": 1,
+                "max_workers": 1,
+            },
+        )
+        assert created.status_code == 200
+        plan_id = created.json()["id"]
+
+        deleted = client.delete(f"/agent-run-plans/{plan_id}")
+        assert deleted.status_code == 200
+        assert deleted.json()["deleted"] is True
+
+        missing = client.get(f"/agent-run-plans/{plan_id}")
+        assert missing.status_code == 404

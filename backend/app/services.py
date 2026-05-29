@@ -1400,6 +1400,13 @@ class AppServices:
             for row in rows
         ]
 
+    async def delete_agent_run_plan(self, plan_id: str) -> bool:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            result = await conn.execute("delete from agent_run_plans where id = $1", plan_id)
+        return str(result).startswith("DELETE 1")
+
     async def enqueue_agent_run_plan(self, plan_id: str) -> dict[str, Any] | None:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
@@ -1577,7 +1584,7 @@ class AppServices:
             task = await conn.fetchrow(
                 """
                 select t.id, t.plan_id, t.status, t.input_payload, t.label_payload,
-                       p.bundle_path, p.max_workers, p.mlflow_parent_run_id, p.project_id
+                       p.bundle_path, p.max_workers, p.mlflow_experiment_id, p.mlflow_parent_run_id, p.project_id
                 from agent_run_tasks t
                 join agent_run_plans p on p.id = t.plan_id
                 where t.id = $1
@@ -1615,10 +1622,17 @@ class AppServices:
                 }
             ]
             parent_run_id = str(task["mlflow_parent_run_id"] or "")
+            experiment_id = str(task["mlflow_experiment_id"] or "")
+            tracking_uri = str(getattr(self.settings, "mlflow_tracking_uri", "") or "")
+            trace_ids_before: set[str] = set()
             if parent_run_id:
                 from app.executor.eval import _configure_dspy_mlflow_autolog
+                from app.executor.eval import _link_traces_to_parent_run
+                from app.executor.eval import _recent_trace_ids
                 from app.executor.eval import _run_bundle_eval_with_mlflow_parent
 
+                if tracking_uri and experiment_id:
+                    trace_ids_before = _recent_trace_ids(tracking_uri, experiment_id)
                 _configure_dspy_mlflow_autolog(self, str(task["project_id"]))
                 result = _run_bundle_eval_with_mlflow_parent(
                     bundle_path=str(task["bundle_path"]),
@@ -1626,6 +1640,13 @@ class AppServices:
                     num_threads=1,
                     parent_run_id=parent_run_id,
                 )
+                if tracking_uri and experiment_id:
+                    trace_ids_after = _recent_trace_ids(tracking_uri, experiment_id)
+                    _link_traces_to_parent_run(
+                        tracking_uri=tracking_uri,
+                        parent_run_id=parent_run_id,
+                        trace_ids=trace_ids_after - trace_ids_before,
+                    )
             else:
                 from app.executor.module_runner import run_bundle_eval
 
@@ -1635,8 +1656,45 @@ class AppServices:
                     num_threads=1,
                 )
             item = result["items"][0]
+            score = float(item["score"])
             log_lines.append("status=succeeded")
-            log_lines.append(f"score={float(item['score']):.4f}")
+            log_lines.append(f"score={score:.4f}")
+
+            if parent_run_id and experiment_id and tracking_uri:
+                try:
+                    from app.executor.eval import _cleanup_duplicate_judge_assessments
+                    from app.executor.eval import _list_parent_run_traces
+                    from app.executor.eval import _log_trace_feedback
+                    from app.executor.eval import _match_trace_id_for_item
+
+                    parent_traces = _list_parent_run_traces(
+                        tracking_uri=tracking_uri,
+                        experiment_id=experiment_id,
+                        parent_run_id=parent_run_id,
+                    )
+                    used_trace_ids: set[str] = set()
+                    if trace_ids_before:
+                        used_trace_ids = {str(tid) for tid in trace_ids_before}
+                    trace_id = _match_trace_id_for_item(
+                        item_input=self._json_dict(task["input_payload"]),
+                        traces=parent_traces,
+                        used=used_trace_ids,
+                    )
+                    if trace_id:
+                        _log_trace_feedback(
+                            tracking_uri=tracking_uri,
+                            trace_id=trace_id,
+                            parent_run_id=parent_run_id,
+                            score=score,
+                        )
+                        _cleanup_duplicate_judge_assessments(
+                            tracking_uri=tracking_uri,
+                            trace_id=trace_id,
+                            parent_run_id=parent_run_id,
+                        )
+                except Exception:
+                    pass
+
             async with self.postgres_pool.acquire() as conn:
                 await conn.execute(
                     """
@@ -1646,7 +1704,7 @@ class AppServices:
                     """,
                     task_id,
                     __import__("json").dumps(item["prediction"]),
-                    float(item["score"]),
+                    score,
                     bool(item.get("passed", False)),
                     str(item["rationale"]),
                     "\n".join(log_lines),

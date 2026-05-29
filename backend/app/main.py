@@ -612,6 +612,15 @@ async def list_agent_run_plans(request: Request, limit: int = 50, offset: int = 
     return await services.list_agent_run_plans(limit=limit, offset=offset)
 
 
+@app.delete("/agent-run-plans/{plan_id}")
+async def delete_agent_run_plan(plan_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    deleted = await services.delete_agent_run_plan(plan_id)
+    if not deleted:
+        return JSONResponse(status_code=404, content={"error": "agent run plan not found"})
+    return {"id": plan_id, "deleted": True}
+
+
 @app.post("/agent-run-plans/{plan_id}/enqueue")
 async def enqueue_agent_run_plan(plan_id: str, request: Request):
     services: AppServices = request.app.state.services

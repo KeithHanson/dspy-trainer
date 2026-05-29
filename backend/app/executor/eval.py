@@ -124,7 +124,7 @@ def _log_trace_feedback(
     trace_id: str,
     parent_run_id: str,
     score: float,
-    judge_name: str = "judge_metric",
+    judge_name: str = "metric_fn",
 ) -> None:
     if os.getenv("PYTEST_CURRENT_TEST"):
         return
@@ -143,7 +143,7 @@ def _log_trace_feedback(
     )
 
 
-def _cleanup_duplicate_judge_assessments(tracking_uri: str, trace_id: str, parent_run_id: str, judge_name: str = "judge_metric") -> None:
+def _cleanup_duplicate_judge_assessments(tracking_uri: str, trace_id: str, parent_run_id: str, judge_name: str = "metric_fn") -> None:
     if os.getenv("PYTEST_CURRENT_TEST"):
         return
     try:
@@ -176,7 +176,7 @@ def _normalize_judge_assessments_for_run(
     tracking_uri: str,
     experiment_id: str,
     parent_run_id: str,
-    judge_name: str = "judge_metric",
+    judge_name: str = "metric_fn",
 ) -> None:
     traces = _list_parent_run_traces(tracking_uri, experiment_id, parent_run_id)
     for trace in traces:

@@ -18,7 +18,28 @@ export function RunsPage() {
   const [selectedTask, setSelectedTask] = useState(null);
   const [filter, setFilter] = useState("all");
   const [isLoading, setIsLoading] = useState(false);
+  const [deletingPlanId, setDeletingPlanId] = useState("");
   const [error, setError] = useState("");
+
+  const deleteRunPlan = async (id) => {
+    const confirmed = window.confirm("Delete this eval job? This will remove all run items for it.");
+    if (!confirmed) {
+      return;
+    }
+    setDeletingPlanId(id);
+    setError("");
+    try {
+      const response = await fetch(`${apiBase}/agent-run-plans/${id}`, { method: "DELETE" });
+      if (!response.ok) {
+        throw new Error(`Could not delete eval job (${response.status})`);
+      }
+      setPlans((current) => current.filter((plan) => plan.id !== id));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not delete eval job");
+    } finally {
+      setDeletingPlanId("");
+    }
+  };
 
   useEffect(() => {
     const load = async () => {
@@ -111,6 +132,7 @@ export function RunsPage() {
                       <th>Average Score</th>
                       <th>Started</th>
                       <th></th>
+                      <th></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -123,6 +145,19 @@ export function RunsPage() {
                         <td className="mono">{typeof plan.average_score === "number" ? plan.average_score.toFixed(3) : "-"}</td>
                         <td className="cap">{formatTimeAgo(plan.created_at)}</td>
                         <td><Icon name="chevR" size={14} className="faint" /></td>
+                        <td>
+                          <Button
+                            size="sm"
+                            variant="danger"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              deleteRunPlan(plan.id);
+                            }}
+                            disabled={deletingPlanId === plan.id}
+                          >
+                            {deletingPlanId === plan.id ? "Deleting..." : "Delete"}
+                          </Button>
+                        </td>
                       </tr>
                     ))}
                   </tbody>

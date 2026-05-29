@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { vi } from "vitest";
 import { RunsPage } from "./RunsPage";
@@ -74,6 +75,47 @@ describe("RunsPage", () => {
 
     expect(await screen.findByText("Run summary")).toBeInTheDocument();
     expect((await screen.findAllByText("running")).length).toBeGreaterThan(0);
+    vi.unstubAllGlobals();
+  });
+
+  it("deletes an eval job from list", async () => {
+    const fetchMock = vi.fn((url, init) => {
+      if (String(url).includes("/agent-run-plans?") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([
+            { id: "plan-1", status: "running", completed_tasks: 1, total_tasks: 6, failed_tasks: 0, created_at: "2026-01-01T00:00:00+00:00" },
+          ]),
+        });
+      }
+      if (String(url).endsWith("/workers") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([]),
+        });
+      }
+      if (String(url).endsWith("/agent-run-plans/plan-1") && init?.method === "DELETE") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue({ id: "plan-1", deleted: true }),
+        });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("confirm", vi.fn(() => true));
+
+    render(
+      <MemoryRouter initialEntries={["/runs"]}>
+        <RunsPage />
+      </MemoryRouter>,
+    );
+
+    const deleteButton = await screen.findByRole("button", { name: "Delete" });
+    await userEvent.click(deleteButton);
+
+    expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/agent-run-plans\/plan-1$/), expect.objectContaining({ method: "DELETE" }));
+    expect(screen.queryByText("plan-1")).not.toBeInTheDocument();
     vi.unstubAllGlobals();
   });
 });
