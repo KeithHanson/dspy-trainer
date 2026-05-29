@@ -37,6 +37,7 @@ def build_lm() -> dspy.LM:
         api_base=litellm_base_url,
         api_key=litellm_api_key,
         model_type="responses",
+        cache=False,
     )
 
 

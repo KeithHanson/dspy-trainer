@@ -439,6 +439,26 @@ button { font-family: inherit; }
 .runs-kpi-fail { color: #ffb4a8; }
 .runs-kpi-warn { color: #eac372; }
 .runs-kpi-run { color: oklch(0.78 0.11 232); }
+.runs-mlflow-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--panel-2) 70%, transparent);
+  color: var(--text);
+  text-decoration: none;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.runs-mlflow-link:hover {
+  border-color: var(--accent-line);
+  color: var(--accent-hi);
+  background: color-mix(in oklch, var(--accent-dim) 42%, var(--panel-2));
+}
 .runs-dot { width: 8px; height: 8px; border-radius: 999px; display: inline-block; }
 .runs-dot-pass { background: var(--accent); }
 .runs-dot-fail { background: #e0573f; }

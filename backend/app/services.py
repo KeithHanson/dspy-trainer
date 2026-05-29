@@ -276,8 +276,11 @@ class AppServices:
                   module_import_id text not null references module_imports(id) on delete restrict,
                   scenario_id text not null,
                   dataset_version text not null,
+                  plan_name text not null default 'RunPlan',
                   bundle_path text not null,
                   eval_inputs jsonb not null default '[]'::jsonb,
+                  mlflow_experiment_id text,
+                  mlflow_parent_run_id text,
                   runs_per_question int not null default 1,
                   max_workers int not null default 1,
                   total_tasks int not null default 0,
@@ -289,6 +292,9 @@ class AppServices:
                 );
                 """
             )
+            await conn.execute("alter table agent_run_plans add column if not exists plan_name text not null default 'RunPlan';")
+            await conn.execute("alter table agent_run_plans add column if not exists mlflow_experiment_id text;")
+            await conn.execute("alter table agent_run_plans add column if not exists mlflow_parent_run_id text;")
             await conn.execute(
                 """
                 create table if not exists agent_run_tasks (
@@ -934,8 +940,9 @@ class AppServices:
             raise RuntimeError(f"MLflow {method} {path} returned invalid payload")
         return data
 
-    async def ensure_mlflow_experiment(self, project_id: str) -> str:
-        experiment_name = f"project:{project_id}"
+    async def ensure_mlflow_experiment(self, project_id: str, experiment_name: str | None = None) -> str:
+        if not experiment_name:
+            experiment_name = f"project:{project_id}"
         if self.http_client is None:
             raise RuntimeError("http client not initialized")
         url = (
@@ -1137,31 +1144,34 @@ class AppServices:
             raise RuntimeError("database not initialized")
         now = datetime.now(timezone.utc)
         plan_id = str(uuid4())
+        plan_name_value = "RunPlan"
         async with self.postgres_pool.acquire() as conn:
             module_exists = await conn.fetchval("select 1 from module_imports where id = $1", module_import_id)
             if module_exists is None:
                 return None
             effective_eval_inputs = eval_inputs
             if evaluation_plan_id:
-                plan_inputs = await conn.fetchval("select eval_inputs from evaluation_plans where id = $1", evaluation_plan_id)
-                if plan_inputs is None:
+                plan_row = await conn.fetchrow("select name, eval_inputs from evaluation_plans where id = $1", evaluation_plan_id)
+                if plan_row is None:
                     return None
-                effective_eval_inputs = self._json_list(plan_inputs)
+                plan_name_value = str(plan_row["name"] or "RunPlan").strip() or "RunPlan"
+                effective_eval_inputs = self._json_list(plan_row["eval_inputs"])
             await conn.execute(
                 """
                 insert into agent_run_plans (
                   id, status, project_id, module_import_id, scenario_id, dataset_version,
-                  bundle_path, eval_inputs, runs_per_question, max_workers,
+                  plan_name, bundle_path, eval_inputs, mlflow_experiment_id, mlflow_parent_run_id, runs_per_question, max_workers,
                   total_tasks, completed_tasks, failed_tasks, failure_reason,
                   created_at, updated_at
                 )
-                values ($1, 'draft', $2, $3, $4, $5, $6, $7::jsonb, $8, $9, 0, 0, 0, null, $10, $11)
+                values ($1, 'draft', $2, $3, $4, $5, $6, $7, $8::jsonb, null, null, $9, $10, 0, 0, 0, null, $11, $12)
                 """,
                 plan_id,
                 project_id,
                 module_import_id,
                 scenario_id,
                 dataset_version,
+                plan_name_value,
                 bundle_path,
                 __import__("json").dumps(effective_eval_inputs),
                 max(1, runs_per_question),
@@ -1305,7 +1315,7 @@ class AppServices:
             row = await conn.fetchrow(
                 """
                 select id, status, project_id, module_import_id, scenario_id, dataset_version,
-                       bundle_path, eval_inputs, runs_per_question, max_workers,
+                       plan_name, bundle_path, eval_inputs, mlflow_experiment_id, mlflow_parent_run_id, runs_per_question, max_workers,
                        (select count(*) from agent_run_tasks t where t.plan_id = agent_run_plans.id and t.status = 'running') as running_tasks,
                        total_tasks, completed_tasks, failed_tasks, failure_reason,
                        created_at, updated_at
@@ -1324,8 +1334,11 @@ class AppServices:
             "module_import_id": row["module_import_id"],
             "scenario_id": row["scenario_id"],
             "dataset_version": row["dataset_version"],
+            "plan_name": row["plan_name"],
             "bundle_path": row["bundle_path"],
             "eval_inputs": eval_inputs,
+            "mlflow_experiment_id": row["mlflow_experiment_id"],
+            "mlflow_parent_run_id": row["mlflow_parent_run_id"],
             "runs_per_question": row["runs_per_question"],
             "max_workers": row["max_workers"],
             "total_tasks": row["total_tasks"],
@@ -1345,7 +1358,7 @@ class AppServices:
             rows = await conn.fetch(
                 """
                 select id, status, project_id, module_import_id, scenario_id, dataset_version,
-                       bundle_path, eval_inputs, runs_per_question, max_workers,
+                       plan_name, bundle_path, eval_inputs, mlflow_experiment_id, mlflow_parent_run_id, runs_per_question, max_workers,
                        (
                          select avg(t.score)
                          from agent_run_tasks t
@@ -1368,8 +1381,11 @@ class AppServices:
                 "module_import_id": row["module_import_id"],
                 "scenario_id": row["scenario_id"],
                 "dataset_version": row["dataset_version"],
+                "plan_name": row["plan_name"],
                 "bundle_path": row["bundle_path"],
                 "eval_inputs": self._json_list(row["eval_inputs"]),
+                "mlflow_experiment_id": row["mlflow_experiment_id"],
+                "mlflow_parent_run_id": row["mlflow_parent_run_id"],
                 "runs_per_question": row["runs_per_question"],
                 "max_workers": row["max_workers"],
                 "running_tasks": int((row["running_tasks"] if "running_tasks" in row else 0) or 0),
@@ -1393,13 +1409,49 @@ class AppServices:
         async with self.postgres_pool.acquire() as conn:
             plan = await conn.fetchrow(
                 """
-                select id, eval_inputs, runs_per_question, max_workers
+                select id, project_id, module_import_id, scenario_id, dataset_version, plan_name, eval_inputs, runs_per_question, max_workers,
+                       mlflow_experiment_id, mlflow_parent_run_id
                 from agent_run_plans where id = $1
                 """,
                 plan_id,
             )
             if plan is None:
                 return None
+            if not plan["mlflow_experiment_id"] or not plan["mlflow_parent_run_id"]:
+                module_meta = await conn.fetchrow(
+                    "select bundle_name, bundle_version from module_imports where id = $1",
+                    str(plan["module_import_id"]),
+                )
+                bundle_name = str(module_meta["bundle_name"] or "").strip() if module_meta else ""
+                bundle_version = str(module_meta["bundle_version"] or "").strip() if module_meta else ""
+                experiment_name = f"{bundle_name}_v{bundle_version}" if bundle_name and bundle_version else f"project:{plan['project_id']}"
+                experiment_id = await self.ensure_mlflow_experiment(str(plan["project_id"]), experiment_name=experiment_name)
+                parent_tags = {
+                    "type": "agent_run_plan",
+                    "project_id": str(plan["project_id"]),
+                    "plan_id": str(plan_id),
+                    "scenario_id": str(plan["scenario_id"]),
+                    "dataset_version": str(plan["dataset_version"]),
+                }
+                plan_name = str(plan["plan_name"] or "RunPlan").strip() or "RunPlan"
+                parent_run_id = await self.create_mlflow_run(
+                    experiment_id=str(experiment_id),
+                    run_name=f"{plan_name}_{plan_id[:8]}",
+                    tags=parent_tags,
+                )
+                await conn.execute(
+                    """
+                    update agent_run_plans
+                    set mlflow_experiment_id = $2,
+                        mlflow_parent_run_id = $3,
+                        updated_at = $4
+                    where id = $1
+                    """,
+                    plan_id,
+                    str(experiment_id),
+                    str(parent_run_id),
+                    now,
+                )
             existing = await conn.fetchval("select count(*) from agent_run_tasks where plan_id = $1", plan_id)
             if int(existing) == 0:
                 eval_inputs = self._json_list(plan["eval_inputs"])
@@ -1525,7 +1577,7 @@ class AppServices:
             task = await conn.fetchrow(
                 """
                 select t.id, t.plan_id, t.status, t.input_payload, t.label_payload,
-                       p.bundle_path, p.max_workers
+                       p.bundle_path, p.max_workers, p.mlflow_parent_run_id, p.project_id
                 from agent_run_tasks t
                 join agent_run_plans p on p.id = t.plan_id
                 where t.id = $1
@@ -1556,18 +1608,32 @@ class AppServices:
                 now,
             )
         try:
-            from app.executor.module_runner import run_bundle_eval
+            eval_inputs = [
+                {
+                    "input": self._json_dict(task["input_payload"]),
+                    "label": self._json_dict(task["label_payload"]),
+                }
+            ]
+            parent_run_id = str(task["mlflow_parent_run_id"] or "")
+            if parent_run_id:
+                from app.executor.eval import _configure_dspy_mlflow_autolog
+                from app.executor.eval import _run_bundle_eval_with_mlflow_parent
 
-            result = run_bundle_eval(
-                bundle_path=str(task["bundle_path"]),
-                eval_inputs=[
-                    {
-                        "input": self._json_dict(task["input_payload"]),
-                        "label": self._json_dict(task["label_payload"]),
-                    }
-                ],
-                num_threads=1,
-            )
+                _configure_dspy_mlflow_autolog(self, str(task["project_id"]))
+                result = _run_bundle_eval_with_mlflow_parent(
+                    bundle_path=str(task["bundle_path"]),
+                    eval_inputs=eval_inputs,
+                    num_threads=1,
+                    parent_run_id=parent_run_id,
+                )
+            else:
+                from app.executor.module_runner import run_bundle_eval
+
+                result = run_bundle_eval(
+                    bundle_path=str(task["bundle_path"]),
+                    eval_inputs=eval_inputs,
+                    num_threads=1,
+                )
             item = result["items"][0]
             log_lines.append("status=succeeded")
             log_lines.append(f"score={float(item['score']):.4f}")
@@ -1622,6 +1688,7 @@ class AppServices:
             status = "running"
             if pending_or_active == 0 and total > 0:
                 status = "failed" if failed > 0 else "succeeded"
+            plan_row = await conn.fetchrow("select mlflow_parent_run_id, status from agent_run_plans where id = $1", plan_id)
             await conn.execute(
                 """
                 update agent_run_plans
@@ -1635,6 +1702,12 @@ class AppServices:
                 failed,
                 now,
             )
+        if plan_row and plan_row["mlflow_parent_run_id"] and status in {"succeeded", "failed"}:
+            mlflow_status = "FINISHED" if status == "succeeded" else "FAILED"
+            try:
+                await self.finalize_mlflow_run(str(plan_row["mlflow_parent_run_id"]), status=mlflow_status)
+            except Exception:
+                pass
 
     async def _queue_more_agent_run_tasks(self, plan_id: str) -> None:
         if self.postgres_pool is None or self.redis is None:

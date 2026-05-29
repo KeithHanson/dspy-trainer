@@ -197,6 +197,18 @@ export function RunsPage() {
                 <Kpi label="Running" value={counts.running} tone="run" />
               </div>
               <p className="cap mono" style={{ marginTop: 10 }}>Run ID: {runPlan.id}</p>
+              {runPlan.mlflow_parent_run_id ? (
+                <p className="cap" style={{ marginTop: 8 }}>
+                  <a
+                    className="runs-mlflow-link"
+                    href={`${(import.meta.env.VITE_MLFLOW_BASE_URL || "http://localhost:5001").replace(/\/$/, "")}/#/experiments/${encodeURIComponent(runPlan.mlflow_experiment_id || "0")}/runs/${encodeURIComponent(runPlan.mlflow_parent_run_id)}`}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Open MLflow eval run
+                  </a>
+                </p>
+              ) : null}
             </section>
 
             <div className="row between" style={{ marginBottom: 10 }}>

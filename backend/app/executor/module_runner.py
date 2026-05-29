@@ -52,6 +52,22 @@ def _normalize_judge_result(raw_result: Any, item_index: int) -> dict[str, Any]:
     }
 
 
+def _disable_lm_cache(lm: Any) -> None:
+    if hasattr(lm, "cache"):
+        try:
+            setattr(lm, "cache", False)
+        except Exception:
+            pass
+
+
+def _run_judge_metric_without_autolog(raw_metric_fn: Any, example: Any, prediction: Any, lm: Any) -> Any:
+    if lm is not None:
+        with dspy.context(lm=lm, callbacks=[]):
+            return raw_metric_fn(example, prediction)
+    with dspy.context(callbacks=[]):
+        return raw_metric_fn(example, prediction)
+
+
 def run_bundle_eval(bundle_path: str, eval_inputs: list[dict[str, Any]], num_threads: int = 1) -> dict[str, Any]:
     root = Path(bundle_path).expanduser().resolve()
     pass_threshold = 0.5
@@ -75,17 +91,9 @@ def run_bundle_eval(bundle_path: str, eval_inputs: list[dict[str, Any]], num_thr
 
     program = module_mod.build_program()
     lm = module_mod.build_lm() if hasattr(module_mod, "build_lm") else None
+    if lm is not None:
+        _disable_lm_cache(lm)
     raw_metric_fn = metric_mod.judge_metric
-
-    metric_call_index = [0]
-    judge_results: list[dict[str, Any]] = []
-
-    def metric_fn(example: Any, prediction: Any) -> float:
-        item_index = metric_call_index[0]
-        normalized = _normalize_judge_result(raw_metric_fn(example, prediction), item_index)
-        judge_results.append(normalized)
-        metric_call_index[0] = item_index + 1
-        return normalized["score"]
 
     devset = []
     for item in eval_inputs:
@@ -94,28 +102,22 @@ def run_bundle_eval(bundle_path: str, eval_inputs: list[dict[str, Any]], num_thr
         ex = dspy.Example(**input_payload, label=label_payload).with_inputs(*input_payload.keys())
         devset.append(ex)
 
-    evaluator = dspy.Evaluate(
-        devset=devset,
-        metric=metric_fn,
-        num_threads=max(1, int(num_threads)),
-        display_progress=False,
-        display_table=False,
-    )
-    if lm is not None:
-        with dspy.context(lm=lm):
-            result = evaluator(program)
-    else:
-        result = evaluator(program)
+    predictions: list[Any] = []
+    for example in devset:
+        inputs = example.inputs().toDict()
+        if lm is not None:
+            with dspy.context(lm=lm):
+                prediction = program(**inputs)
+        else:
+            prediction = program(**inputs)
+        predictions.append(prediction)
 
     normalized = []
-    for idx, (example, prediction, score) in enumerate(result.results):
-        if idx < len(judge_results):
-            judge_result = judge_results[idx]
-        elif lm is not None:
-            with dspy.context(lm=lm):
-                judge_result = _normalize_judge_result(raw_metric_fn(example, prediction), idx)
-        else:
-            judge_result = _normalize_judge_result(raw_metric_fn(example, prediction), idx)
+    for idx, (example, prediction) in enumerate(zip(devset, predictions)):
+        judge_result = _normalize_judge_result(
+            _run_judge_metric_without_autolog(raw_metric_fn, example, prediction, lm),
+            idx,
+        )
         normalized.append(
             {
                 "item_index": idx,
@@ -130,8 +132,10 @@ def run_bundle_eval(bundle_path: str, eval_inputs: list[dict[str, Any]], num_thr
             }
         )
 
+    avg_score = sum(item["score"] for item in normalized) / float(len(normalized)) if normalized else 0.0
+
     return {
-        "score_pct": result.score,
+        "score_pct": avg_score * 100.0,
         "items": normalized,
         "score_pass_threshold": pass_threshold,
         "judge_instructions": getattr(metric_mod, "JUDGE_INSTRUCTIONS", ""),

@@ -25,7 +25,6 @@ def _configure_dspy_mlflow_autolog(services: Any, project_id: str) -> None:
 
     try:
         mlflow.set_tracking_uri(tracking_uri)
-        mlflow.set_experiment(f"project:{project_id}")
         dspy_mlflow.autolog(log_compiles=True, log_evals=True, log_traces_from_compile=True)
     except Exception:
         return
