@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     mlflow_tracking_uri: str = Field(default="http://localhost:5001")
     litellm_base_url: str = Field(default="http://localhost:4000")
     litellm_api_key: str = Field(default="")
+    cors_allow_origins: str = Field(default="http://localhost:5173,http://127.0.0.1:5173")
 
     @field_validator("postgres_dsn")
     @classmethod

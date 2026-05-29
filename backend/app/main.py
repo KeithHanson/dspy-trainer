@@ -1,8 +1,12 @@
 from contextlib import asynccontextmanager
+from io import BytesIO
+import os
 from typing import Any
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
@@ -22,6 +26,83 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="dspy-trainer-backend", lifespan=lifespan)
+raw_cors_origins = os.getenv(
+    "DSPY_TRAINER_CORS_ALLOW_ORIGINS",
+    "http://localhost:5173,http://127.0.0.1:5173",
+)
+cors_origins = [origin.strip() for origin in raw_cors_origins.split(",") if origin.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+SAMPLE_BUNDLE_FILES: dict[str, str] = {
+    "example-bundle/module.py": """import dspy
+
+
+class TicketSignature(dspy.Signature):
+    \"\"\"Classify support requests and draft replies.\"\"\"
+
+    ticket = dspy.InputField(desc=\"New support ticket text\")
+    history = dspy.InputField(desc=\"Prior thread context\")
+    category = dspy.OutputField(desc=\"Issue category\")
+    priority = dspy.OutputField(desc=\"Priority from low/medium/high\")
+    reply = dspy.OutputField(desc=\"Suggested customer response\")
+
+
+class TriageAgent(dspy.Module):
+    def __init__(self):
+        super().__init__()
+        self.respond = dspy.ChainOfThought(TicketSignature)
+
+    def forward(self, ticket: str, history: str):
+        return self.respond(ticket=ticket, history=history)
+
+
+def build_program():
+    return TriageAgent()
+""",
+    "example-bundle/metric.py": """JUDGE_INSTRUCTIONS = '''
+Return true only when the output classifies category and priority correctly
+and the response is safe and actionable.
+'''
+
+
+def judge_metric(example, prediction, trace=None):
+    expected_category = str(example.get("expected_category", "")).strip().lower()
+    expected_priority = str(example.get("expected_priority", "")).strip().lower()
+
+    category = str(getattr(prediction, "category", "")).strip().lower()
+    priority = str(getattr(prediction, "priority", "")).strip().lower()
+    reply = str(getattr(prediction, "reply", "")).strip()
+
+    return (
+        bool(reply)
+        and category == expected_category
+        and priority == expected_priority
+    )
+""",
+    "example-bundle/bundle.toml": """name = \"support-triage-agent\"
+version = \"0.1.0\"
+lm_target = \"gpt-4.1-mini\"
+dspy_version = \">=2.5,<3.0\"
+""",
+    "example-bundle/README.md": """# Example DSPy Bundle
+
+This sample bundle includes the minimum required files:
+
+- `module.py`
+- `metric.py`
+- `bundle.toml`
+
+Use it as a baseline, update the signature and metric contract for your use case,
+then upload the bundle in the web app for validation.
+""",
+}
 
 
 class ModuleImportRequest(BaseModel):
@@ -104,6 +185,16 @@ async def ready(request: Request):
     if status.ok:
         return payload
     return JSONResponse(status_code=503, content=payload)
+
+
+@app.get("/samples/module-bundle")
+async def download_module_bundle_sample():
+    bundle = BytesIO()
+    with ZipFile(bundle, mode="w", compression=ZIP_DEFLATED) as archive:
+        for path, body in SAMPLE_BUNDLE_FILES.items():
+            archive.writestr(path, body)
+    headers = {"Content-Disposition": 'attachment; filename="example-bundle.zip"'}
+    return Response(content=bundle.getvalue(), media_type="application/zip", headers=headers)
 
 
 @app.post("/modules/import")

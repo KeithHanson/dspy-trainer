@@ -126,9 +126,36 @@ button { font-family: inherit; }
 .dashboard-quick { display: flex; flex-direction: column; gap: 2px; align-items: flex-start; text-align: left; border: 1px solid var(--border-soft); background: var(--surface); border-radius: var(--r); color: var(--text); padding: 10px; }
 .dashboard-zero { padding: 14px; color: var(--text-muted); }
 
+.bundles-wrap { max-width: 980px; }
+.bundles-head { align-items: flex-start; margin-bottom: 18px; }
+.bundles-section { margin-bottom: 14px; }
+.bundles-structure {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  background: var(--bg-deep);
+  color: var(--text-2);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.5;
+  overflow-x: auto;
+}
+.bundles-checklist {
+  margin-top: 12px;
+  padding-left: 18px;
+  display: grid;
+  gap: 8px;
+  color: var(--text-2);
+}
+
 @media (max-width: 1080px) {
   .dashboard-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .dashboard-two-up { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 880px) {
+  .bundles-head { flex-direction: column; gap: 12px; }
 }
 
 .auth-loading, .auth-missing { min-height: 100vh; background: var(--bg-deep); padding: 24px; }
