@@ -32,6 +32,7 @@ async def fake_create_agent_run_plan(
     bundle_path,
     eval_inputs,
     evaluation_plan_id,
+    lm_profile_id,
     runs_per_question,
     max_workers,
 ):
@@ -54,6 +55,7 @@ async def fake_create_agent_run_plan(
         "scenario_id": scenario_id,
         "dataset_version": dataset_version,
         "bundle_path": bundle_path,
+        "lm_profile_id": lm_profile_id,
         "eval_inputs": effective_eval_inputs,
         "runs_per_question": runs_per_question,
         "max_workers": max_workers,

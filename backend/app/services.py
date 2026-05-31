@@ -248,6 +248,26 @@ class AppServices:
             )
             await conn.execute(
                 """
+                create table if not exists lm_profiles (
+                  id text primary key,
+                  name text not null,
+                  model text not null,
+                  api_base text not null,
+                  model_type text not null default 'responses',
+                  default_params jsonb not null default '{}'::jsonb,
+                  lm_class_path text,
+                  archived_at timestamptz,
+                  created_at timestamptz not null,
+                  updated_at timestamptz not null
+                );
+                """
+            )
+            await conn.execute("alter table lm_profiles add column if not exists model_type text not null default 'responses';")
+            await conn.execute("alter table lm_profiles add column if not exists default_params jsonb not null default '{}'::jsonb;")
+            await conn.execute("alter table lm_profiles add column if not exists lm_class_path text;")
+            await conn.execute("alter table lm_profiles add column if not exists archived_at timestamptz;")
+            await conn.execute(
+                """
                 create table if not exists evaluation_plans (
                   id text primary key,
                   project_id text not null,
@@ -267,6 +287,7 @@ class AppServices:
             await conn.execute("alter table evaluation_plans add column if not exists runs_per_question int not null default 1;")
             await conn.execute("alter table evaluation_plans add column if not exists max_workers int not null default 1;")
             await conn.execute("alter table evaluation_plans add column if not exists module_import_id text;")
+            await conn.execute("alter table evaluation_plans add column if not exists lm_profile_id text references lm_profiles(id) on delete set null;")
             await conn.execute(
                 """
                 create table if not exists agent_run_plans (
@@ -277,6 +298,7 @@ class AppServices:
                   scenario_id text not null,
                   dataset_version text not null,
                   plan_name text not null default 'RunPlan',
+                  lm_profile_id text references lm_profiles(id) on delete set null,
                   bundle_path text not null,
                   eval_inputs jsonb not null default '[]'::jsonb,
                   mlflow_experiment_id text,
@@ -293,6 +315,7 @@ class AppServices:
                 """
             )
             await conn.execute("alter table agent_run_plans add column if not exists plan_name text not null default 'RunPlan';")
+            await conn.execute("alter table agent_run_plans add column if not exists lm_profile_id text references lm_profiles(id) on delete set null;")
             await conn.execute("alter table agent_run_plans add column if not exists mlflow_experiment_id text;")
             await conn.execute("alter table agent_run_plans add column if not exists mlflow_parent_run_id text;")
             await conn.execute(
@@ -1128,6 +1151,165 @@ class AppServices:
                 )
         return await self.get_optimization_job(optimization_job_id)
 
+    async def create_lm_profile(
+        self,
+        name: str,
+        model: str,
+        api_base: str,
+        model_type: str,
+        default_params: dict[str, Any],
+        lm_class_path: str | None,
+    ) -> dict[str, Any]:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        profile_id = str(uuid4())
+        now = datetime.now(timezone.utc)
+        async with self.postgres_pool.acquire() as conn:
+            await conn.execute(
+                """
+                insert into lm_profiles (
+                  id, name, model, api_base, model_type, default_params, lm_class_path, archived_at, created_at, updated_at
+                )
+                values ($1, $2, $3, $4, $5, $6::jsonb, $7, null, $8, $9)
+                """,
+                profile_id,
+                name.strip() or "Unnamed profile",
+                model.strip(),
+                api_base.strip(),
+                model_type.strip() or "responses",
+                __import__("json").dumps(default_params if isinstance(default_params, dict) else {}),
+                lm_class_path.strip() if isinstance(lm_class_path, str) and lm_class_path.strip() else None,
+                now,
+                now,
+            )
+        result = await self.get_lm_profile(profile_id)
+        if result is None:
+            raise RuntimeError("failed to load lm profile")
+        return result
+
+    async def list_lm_profiles(self) -> list[dict[str, Any]]:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                select id, name, model, api_base, model_type, default_params, lm_class_path, archived_at, created_at, updated_at
+                from lm_profiles
+                where archived_at is null
+                order by created_at desc
+                """
+            )
+        return [
+            {
+                "id": row["id"],
+                "name": row["name"],
+                "model": row["model"],
+                "api_base": row["api_base"],
+                "model_type": row["model_type"],
+                "default_params": self._json_dict(row["default_params"]),
+                "lm_class_path": row["lm_class_path"],
+                "created_at": row["created_at"].isoformat(),
+                "updated_at": row["updated_at"].isoformat(),
+            }
+            for row in rows
+        ]
+
+    async def get_lm_profile(self, lm_profile_id: str) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                select id, name, model, api_base, model_type, default_params, lm_class_path, archived_at, created_at, updated_at
+                from lm_profiles
+                where id = $1 and archived_at is null
+                """,
+                lm_profile_id,
+            )
+        if row is None:
+            return None
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "model": row["model"],
+            "api_base": row["api_base"],
+            "model_type": row["model_type"],
+            "default_params": self._json_dict(row["default_params"]),
+            "lm_class_path": row["lm_class_path"],
+            "created_at": row["created_at"].isoformat(),
+            "updated_at": row["updated_at"].isoformat(),
+        }
+
+    async def update_lm_profile(
+        self,
+        lm_profile_id: str,
+        name: str | None,
+        model: str | None,
+        api_base: str | None,
+        model_type: str | None,
+        default_params: dict[str, Any] | None,
+        lm_class_path: str | None,
+    ) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        now = datetime.now(timezone.utc)
+        async with self.postgres_pool.acquire() as conn:
+            existing = await conn.fetchrow(
+                """
+                select id, name, model, api_base, model_type, default_params, lm_class_path
+                from lm_profiles
+                where id = $1 and archived_at is null
+                """,
+                lm_profile_id,
+            )
+            if existing is None:
+                return None
+            next_name = name.strip() if isinstance(name, str) and name.strip() else existing["name"]
+            next_model = model.strip() if isinstance(model, str) and model.strip() else existing["model"]
+            next_api_base = api_base.strip() if isinstance(api_base, str) and api_base.strip() else existing["api_base"]
+            next_model_type = model_type.strip() if isinstance(model_type, str) and model_type.strip() else existing["model_type"]
+            next_default_params = default_params if isinstance(default_params, dict) else self._json_dict(existing["default_params"])
+            next_lm_class_path = lm_class_path.strip() if isinstance(lm_class_path, str) and lm_class_path.strip() else None
+            await conn.execute(
+                """
+                update lm_profiles
+                set name = $2,
+                    model = $3,
+                    api_base = $4,
+                    model_type = $5,
+                    default_params = $6::jsonb,
+                    lm_class_path = $7,
+                    updated_at = $8
+                where id = $1
+                """,
+                lm_profile_id,
+                next_name,
+                next_model,
+                next_api_base,
+                next_model_type,
+                __import__("json").dumps(next_default_params),
+                next_lm_class_path,
+                now,
+            )
+        return await self.get_lm_profile(lm_profile_id)
+
+    async def delete_lm_profile(self, lm_profile_id: str) -> bool:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        now = datetime.now(timezone.utc)
+        async with self.postgres_pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                update lm_profiles
+                set archived_at = $2,
+                    updated_at = $2
+                where id = $1 and archived_at is null
+                """,
+                lm_profile_id,
+                now,
+            )
+        return str(result).startswith("UPDATE 1")
+
     async def create_agent_run_plan(
         self,
         project_id: str,
@@ -1137,6 +1319,7 @@ class AppServices:
         bundle_path: str,
         eval_inputs: list[dict[str, Any]],
         evaluation_plan_id: str | None,
+        lm_profile_id: str | None,
         runs_per_question: int,
         max_workers: int,
     ) -> dict[str, Any] | None:
@@ -1145,26 +1328,36 @@ class AppServices:
         now = datetime.now(timezone.utc)
         plan_id = str(uuid4())
         plan_name_value = "RunPlan"
+        effective_lm_profile_id = lm_profile_id
         async with self.postgres_pool.acquire() as conn:
             module_exists = await conn.fetchval("select 1 from module_imports where id = $1", module_import_id)
             if module_exists is None:
                 return None
             effective_eval_inputs = eval_inputs
             if evaluation_plan_id:
-                plan_row = await conn.fetchrow("select name, eval_inputs from evaluation_plans where id = $1", evaluation_plan_id)
+                plan_row = await conn.fetchrow(
+                    "select name, eval_inputs, lm_profile_id from evaluation_plans where id = $1",
+                    evaluation_plan_id,
+                )
                 if plan_row is None:
                     return None
                 plan_name_value = str(plan_row["name"] or "RunPlan").strip() or "RunPlan"
                 effective_eval_inputs = self._json_list(plan_row["eval_inputs"])
+                if effective_lm_profile_id is None:
+                    effective_lm_profile_id = plan_row["lm_profile_id"]
+            if effective_lm_profile_id:
+                profile_exists = await conn.fetchval("select 1 from lm_profiles where id = $1 and archived_at is null", effective_lm_profile_id)
+                if profile_exists is None:
+                    return None
             await conn.execute(
                 """
                 insert into agent_run_plans (
                   id, status, project_id, module_import_id, scenario_id, dataset_version,
-                  plan_name, bundle_path, eval_inputs, mlflow_experiment_id, mlflow_parent_run_id, runs_per_question, max_workers,
+                  plan_name, lm_profile_id, bundle_path, eval_inputs, mlflow_experiment_id, mlflow_parent_run_id, runs_per_question, max_workers,
                   total_tasks, completed_tasks, failed_tasks, failure_reason,
                   created_at, updated_at
                 )
-                values ($1, 'draft', $2, $3, $4, $5, $6, $7, $8::jsonb, null, null, $9, $10, 0, 0, 0, null, $11, $12)
+                values ($1, 'draft', $2, $3, $4, $5, $6, $7, $8, $9::jsonb, null, null, $10, $11, 0, 0, 0, null, $12, $13)
                 """,
                 plan_id,
                 project_id,
@@ -1172,6 +1365,7 @@ class AppServices:
                 scenario_id,
                 dataset_version,
                 plan_name_value,
+                effective_lm_profile_id,
                 bundle_path,
                 __import__("json").dumps(effective_eval_inputs),
                 max(1, runs_per_question),
@@ -1190,6 +1384,7 @@ class AppServices:
         runs_per_question: int,
         max_workers: int,
         module_import_id: str | None,
+        lm_profile_id: str | None,
         eval_inputs: list[dict[str, Any]],
     ) -> dict[str, Any]:
         if self.postgres_pool is None:
@@ -1197,12 +1392,16 @@ class AppServices:
         now = datetime.now(timezone.utc)
         plan_id = str(uuid4())
         async with self.postgres_pool.acquire() as conn:
+            if lm_profile_id:
+                profile_exists = await conn.fetchval("select 1 from lm_profiles where id = $1 and archived_at is null", lm_profile_id)
+                if profile_exists is None:
+                    raise ValueError("lm profile not found")
             await conn.execute(
                 """
                 insert into evaluation_plans (
-                  id, project_id, scenario_id, dataset_version, name, runs_per_question, max_workers, module_import_id, eval_inputs, created_at, updated_at
+                  id, project_id, scenario_id, dataset_version, name, runs_per_question, max_workers, module_import_id, lm_profile_id, eval_inputs, created_at, updated_at
                 )
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12)
                 """,
                 plan_id,
                 project_id,
@@ -1212,6 +1411,7 @@ class AppServices:
                 max(1, runs_per_question),
                 max(1, max_workers),
                 module_import_id,
+                lm_profile_id,
                 __import__("json").dumps(eval_inputs),
                 now,
                 now,
@@ -1227,7 +1427,7 @@ class AppServices:
         async with self.postgres_pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                select id, project_id, scenario_id, dataset_version, name, runs_per_question, max_workers, module_import_id, eval_inputs, created_at, updated_at
+                select id, project_id, scenario_id, dataset_version, name, runs_per_question, max_workers, module_import_id, lm_profile_id, eval_inputs, created_at, updated_at
                 from evaluation_plans
                 where id = $1
                 """,
@@ -1244,6 +1444,7 @@ class AppServices:
             "runs_per_question": row["runs_per_question"],
             "max_workers": row["max_workers"],
             "module_import_id": row["module_import_id"],
+            "lm_profile_id": row["lm_profile_id"],
             "eval_inputs": self._json_list(row["eval_inputs"]),
             "created_at": row["created_at"].isoformat(),
             "updated_at": row["updated_at"].isoformat(),
@@ -1255,7 +1456,7 @@ class AppServices:
         async with self.postgres_pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                select id, project_id, scenario_id, dataset_version, name, runs_per_question, max_workers, module_import_id, eval_inputs, created_at, updated_at
+                select id, project_id, scenario_id, dataset_version, name, runs_per_question, max_workers, module_import_id, lm_profile_id, eval_inputs, created_at, updated_at
                 from evaluation_plans
                 order by created_at desc
                 """
@@ -1270,6 +1471,7 @@ class AppServices:
                 "runs_per_question": row["runs_per_question"],
                 "max_workers": row["max_workers"],
                 "module_import_id": row["module_import_id"],
+                "lm_profile_id": row["lm_profile_id"],
                 "eval_inputs": self._json_list(row["eval_inputs"]),
                 "created_at": row["created_at"].isoformat(),
                 "updated_at": row["updated_at"].isoformat(),
@@ -1315,7 +1517,7 @@ class AppServices:
             row = await conn.fetchrow(
                 """
                 select id, status, project_id, module_import_id, scenario_id, dataset_version,
-                       plan_name, bundle_path, eval_inputs, mlflow_experiment_id, mlflow_parent_run_id, runs_per_question, max_workers,
+                       plan_name, lm_profile_id, bundle_path, eval_inputs, mlflow_experiment_id, mlflow_parent_run_id, runs_per_question, max_workers,
                        (select count(*) from agent_run_tasks t where t.plan_id = agent_run_plans.id and t.status = 'running') as running_tasks,
                        total_tasks, completed_tasks, failed_tasks, failure_reason,
                        created_at, updated_at
@@ -1335,6 +1537,7 @@ class AppServices:
             "scenario_id": row["scenario_id"],
             "dataset_version": row["dataset_version"],
             "plan_name": row["plan_name"],
+            "lm_profile_id": row["lm_profile_id"],
             "bundle_path": row["bundle_path"],
             "eval_inputs": eval_inputs,
             "mlflow_experiment_id": row["mlflow_experiment_id"],
@@ -1358,7 +1561,7 @@ class AppServices:
             rows = await conn.fetch(
                 """
                 select id, status, project_id, module_import_id, scenario_id, dataset_version,
-                       plan_name, bundle_path, eval_inputs, mlflow_experiment_id, mlflow_parent_run_id, runs_per_question, max_workers,
+                       plan_name, lm_profile_id, bundle_path, eval_inputs, mlflow_experiment_id, mlflow_parent_run_id, runs_per_question, max_workers,
                        (
                          select avg(t.score)
                          from agent_run_tasks t
@@ -1392,6 +1595,7 @@ class AppServices:
                 "scenario_id": row["scenario_id"],
                 "dataset_version": row["dataset_version"],
                 "plan_name": row["plan_name"],
+                "lm_profile_id": row["lm_profile_id"],
                 "bundle_path": row["bundle_path"],
                 "eval_inputs": self._json_list(row["eval_inputs"]),
                 "mlflow_experiment_id": row["mlflow_experiment_id"],

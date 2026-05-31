@@ -21,7 +21,7 @@ async def fake_disconnect(self):
     return None
 
 
-async def fake_create_evaluation_plan(self, project_id, scenario_id, dataset_version, name, runs_per_question, max_workers, module_import_id, eval_inputs):
+async def fake_create_evaluation_plan(self, project_id, scenario_id, dataset_version, name, runs_per_question, max_workers, module_import_id, lm_profile_id, eval_inputs):
     global NEXT_PLAN_ID
     plan_id = f"eval-plan-{NEXT_PLAN_ID}"
     NEXT_PLAN_ID += 1
@@ -34,6 +34,7 @@ async def fake_create_evaluation_plan(self, project_id, scenario_id, dataset_ver
         "runs_per_question": runs_per_question,
         "max_workers": max_workers,
         "module_import_id": module_import_id,
+        "lm_profile_id": lm_profile_id,
         "eval_inputs": eval_inputs,
         "created_at": "2026-01-01T00:00:00+00:00",
         "updated_at": "2026-01-01T00:00:00+00:00",

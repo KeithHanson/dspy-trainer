@@ -117,6 +117,7 @@ class AgentRunPlanCreateRequest(BaseModel):
     bundle_path: str
     eval_inputs: list[dict[str, Any]] = Field(default_factory=list)
     evaluation_plan_id: str | None = None
+    lm_profile_id: str | None = None
     runs_per_question: int = 1
     max_workers: int = 1
 
@@ -129,7 +130,26 @@ class EvaluationPlanCreateRequest(BaseModel):
     runs_per_question: int = 1
     max_workers: int = 1
     module_import_id: str | None = None
+    lm_profile_id: str | None = None
     eval_inputs: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class LmProfileCreateRequest(BaseModel):
+    name: str
+    model: str
+    api_base: str
+    model_type: str = "responses"
+    default_params: dict[str, Any] = Field(default_factory=dict)
+    lm_class_path: str | None = None
+
+
+class LmProfileUpdateRequest(BaseModel):
+    name: str | None = None
+    model: str | None = None
+    api_base: str | None = None
+    model_type: str | None = None
+    default_params: dict[str, Any] | None = None
+    lm_class_path: str | None = None
 
 
 @app.get("/health")
@@ -443,6 +463,7 @@ async def create_agent_run_plan(request: Request, payload: AgentRunPlanCreateReq
         bundle_path=payload.bundle_path,
         eval_inputs=payload.eval_inputs,
         evaluation_plan_id=payload.evaluation_plan_id,
+        lm_profile_id=payload.lm_profile_id,
         runs_per_question=payload.runs_per_question,
         max_workers=payload.max_workers,
     )
@@ -498,17 +519,75 @@ async def list_agent_run_plan_tasks(plan_id: str, request: Request, limit: int =
 @app.post("/evaluation-plans")
 async def create_evaluation_plan(request: Request, payload: EvaluationPlanCreateRequest):
     services: AppServices = request.app.state.services
-    result = await services.create_evaluation_plan(
-        project_id=payload.project_id,
-        scenario_id=payload.scenario_id,
-        dataset_version=payload.dataset_version,
-        name=payload.name,
-        runs_per_question=payload.runs_per_question,
-        max_workers=payload.max_workers,
-        module_import_id=payload.module_import_id,
-        eval_inputs=payload.eval_inputs,
-    )
+    try:
+        result = await services.create_evaluation_plan(
+            project_id=payload.project_id,
+            scenario_id=payload.scenario_id,
+            dataset_version=payload.dataset_version,
+            name=payload.name,
+            runs_per_question=payload.runs_per_question,
+            max_workers=payload.max_workers,
+            module_import_id=payload.module_import_id,
+            lm_profile_id=payload.lm_profile_id,
+            eval_inputs=payload.eval_inputs,
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=404, content={"error": str(exc)})
     return result
+
+
+@app.post("/lm-profiles")
+async def create_lm_profile(request: Request, payload: LmProfileCreateRequest):
+    services: AppServices = request.app.state.services
+    return await services.create_lm_profile(
+        name=payload.name,
+        model=payload.model,
+        api_base=payload.api_base,
+        model_type=payload.model_type,
+        default_params=payload.default_params,
+        lm_class_path=payload.lm_class_path,
+    )
+
+
+@app.get("/lm-profiles")
+async def list_lm_profiles(request: Request):
+    services: AppServices = request.app.state.services
+    return await services.list_lm_profiles()
+
+
+@app.get("/lm-profiles/{lm_profile_id}")
+async def get_lm_profile(lm_profile_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    result = await services.get_lm_profile(lm_profile_id)
+    if result is None:
+        return JSONResponse(status_code=404, content={"error": "lm profile not found"})
+    return result
+
+
+@app.patch("/lm-profiles/{lm_profile_id}")
+async def update_lm_profile(lm_profile_id: str, request: Request, payload: LmProfileUpdateRequest):
+    services: AppServices = request.app.state.services
+    result = await services.update_lm_profile(
+        lm_profile_id=lm_profile_id,
+        name=payload.name,
+        model=payload.model,
+        api_base=payload.api_base,
+        model_type=payload.model_type,
+        default_params=payload.default_params,
+        lm_class_path=payload.lm_class_path,
+    )
+    if result is None:
+        return JSONResponse(status_code=404, content={"error": "lm profile not found"})
+    return result
+
+
+@app.delete("/lm-profiles/{lm_profile_id}")
+async def delete_lm_profile(lm_profile_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    deleted = await services.delete_lm_profile(lm_profile_id)
+    if not deleted:
+        return JSONResponse(status_code=404, content={"error": "lm profile not found"})
+    return {"id": lm_profile_id, "deleted": True}
 
 
 @app.get("/evaluation-plans")
