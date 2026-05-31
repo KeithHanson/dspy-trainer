@@ -1,0 +1,5 @@
+name = "support-triage-agent"
+version = "0.1.0"
+lm_target = "gpt-4.1-mini"
+score_pass_threshold = 0.8
+dspy_version = ">=2.5,<3.0"
