@@ -102,22 +102,13 @@ def _validate_metric_contract(metric_file: Path, diagnostics: list[dict[str, Any
     if tree is None:
         return
 
-    has_instructions = False
     has_metric = False
     metric_args_ok = False
     for node in tree.body:
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id == "JUDGE_INSTRUCTIONS":
-                    has_instructions = True
         if isinstance(node, ast.FunctionDef) and node.name == "judge_metric":
             has_metric = True
             metric_args_ok = len(node.args.args) >= 2
 
-    if not has_instructions:
-        diagnostics.append(
-            _diag("error", "judge_instructions_missing", "metric.py must define JUDGE_INSTRUCTIONS string", METRIC_FILE)
-        )
     if not has_metric:
         diagnostics.append(_diag("error", "judge_metric_missing", "metric.py must define judge_metric(example, prediction)", METRIC_FILE))
     elif not metric_args_ok:

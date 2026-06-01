@@ -119,9 +119,18 @@ button { font-family: inherit; }
 .dashboard-live { width: 100%; text-align: left; border: 1px solid var(--accent-line); border-radius: var(--r-lg); background: linear-gradient(180deg, var(--panel), var(--bg-deep)); color: var(--text); padding: 16px; margin-bottom: 24px; cursor: pointer; }
 .dashboard-live-empty { margin-bottom: 24px; }
 .dashboard-live:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 2px; }
-.dashboard-progress-track { height: 7px; margin-top: 12px; background: var(--surface); border-radius: 999px; overflow: hidden; }
-.dashboard-progress-fill { display: block; height: 100%; background: var(--accent); }
-.dashboard-kpis { display: grid; gap: 12px; grid-template-columns: repeat(4, minmax(0, 1fr)); margin-bottom: 20px; }
+.dashboard-progress-track { height: 7px; margin-top: 12px; background: var(--surface); border-radius: 999px; overflow: hidden; display: flex; }
+.dashboard-progress-segment { display: block; height: 100%; }
+.dashboard-progress-pass { background: #45d483; }
+.dashboard-progress-fail { background: #ff6b6b; }
+.dashboard-progress-error { background: #f2a43a; }
+.dashboard-progress-remaining { background: rgba(255,255,255,0.12); }
+.dashboard-live-breakdown { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+.dashboard-pill { border-radius: 999px; padding: 3px 8px; font-size: 12px; font-family: var(--mono); }
+.dashboard-pill-pass { background: rgba(94, 255, 176, 0.16); color: #8ff4be; border: 1px solid rgba(94, 255, 176, 0.35); }
+.dashboard-pill-fail { background: rgba(255, 120, 120, 0.16); color: #ffb1b1; border: 1px solid rgba(255, 120, 120, 0.35); }
+.dashboard-pill-error { background: rgba(255, 187, 102, 0.16); color: #ffcf85; border: 1px solid rgba(255, 187, 102, 0.35); }
+.dashboard-kpis { display: grid; gap: 12px; grid-template-columns: repeat(5, minmax(0, 1fr)); margin-bottom: 20px; }
 .dashboard-kpi-value { font-size: 24px; font-weight: 600; }
 .dashboard-kpi-delta { color: var(--text-muted); font-family: var(--mono); font-size: 12px; }
 .dashboard-section { margin-bottom: 20px; }

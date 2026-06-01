@@ -12,9 +12,12 @@ export function useDashboardOverview(adapter = defaultAdapter) {
 
   useEffect(() => {
     let cancelled = false;
+    let isInitialLoad = true;
 
     async function loadOverview() {
-      setState({ isLoading: true, error: null, data: null });
+      if (isInitialLoad) {
+        setState({ isLoading: true, error: null, data: null });
+      }
       try {
         const overview = await stableAdapter.getOverview();
         if (!cancelled) {
@@ -22,15 +25,19 @@ export function useDashboardOverview(adapter = defaultAdapter) {
         }
       } catch (error) {
         if (!cancelled) {
-          setState({ isLoading: false, error, data: null });
+          setState((previous) => ({ isLoading: false, error, data: previous.data }));
         }
+      } finally {
+        isInitialLoad = false;
       }
     }
 
     loadOverview();
+    const intervalId = window.setInterval(loadOverview, 5000);
 
     return () => {
       cancelled = true;
+      window.clearInterval(intervalId);
     };
   }, [stableAdapter]);
 

@@ -32,6 +32,27 @@ function formatScore(value) {
   return typeof value === "number" ? value.toFixed(3) : "-";
 }
 
+function buildEvalBreakdown(row, moduleNameById) {
+  if (!row) return null;
+  const passCount = Number(row.eval_pass_count || 0);
+  const failCount = Number(row.eval_fail_count || 0);
+  const totalDone = Number(row.completed_tasks || 0) + Number(row.failed_tasks || 0);
+  const errorCount = Math.max(0, totalDone - passCount - failCount);
+  const totalCount = Number(row.total_tasks || 0);
+  return {
+    id: String(row.id),
+    planName: row.plan_name || "RunPlan",
+    bundleName: moduleNameById.get(String(row.module_import_id || "")) || row.bundle_path || "bundle",
+    status: row.status || "queued",
+    progressPct: Math.round(pct(totalDone, Number(row.total_tasks || 0)) * 100),
+    passCount,
+    failCount,
+    errorCount,
+    doneCount: totalDone,
+    totalCount,
+  };
+}
+
 export function mapDashboardOverview({ plans, modules, workers }) {
   const planRows = toArray(plans);
   const moduleRows = toArray(modules);
@@ -45,21 +66,27 @@ export function mapDashboardOverview({ plans, modules, workers }) {
   );
 
   const activeJobs = planRows.filter((plan) => plan.status === "running" || plan.status === "queued");
+  const pendingEvalCount = planRows
+    .filter((plan) => plan.status === "queued" || plan.status === "running")
+    .reduce((sum, plan) => {
+      const total = Number(plan.total_tasks || 0);
+      const done = Number(plan.completed_tasks || 0) + Number(plan.failed_tasks || 0);
+      return sum + Math.max(0, total - done);
+    }, 0);
   const liveJobRow = activeJobs[0] || null;
   const failedJobs = planRows.filter((plan) => plan.status === "failed");
   const validatedBundles = moduleRows.filter((item) => item.validation_status === "passed").length;
   const failedBundles = moduleRows.filter((item) => item.validation_status === "failed");
-  const onlineWorkers = workerRows.filter((worker) => worker.status === "running" || worker.status === "listening").length;
-
-  const totalEvalPass = planRows.reduce((sum, row) => sum + Number(row.eval_pass_count || 0), 0);
-  const totalEvalFail = planRows.reduce((sum, row) => sum + Number(row.eval_fail_count || 0), 0);
-  const passRate = pct(totalEvalPass, totalEvalPass + totalEvalFail);
-
-  const avgScores = planRows.map((row) => row.average_score).filter((value) => typeof value === "number");
-  const meanScore = avgScores.length ? avgScores.reduce((sum, value) => sum + value, 0) / avgScores.length : null;
+  const availableWorkers = workerRows.filter((worker) => worker.status === "listening").length;
+  const totalWorkers = workerRows.filter((worker) => worker.status === "listening" || worker.status === "running").length;
 
   const mostRecent = planRows[0];
   const recentLabel = mostRecent?.created_at ? `last run ${formatTimeAgo(mostRecent.created_at)}` : "no runs yet";
+  const recentPassCount = Number(mostRecent?.eval_pass_count || 0);
+  const recentFailCount = Number(mostRecent?.eval_fail_count || 0);
+  const recentTotalJudged = recentPassCount + recentFailCount;
+  const recentPassRate = pct(recentPassCount, recentTotalJudged);
+  const recentAverageScore = typeof mostRecent?.average_score === "number" ? mostRecent.average_score : null;
 
   const recentJobs = planRows.slice(0, 8).map((row) => {
     const done = Number(row.completed_tasks || 0) + Number(row.failed_tasks || 0);
@@ -75,23 +102,8 @@ export function mapDashboardOverview({ plans, modules, workers }) {
     };
   });
 
-  const liveJob = liveJobRow
-    ? {
-        id: String(liveJobRow.id),
-        planName: liveJobRow.plan_name || "RunPlan",
-        bundleName: moduleNameById.get(String(liveJobRow.module_import_id || "")) || liveJobRow.bundle_path || "bundle",
-        progressPct: Math.round(
-          pct(
-            Number(liveJobRow.completed_tasks || 0) + Number(liveJobRow.failed_tasks || 0),
-            Number(liveJobRow.total_tasks || 0),
-          ) * 100,
-        ),
-        passRate: pct(
-          Number(liveJobRow.completed_tasks || 0),
-          Number(liveJobRow.completed_tasks || 0) + Number(liveJobRow.failed_tasks || 0),
-        ),
-      }
-    : null;
+  const liveJob = buildEvalBreakdown(liveJobRow, moduleNameById);
+  const spotlightJob = buildEvalBreakdown(liveJobRow || mostRecent, moduleNameById);
 
   const alerts = [
     ...failedBundles.slice(0, 2).map((bundle) => ({
@@ -116,11 +128,13 @@ export function mapDashboardOverview({ plans, modules, workers }) {
     greetingName: "there",
     summaryLine: `${activeJobs.length} active jobs · ${validatedBundles} validated bundles · ${recentLabel}`,
     liveJob,
+    spotlightJob,
     kpis: [
-      { id: "pass", label: "Pass rate", value: formatPercent(passRate), delta: `${totalEvalPass}/${totalEvalPass + totalEvalFail}` },
-      { id: "jobs", label: "Active eval jobs", value: String(activeJobs.length), delta: `${failedJobs.length} failed` },
-      { id: "bundles", label: "Validated bundles", value: String(validatedBundles), delta: `${moduleRows.length} total` },
-      { id: "score", label: "Average score", value: formatScore(meanScore), delta: `${onlineWorkers} workers online` },
+      { id: "pass", label: "Recent pass rate", value: formatPercent(recentPassRate), delta: `${recentPassCount}/${recentTotalJudged}` },
+      { id: "score", label: "Recent average score", value: formatScore(recentAverageScore), delta: "" },
+      { id: "jobs", label: "Pending evals", value: String(pendingEvalCount), delta: "" },
+      { id: "bundles", label: "Validated bundles", value: String(validatedBundles), delta: "" },
+      { id: "workers", label: "Available workers", value: `${availableWorkers}/${totalWorkers}`, delta: "" },
     ],
     recentJobs,
     alerts,

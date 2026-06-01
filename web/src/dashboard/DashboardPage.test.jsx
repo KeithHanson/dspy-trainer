@@ -14,6 +14,7 @@ const baseOverview = {
   greetingName: "Kira",
   summaryLine: "Summary",
   liveJob: null,
+  spotlightJob: null,
   kpis: [{ id: "one", label: "Pass rate", value: "80%", delta: "+1.0" }],
   recentJobs: [],
   alerts: [],
@@ -24,7 +25,8 @@ describe("DashboardPage", () => {
   it("shows live strip only when live job exists", async () => {
     const withLive = makeAdapter({
       ...baseOverview,
-      liveJob: { id: "run-5", planName: "Live plan", bundleName: "bundle", progressPct: 40, passRate: 0.8, stats: { pass: 4, fail: 1, running: 1, queued: 2, done: 5, total: 8 } },
+      liveJob: { id: "run-5", planName: "Live plan", bundleName: "bundle", progressPct: 40, passCount: 4, failCount: 1, errorCount: 0, doneCount: 5 },
+      spotlightJob: { id: "run-5", planName: "Live plan", bundleName: "bundle", progressPct: 40, passCount: 4, failCount: 1, errorCount: 0, doneCount: 5 },
     });
 
     const noLive = makeAdapter(baseOverview);
@@ -43,7 +45,7 @@ describe("DashboardPage", () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByText("No live eval job running.")).toBeInTheDocument();
+    expect(await screen.findByText("No eval jobs yet.")).toBeInTheDocument();
   });
 
   it("renders recent jobs empty state", async () => {

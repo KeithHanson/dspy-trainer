@@ -1,11 +1,13 @@
 import asyncio
 import sys
+import types
 from pathlib import Path
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.executor.eval import run_eval_job
+from app.executor.eval import _link_traces_to_parent_run
 
 
 class FakeServices:
@@ -84,7 +86,6 @@ def test_run_eval_job_emits_parent_and_item_trace_with_correlation_tags(monkeypa
         "app.executor.eval.run_bundle_eval",
         lambda bundle_path, eval_inputs, num_threads=1: {
             "score_pct": 100.0,
-            "judge_instructions": "pass/fail",
             "items": [
                 {
                     "item_index": 0,
@@ -116,7 +117,6 @@ def test_run_eval_job_reuses_existing_mlflow_job_ids(monkeypatch):
         "app.executor.eval.run_bundle_eval",
         lambda bundle_path, eval_inputs, num_threads=1: {
             "score_pct": 100.0,
-            "judge_instructions": "pass/fail",
             "items": [
                 {
                     "item_index": 0,
@@ -145,7 +145,6 @@ def test_run_eval_job_fails_with_diagnostics_when_trace_emission_fails(monkeypat
         "app.executor.eval.run_bundle_eval",
         lambda bundle_path, eval_inputs, num_threads=1: {
             "score_pct": 100.0,
-            "judge_instructions": "pass/fail",
             "items": [
                 {
                     "item_index": 0,
@@ -164,3 +163,25 @@ def test_run_eval_job_fails_with_diagnostics_when_trace_emission_fails(monkeypat
 
     assert result is not None
     assert result["status"] == "succeeded"
+
+
+def test_link_traces_to_parent_run_ignores_duplicate_association_error(monkeypatch):
+    class FakeClient:
+        def __init__(self, tracking_uri=None):
+            self.tracking_uri = tracking_uri
+
+        def link_traces_to_run(self, trace_ids, parent_run_id):
+            raise RuntimeError(
+                "BAD_REQUEST: (sqlite3.IntegrityError) UNIQUE constraint failed: entity_associations.source_type"
+            )
+
+    fake_tracking = types.SimpleNamespace(MlflowClient=FakeClient)
+    fake_mlflow = types.SimpleNamespace(tracking=fake_tracking)
+    monkeypatch.setitem(sys.modules, "mlflow", fake_mlflow)
+    monkeypatch.setitem(sys.modules, "mlflow.tracking", fake_tracking)
+
+    _link_traces_to_parent_run(
+        tracking_uri="http://localhost:5001",
+        parent_run_id="run-1",
+        trace_ids={"tr-1"},
+    )

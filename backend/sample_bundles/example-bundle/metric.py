@@ -1,8 +1,3 @@
-JUDGE_INSTRUCTIONS = '''
-Use an LLM judge to score output quality from 0.0-1.0.
-Output score, concise rationale, and any failure flags.
-'''
-
 import dspy
 
 

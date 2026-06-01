@@ -12,6 +12,13 @@ function statusLabel(status) {
   return "Queued";
 }
 
+function greetingForLocalTime() {
+  const hour = new Date().getHours();
+  if (hour < 12) return "Good morning";
+  if (hour < 18) return "Good afternoon";
+  return "Good evening";
+}
+
 export function DashboardPage({ adapter, onOpenRun, user }) {
   const navigate = useNavigate();
   const { isLoading, error, data } = useDashboardOverview(adapter);
@@ -41,12 +48,18 @@ export function DashboardPage({ adapter, onOpenRun, user }) {
     }
   };
 
+  const totalCount = Math.max(0, Number(data.spotlightJob?.totalCount || 0));
+  const passPct = totalCount ? (Math.max(0, Number(data.spotlightJob?.passCount || 0)) / totalCount) * 100 : 0;
+  const failPct = totalCount ? (Math.max(0, Number(data.spotlightJob?.failCount || 0)) / totalCount) * 100 : 0;
+  const errorPct = totalCount ? (Math.max(0, Number(data.spotlightJob?.errorCount || 0)) / totalCount) * 100 : 0;
+  const remainingPct = Math.max(0, 100 - passPct - failPct - errorPct);
+
   return (
     <section className="page">
       <div className="page-body dashboard-wrap">
         <header className="row between dashboard-head">
           <div className="col gap-1">
-            <h1 className="t-display">Good morning, {greetingName}</h1>
+            <h1 className="t-display">{greetingForLocalTime()}, {greetingName}</h1>
             <p className="muted t-sm">{data.summaryLine}</p>
           </div>
           <div className="row gap-2">
@@ -55,36 +68,46 @@ export function DashboardPage({ adapter, onOpenRun, user }) {
           </div>
         </header>
 
-        {data.liveJob ? (
+        {data.spotlightJob ? (
           <div
             className="dashboard-live"
-            onClick={() => openRun(data.liveJob.id)}
-            onKeyDown={(event) => openLiveFromKeyboard(event, data.liveJob.id)}
+            onClick={() => openRun(data.spotlightJob.id)}
+            onKeyDown={(event) => openLiveFromKeyboard(event, data.spotlightJob.id)}
             role="button"
             tabIndex={0}
           >
             <div className="row between">
               <div className="col gap-1">
-                <div className="t-h2">Live eval job: {data.liveJob.planName}</div>
-                <div className="cap">{data.liveJob.bundleName} · {Math.round(data.liveJob.passRate * 100)}% pass</div>
+                <div className="t-h2">
+                  {data.liveJob ? "Live eval job" : "Most recent eval"}: {data.spotlightJob.planName}
+                </div>
+                <div className="cap">{data.spotlightJob.bundleName}</div>
+                <div className="dashboard-live-breakdown">
+                  <span className="dashboard-pill dashboard-pill-pass">Passes: {data.spotlightJob.passCount}</span>
+                  <span className="dashboard-pill dashboard-pill-fail">Fails: {data.spotlightJob.failCount}</span>
+                  <span className="dashboard-pill dashboard-pill-error">Errors: {data.spotlightJob.errorCount}</span>
+                </div>
               </div>
               <Button
                 size="sm"
                 variant="primary"
                 onClick={(event) => {
                   event.stopPropagation();
-                  openRun(data.liveJob.id);
+                  openRun(data.spotlightJob.id);
                 }}
               >
-                Open live monitor
+                {data.liveJob ? "Open live monitor" : "Open run details"}
               </Button>
             </div>
             <div className="dashboard-progress-track" aria-hidden="true">
-              <span className="dashboard-progress-fill" style={{ width: `${data.liveJob.progressPct}%` }} />
+              <span className="dashboard-progress-segment dashboard-progress-pass" style={{ width: `${passPct}%` }} />
+              <span className="dashboard-progress-segment dashboard-progress-fail" style={{ width: `${failPct}%` }} />
+              <span className="dashboard-progress-segment dashboard-progress-error" style={{ width: `${errorPct}%` }} />
+              <span className="dashboard-progress-segment dashboard-progress-remaining" style={{ width: `${remainingPct}%` }} />
             </div>
           </div>
         ) : (
-          <div className="panel dashboard-zero dashboard-live-empty" role="status">No live eval job running.</div>
+          <div className="panel dashboard-zero dashboard-live-empty" role="status">No eval jobs yet.</div>
         )}
 
         <section className="dashboard-kpis">

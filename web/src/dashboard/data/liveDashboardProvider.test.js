@@ -25,9 +25,16 @@ describe("liveDashboardProvider", () => {
     });
 
     expect(overview.summaryLine).toContain("1 active jobs");
-    expect(overview.kpis).toHaveLength(4);
+    expect(overview.kpis).toHaveLength(5);
+    expect(overview.kpis[0].label).toBe("Recent pass rate");
     expect(overview.kpis[0].value).toBe("66.7%");
     expect(overview.kpis[0].delta).toBe("4/6");
+    expect(overview.kpis[1].label).toBe("Recent average score");
+    expect(overview.kpis[1].value).toBe("0.600");
+    expect(overview.kpis[2].label).toBe("Pending evals");
+    expect(overview.kpis[2].value).toBe("7");
+    expect(overview.kpis[4].label).toBe("Workers online");
+    expect(overview.kpis[4].value).toBe("1/1");
     expect(overview.liveJob?.id).toBe("plan-1");
     expect(overview.liveJob?.bundleName).toBe("support-triage v3");
     expect(overview.recentJobs[0].planName).toBe("Plan One");

@@ -524,7 +524,7 @@ function PlanBuilder({ onBack, planId }) {
         <aside className="plans-rail">
           <div className="col gap-3">
             <div className="t-label">Agent Run Plan</div>
-            <StepControl label="Runs per question" value={runs} min={1} max={20} setValue={setRuns} />
+            <StepControl label="Runs per question" value={runs} min={1} setValue={setRuns} />
             <StepControl label="Max workers" value={workers} min={1} max={24} setValue={setWorkers} />
             <hr className="hr" />
             <div className="panel card-pad col gap-2">
@@ -567,7 +567,11 @@ function StepControl({ label, value, setValue, min, max }) {
           <span style={{ fontSize: 16, marginTop: -1 }}>-</span>
         </Button>
         <div className="plans-step-value mono">{value}</div>
-        <Button size="sm" onClick={() => setValue(Math.min(max, value + 1))} aria-label={`Increase ${label}`}>
+        <Button
+          size="sm"
+          onClick={() => setValue(typeof max === "number" ? Math.min(max, value + 1) : value + 1)}
+          aria-label={`Increase ${label}`}
+        >
           <span style={{ fontSize: 16, marginTop: -1 }}>+</span>
         </Button>
       </div>

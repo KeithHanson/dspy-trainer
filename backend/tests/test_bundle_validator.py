@@ -35,11 +35,10 @@ def test_validator_reports_invalid_contract_shapes():
     assert "judge_metric_signature_invalid" in _diag_codes(report)
 
 
-def test_validator_reports_missing_signature_and_instructions():
+def test_validator_reports_missing_signature():
     report = validate_bundle(str(FIXTURES / "missing_eval_signature"))
     assert report.passed is False
     assert "signature_missing" in _diag_codes(report)
-    assert "judge_instructions_missing" in _diag_codes(report)
 
 
 def test_validator_accepts_optional_build_lm_with_no_args(tmp_path):
@@ -60,7 +59,6 @@ def test_validator_accepts_optional_build_lm_with_no_args(tmp_path):
         encoding="utf-8",
     )
     (bundle / "metric.py").write_text(
-        "JUDGE_INSTRUCTIONS='ok'\n"
         "def judge_metric(example, prediction, trace=None):\n"
         "  return {'score': 1.0, 'rationale': 'ok', 'flags': [], 'raw_response': {}}\n",
         encoding="utf-8",
@@ -92,7 +90,6 @@ def test_validator_rejects_build_lm_with_required_args(tmp_path):
         encoding="utf-8",
     )
     (bundle / "metric.py").write_text(
-        "JUDGE_INSTRUCTIONS='ok'\n"
         "def judge_metric(example, prediction, trace=None):\n"
         "  return {'score': 1.0, 'rationale': 'ok', 'flags': [], 'raw_response': {}}\n",
         encoding="utf-8",

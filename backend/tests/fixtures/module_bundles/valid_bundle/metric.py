@@ -1,6 +1,3 @@
-JUDGE_INSTRUCTIONS = "Return pass when answer matches expected exactly."
-
-
 def judge_metric(example, prediction) -> dict[str, object]:
     expected = str(example.label.get("expected", ""))
     got = str(prediction.answer)

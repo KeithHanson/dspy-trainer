@@ -112,7 +112,7 @@ def test_module_import_and_status_flow(monkeypatch):
                 encoding="utf-8",
             )
             (bundle_dir / "metric.py").write_text(
-                "JUDGE_INSTRUCTIONS='p/f'\ndef judge_metric(example, prediction):\n  return False\n",
+                "def judge_metric(example, prediction):\n  return False\n",
                 encoding="utf-8",
             )
             (bundle_dir / "bundle.toml").write_text(
@@ -177,7 +177,7 @@ def test_smoke_test_rerun_overwrites_status(monkeypatch):
     STORE.clear()
     _patch_services(monkeypatch)
 
-    results = [RuntimeError("first fail"), {"score_pct": 100.0, "items": [], "judge_instructions": "ok"}]
+    results = [RuntimeError("first fail"), {"score_pct": 100.0, "items": []}]
 
     def fake_run_bundle_eval(bundle_path, eval_inputs, num_threads=1):
         item = results.pop(0)
@@ -238,7 +238,7 @@ def test_module_validate_upload_zip(monkeypatch):
                 )
                 archive.writestr(
                     "example-bundle/metric.py",
-                    "JUDGE_INSTRUCTIONS='ok'\ndef judge_metric(example, prediction, trace=None):\n  return True\n",
+                    "def judge_metric(example, prediction, trace=None):\n  return True\n",
                 )
                 archive.writestr(
                     "example-bundle/bundle.toml",

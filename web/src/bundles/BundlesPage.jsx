@@ -37,12 +37,8 @@ def build_program():
     id: "metric_file",
     label: "metric.py exists",
     failCodes: ["metric_missing"],
-    help: "Add a metric.py file at the bundle root with JUDGE_INSTRUCTIONS and judge_metric(example, prediction, trace=None). judge_metric must return a dict with score/rationale/flags/raw_response.",
-    snippet: `JUDGE_INSTRUCTIONS = """
-Use an LLM judge to score output quality from 0.0 to 1.0.
-"""
-
-def judge_metric(example, prediction, trace=None):
+    help: "Add a metric.py file at the bundle root with judge_metric(example, prediction, trace=None). judge_metric must return a dict with score/rationale/flags/raw_response.",
+    snippet: `def judge_metric(example, prediction, trace=None):
     expected_answer = str(example.label.get("expected", "")).strip()
 
     category = str(getattr(prediction, "category", "")).strip().lower()
@@ -107,17 +103,6 @@ score_pass_threshold = 0.8
     help: "Export a build_program() function in module.py that returns an instance of your dspy.Module subclass.",
     snippet: `def build_program():
     return TriageAgent()
-`,
-  },
-  {
-    id: "judge_instructions",
-    label: "JUDGE_INSTRUCTIONS declared",
-    failCodes: ["judge_instructions_missing"],
-    help: "In metric.py, set JUDGE_INSTRUCTIONS to a clear string explaining pass/fail criteria for your judge metric.",
-    snippet: `JUDGE_INSTRUCTIONS = """
-Pass when category and priority are correct and the reply is actionable.
-Fail when output is unsafe, missing, or mismatched.
-"""
 `,
   },
   {
@@ -277,6 +262,7 @@ function SavedBundlesPanel({ modulesUrl }) {
   const [isLoadingBundles, setIsLoadingBundles] = useState(false);
   const [selectedBundle, setSelectedBundle] = useState(null);
   const [activeFileName, setActiveFileName] = useState("module.py");
+  const [bundleFiles, setBundleFiles] = useState({});
 
   const loadBundles = async () => {
     setIsLoadingBundles(true);
@@ -313,6 +299,37 @@ function SavedBundlesPanel({ modulesUrl }) {
   useEffect(() => {
     loadBundles();
   }, []);
+
+  useEffect(() => {
+    const loadFiles = async () => {
+      if (!selectedBundle?.id) {
+        setBundleFiles({});
+        return;
+      }
+      try {
+        const response = await fetch(`${modulesUrl}/${selectedBundle.id}/files`, { method: "GET" });
+        if (!response.ok) {
+          setBundleFiles({});
+          return;
+        }
+        const payload = await response.json();
+        setBundleFiles(payload && typeof payload === "object" ? payload : {});
+      } catch {
+        setBundleFiles({});
+      }
+    };
+    loadFiles();
+  }, [modulesUrl, selectedBundle?.id]);
+
+  useEffect(() => {
+    const fileNames = Object.keys(bundleFiles);
+    if (!fileNames.length) {
+      return;
+    }
+    if (!fileNames.includes(activeFileName)) {
+      setActiveFileName(fileNames[0]);
+    }
+  }, [bundleFiles, activeFileName]);
 
   return (
     <div className="panel card-pad bundles-validation-result">
@@ -368,13 +385,17 @@ function SavedBundlesPanel({ modulesUrl }) {
             <div className="t-label" style={{ marginBottom: 8 }}>Bundle files</div>
             <p className="cap" style={{ marginBottom: 8 }}>Source file preview from the validation view.</p>
             <div className="row gap-2" style={{ marginBottom: 10 }}>
-              {Object.keys(BUNDLE_FILE_TEMPLATES).map((fileName) => (
+              {Object.keys(bundleFiles).length ? Object.keys(bundleFiles).map((fileName) => (
+                <Button key={`${selectedBundle.id}-${fileName}`} size="sm" variant={activeFileName === fileName ? "primary" : "ghost"} onClick={() => setActiveFileName(fileName)}>
+                  {fileName}
+                </Button>
+              )) : Object.keys(BUNDLE_FILE_TEMPLATES).map((fileName) => (
                 <Button key={`${selectedBundle.id}-${fileName}`} size="sm" variant={activeFileName === fileName ? "primary" : "ghost"} onClick={() => setActiveFileName(fileName)}>
                   {fileName}
                 </Button>
               ))}
             </div>
-            <pre className="bundles-snippet"><code>{renderHighlightedPython(BUNDLE_FILE_TEMPLATES[activeFileName])}</code></pre>
+            <pre className="bundles-snippet"><code>{renderHighlightedPython(bundleFiles[activeFileName] || BUNDLE_FILE_TEMPLATES[activeFileName] || "# file not available")}</code></pre>
           </div>
 
           {normalizeDiagnostics(selectedBundle.diagnostics).length ? (

@@ -198,5 +198,4 @@ def run_bundle_eval(
         "score_pct": avg_score * 100.0,
         "items": normalized,
         "score_pass_threshold": pass_threshold,
-        "judge_instructions": getattr(metric_mod, "JUDGE_INSTRUCTIONS", ""),
     }

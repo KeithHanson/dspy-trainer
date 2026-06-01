@@ -61,7 +61,6 @@ def test_run_bundle_eval_uses_lm_profile_when_build_lm_absent(tmp_path):
         encoding="utf-8",
     )
     (bundle / "metric.py").write_text(
-        "JUDGE_INSTRUCTIONS = 'Return pass when answer matches expected exactly.'\n"
         "def judge_metric(example, prediction):\n"
         "  expected = str(example.label.get('expected', ''))\n"
         "  got = str(prediction.answer)\n"

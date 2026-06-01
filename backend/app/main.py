@@ -241,6 +241,15 @@ async def get_module(module_id: str, request: Request):
     return result
 
 
+@app.get("/modules/{module_id}/files")
+async def get_module_files(module_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    result = await services.get_module_files(module_id)
+    if result is None:
+        return JSONResponse(status_code=404, content={"error": "module not found"})
+    return result
+
+
 @app.delete("/modules/{module_id}")
 async def delete_module(module_id: str, request: Request):
     services: AppServices = request.app.state.services
@@ -344,7 +353,6 @@ async def smoke_test_module(module_id: str, request: Request, payload: SmokeTest
                 "message": "Bundle evaluation completed successfully.",
                 "score_pct": report["score_pct"],
                 "item_count": len(report["items"]),
-                "judge_instructions": report["judge_instructions"],
                 "items": report["items"],
             }
         ]

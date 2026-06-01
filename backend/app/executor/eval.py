@@ -80,7 +80,13 @@ def _link_traces_to_parent_run(tracking_uri: str, parent_run_id: str, trace_ids:
     except ImportError:
         return
     client = MlflowClient(tracking_uri=tracking_uri)
-    client.link_traces_to_run(sorted(trace_ids), parent_run_id)
+    try:
+        client.link_traces_to_run(sorted(trace_ids), parent_run_id)
+    except Exception as exc:
+        message = str(exc)
+        if "entity_associations" in message and "UNIQUE constraint failed" in message:
+            return
+        raise
 
 
 def _list_parent_run_traces(tracking_uri: str, experiment_id: str, parent_run_id: str) -> list[Any]:

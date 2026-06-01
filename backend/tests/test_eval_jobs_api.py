@@ -379,7 +379,6 @@ def test_eval_job_run_repeats_and_persists_items(monkeypatch):
         "app.executor.eval.run_bundle_eval",
         lambda bundle_path, eval_inputs, num_threads=1: {
             "score_pct": 100.0,
-            "judge_instructions": "pass/fail",
             "items": [
                 {
                     "item_index": 0,

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+from pathlib import Path
 import random
 import traceback
 from typing import Any
@@ -496,6 +497,37 @@ class AppServices:
             if item["id"] == module_id:
                 return item
         return None
+
+    async def get_module_files(self, module_id: str) -> dict[str, str] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                select source_ref
+                from module_imports
+                where id = $1 and deleted_at is null
+                """,
+                module_id,
+            )
+        if row is None:
+            return None
+        source_ref = str(row["source_ref"] or "").strip()
+        if not source_ref:
+            return {}
+        root = Path(source_ref)
+        if not root.exists() or not root.is_dir():
+            return {}
+        files: dict[str, str] = {}
+        for file_name in ("module.py", "metric.py", "bundle.toml"):
+            file_path = root / file_name
+            if not file_path.exists() or not file_path.is_file():
+                continue
+            try:
+                files[file_name] = file_path.read_text(encoding="utf-8")
+            except Exception:
+                continue
+        return files
 
     async def delete_module(self, module_id: str) -> bool:
         if self.postgres_pool is None:
