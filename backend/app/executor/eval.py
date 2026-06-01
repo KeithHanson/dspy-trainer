@@ -37,17 +37,22 @@ def _run_bundle_eval_with_mlflow_parent(
     parent_run_id: str | None,
     lm_profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    if not parent_run_id:
+    def _run() -> dict[str, Any]:
+        if lm_profile is None:
+            return run_bundle_eval(bundle_path=bundle_path, eval_inputs=eval_inputs, num_threads=num_threads)
         return run_bundle_eval(bundle_path=bundle_path, eval_inputs=eval_inputs, num_threads=num_threads, lm_profile=lm_profile)
+
+    if not parent_run_id:
+        return _run()
     try:
         import mlflow
     except ImportError:
-        return run_bundle_eval(bundle_path=bundle_path, eval_inputs=eval_inputs, num_threads=num_threads, lm_profile=lm_profile)
+        return _run()
     try:
         with mlflow.start_run(run_id=parent_run_id):
-            return run_bundle_eval(bundle_path=bundle_path, eval_inputs=eval_inputs, num_threads=num_threads, lm_profile=lm_profile)
+            return _run()
     except Exception:
-        return run_bundle_eval(bundle_path=bundle_path, eval_inputs=eval_inputs, num_threads=num_threads, lm_profile=lm_profile)
+        return _run()
 
 
 def _recent_trace_ids(tracking_uri: str, experiment_id: str, max_results: int = 200) -> set[str]:
