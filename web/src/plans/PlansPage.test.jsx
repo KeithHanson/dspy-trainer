@@ -21,6 +21,9 @@ describe("PlansPage", () => {
           ]),
         });
       }
+      if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
+      }
       return Promise.reject(new Error(`Unexpected URL ${url}`));
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -45,6 +48,9 @@ describe("PlansPage", () => {
           ]),
         });
       }
+      if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "lm-1", name: "GPT-4o" }]) });
+      }
       if (String(url).endsWith("/evaluation-plans") && init?.method === "POST") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ id: "eval-1" }) });
       }
@@ -68,6 +74,7 @@ describe("PlansPage", () => {
     );
 
     await userEvent.type(await screen.findByLabelText("Plan name"), "Triage v4");
+    await userEvent.selectOptions(screen.getByLabelText("Runtime model profile"), "lm-1");
     await userEvent.type(screen.getByPlaceholderText("Input prompt"), "What is the refund policy?");
     await userEvent.type(screen.getByPlaceholderText("Expected answer"), "Provide refund window details");
     await userEvent.click(screen.getByRole("button", { name: "Save & run" }));
@@ -75,6 +82,10 @@ describe("PlansPage", () => {
     expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/evaluation-plans$/), expect.objectContaining({ method: "POST" }));
     expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/agent-run-plans$/), expect.objectContaining({ method: "POST" }));
     expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/agent-run-plans\/run-plan-1\/enqueue$/), expect.objectContaining({ method: "POST" }));
+
+    const evalPlanSave = fetchMock.mock.calls.find(([url, init]) => String(url).endsWith("/evaluation-plans") && init?.method === "POST");
+    expect(evalPlanSave).toBeTruthy();
+    expect(JSON.parse(evalPlanSave[1].body).lm_profile_id).toBe("lm-1");
   });
 
   it("shows edit and delete actions and deletes a plan", async () => {
@@ -92,6 +103,9 @@ describe("PlansPage", () => {
             },
           ]),
         });
+      }
+      if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
       }
       if (String(url).endsWith("/evaluation-plans/plan-1") && init?.method === "DELETE") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ id: "plan-1", deleted: true }) });

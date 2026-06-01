@@ -141,6 +141,7 @@ class LmProfileCreateRequest(BaseModel):
     model_type: str = "responses"
     default_params: dict[str, Any] = Field(default_factory=dict)
     lm_class_path: str | None = None
+    upstream_api_key: str | None = None
 
 
 class LmProfileUpdateRequest(BaseModel):
@@ -150,6 +151,7 @@ class LmProfileUpdateRequest(BaseModel):
     model_type: str | None = None
     default_params: dict[str, Any] | None = None
     lm_class_path: str | None = None
+    upstream_api_key: str | None = None
 
 
 class LiteLLMKeyCreateRequest(BaseModel):
@@ -560,14 +562,20 @@ async def create_evaluation_plan(request: Request, payload: EvaluationPlanCreate
 @app.post("/lm-profiles")
 async def create_lm_profile(request: Request, payload: LmProfileCreateRequest):
     services: AppServices = request.app.state.services
-    return await services.create_lm_profile(
-        name=payload.name,
-        model=payload.model,
-        api_base=payload.api_base,
-        model_type=payload.model_type,
-        default_params=payload.default_params,
-        lm_class_path=payload.lm_class_path,
-    )
+    if not payload.upstream_api_key or not payload.upstream_api_key.strip():
+        return JSONResponse(status_code=400, content={"error": "upstream_api_key is required when creating an lm profile"})
+    try:
+        return await services.create_lm_profile(
+            name=payload.name,
+            model=payload.model,
+            api_base=payload.api_base,
+            model_type=payload.model_type,
+            default_params=payload.default_params,
+            lm_class_path=payload.lm_class_path,
+            upstream_api_key=payload.upstream_api_key,
+        )
+    except RuntimeError as exc:
+        return JSONResponse(status_code=502, content={"error": str(exc)})
 
 
 @app.get("/lm-profiles")
@@ -588,15 +596,19 @@ async def get_lm_profile(lm_profile_id: str, request: Request):
 @app.patch("/lm-profiles/{lm_profile_id}")
 async def update_lm_profile(lm_profile_id: str, request: Request, payload: LmProfileUpdateRequest):
     services: AppServices = request.app.state.services
-    result = await services.update_lm_profile(
-        lm_profile_id=lm_profile_id,
-        name=payload.name,
-        model=payload.model,
-        api_base=payload.api_base,
-        model_type=payload.model_type,
-        default_params=payload.default_params,
-        lm_class_path=payload.lm_class_path,
-    )
+    try:
+        result = await services.update_lm_profile(
+            lm_profile_id=lm_profile_id,
+            name=payload.name,
+            model=payload.model,
+            api_base=payload.api_base,
+            model_type=payload.model_type,
+            default_params=payload.default_params,
+            lm_class_path=payload.lm_class_path,
+            upstream_api_key=payload.upstream_api_key,
+        )
+    except RuntimeError as exc:
+        return JSONResponse(status_code=502, content={"error": str(exc)})
     if result is None:
         return JSONResponse(status_code=404, content={"error": "lm profile not found"})
     return result
@@ -609,6 +621,30 @@ async def delete_lm_profile(lm_profile_id: str, request: Request):
     if not deleted:
         return JSONResponse(status_code=404, content={"error": "lm profile not found"})
     return {"id": lm_profile_id, "deleted": True}
+
+
+@app.post("/lm-profiles/{lm_profile_id}/rotate-key")
+async def rotate_lm_profile_key(lm_profile_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    try:
+        result = await services.rotate_lm_profile_virtual_key(lm_profile_id)
+    except RuntimeError as exc:
+        return JSONResponse(status_code=502, content={"error": str(exc)})
+    if result is None:
+        return JSONResponse(status_code=404, content={"error": "lm profile not found"})
+    return result
+
+
+@app.post("/lm-profiles/{lm_profile_id}/test-connection")
+async def test_lm_profile_connection(lm_profile_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    try:
+        result = await services.test_lm_profile_connection(lm_profile_id)
+    except RuntimeError as exc:
+        return JSONResponse(status_code=502, content={"error": str(exc)})
+    if result is None:
+        return JSONResponse(status_code=404, content={"error": "lm profile not found"})
+    return result
 
 
 @app.get("/litellm/keys")

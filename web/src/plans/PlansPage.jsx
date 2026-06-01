@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { Button } from "../components/primitives/Button";
 import { Icon } from "../components/Icon";
 import { EmptyState } from "../components/states/EmptyState";
@@ -44,6 +44,7 @@ function PlansList({ onCreate, onEdit, onRunNavigate, showSavedNotice }) {
   const [error, setError] = useState("");
   const [deletingPlanId, setDeletingPlanId] = useState("");
   const [runningPlanId, setRunningPlanId] = useState("");
+  const [profileNames, setProfileNames] = useState({});
 
   const loadPlans = async () => {
     setIsLoading(true);
@@ -64,6 +65,31 @@ function PlansList({ onCreate, onEdit, onRunNavigate, showSavedNotice }) {
 
   useEffect(() => {
     loadPlans();
+  }, []);
+
+  useEffect(() => {
+    const loadProfileNames = async () => {
+      try {
+        const response = await fetch(`${(import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, "")}/lm-profiles`, { method: "GET" });
+        if (!response.ok) {
+          return;
+        }
+        const payload = await response.json();
+        if (!Array.isArray(payload)) {
+          return;
+        }
+        const next = {};
+        payload.forEach((profile) => {
+          if (profile?.id) {
+            next[profile.id] = profile.name || profile.id;
+          }
+        });
+        setProfileNames(next);
+      } catch {
+        setProfileNames({});
+      }
+    };
+    loadProfileNames();
   }, []);
 
   const runPlan = async (plan) => {
@@ -162,6 +188,7 @@ function PlansList({ onCreate, onEdit, onRunNavigate, showSavedNotice }) {
                         <button type="button" className="plans-name-link" onClick={() => onEdit(plan.id)}>{plan.name || "Untitled plan"}</button>
                       </div>
                       <span className="cap mono">{count} questions x {plan.runs_per_question || 1} runs = {count * (plan.runs_per_question || 1)} tasks · {plan.max_workers || 1} workers</span>
+                      <span className="cap mono">LM profile: {plan.lm_profile_id ? (profileNames[plan.lm_profile_id] || plan.lm_profile_id) : "none"}</span>
                     </div>
                     <div className="row gap-2">
                       <Button size="sm" variant="primary" icon="activity" onClick={(event) => {
@@ -209,6 +236,8 @@ function PlanBuilder({ onBack, planId }) {
   const [workers, setWorkers] = useState(8);
   const [rows, setRows] = useState([{ id: "q-1", input: "", expected: "" }]);
   const [selectedBundleId, setSelectedBundleId] = useState("");
+  const [lmProfiles, setLmProfiles] = useState([]);
+  const [selectedLmProfileId, setSelectedLmProfileId] = useState("");
   const [isLoadingPlan, setIsLoadingPlan] = useState(false);
   const isEditing = Boolean(planId);
 
@@ -240,8 +269,22 @@ function PlanBuilder({ onBack, planId }) {
     }
   };
 
+  const loadLmProfiles = async () => {
+    try {
+      const response = await fetch(`${apiBase}/lm-profiles`, { method: "GET" });
+      if (!response.ok) {
+        throw new Error("Could not load LM profiles");
+      }
+      const payload = await response.json();
+      setLmProfiles(Array.isArray(payload) ? payload : []);
+    } catch {
+      setLmProfiles([]);
+    }
+  };
+
   useEffect(() => {
     loadModules();
+    loadLmProfiles();
   }, []);
 
   useEffect(() => {
@@ -263,6 +306,7 @@ function PlanBuilder({ onBack, planId }) {
         if (typeof payload.module_import_id === "string" && payload.module_import_id) {
           setSelectedBundleId(payload.module_import_id);
         }
+        setSelectedLmProfileId(typeof payload.lm_profile_id === "string" ? payload.lm_profile_id : "");
         const fromInputs = Array.isArray(payload.eval_inputs)
           ? payload.eval_inputs.map((item, idx) => ({
               id: `loaded-${idx}`,
@@ -328,6 +372,7 @@ function PlanBuilder({ onBack, planId }) {
           runs_per_question: runs,
           max_workers: workers,
           module_import_id: selectedBundleId,
+          lm_profile_id: selectedLmProfileId || null,
         }),
       });
       if (!createdPlanResp.ok) {
@@ -350,6 +395,7 @@ function PlanBuilder({ onBack, planId }) {
             evaluation_plan_id: createdPlan.id,
             runs_per_question: runs,
             max_workers: workers,
+            lm_profile_id: selectedLmProfileId || null,
           }),
         });
         if (!createRunResp.ok) {
@@ -426,6 +472,22 @@ function PlanBuilder({ onBack, planId }) {
                 ))}
               </div>
             )}
+          </section>
+
+          <section className="panel card-pad plans-form-block">
+            <div className="row between" style={{ marginBottom: 10 }}>
+              <h2 className="t-h2">LM profile</h2>
+              <Link className="lnk cap" to="/lm-profiles">Manage profiles</Link>
+            </div>
+            <label className="col gap-1" htmlFor="lm-profile-select">
+              <span className="t-label">Runtime model profile</span>
+              <select id="lm-profile-select" className="bundles-input" value={selectedLmProfileId} onChange={(event) => setSelectedLmProfileId(event.target.value)}>
+                <option value="">None (bundle build_lm/default runtime)</option>
+                {lmProfiles.map((profile) => (
+                  <option key={profile.id} value={profile.id}>{profile.name || profile.id}</option>
+                ))}
+              </select>
+            </label>
           </section>
 
           <section className="panel card-pad plans-form-block">

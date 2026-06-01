@@ -20,6 +20,32 @@ export function RunsPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [deletingPlanId, setDeletingPlanId] = useState("");
   const [error, setError] = useState("");
+  const [profileNames, setProfileNames] = useState({});
+
+  useEffect(() => {
+    const loadProfiles = async () => {
+      try {
+        const response = await fetch(`${apiBase}/lm-profiles`, { method: "GET" });
+        if (!response.ok) {
+          return;
+        }
+        const payload = await response.json();
+        if (!Array.isArray(payload)) {
+          return;
+        }
+        const next = {};
+        payload.forEach((profile) => {
+          if (profile?.id) {
+            next[profile.id] = profile.name || profile.id;
+          }
+        });
+        setProfileNames(next);
+      } catch {
+        setProfileNames({});
+      }
+    };
+    loadProfiles();
+  }, [apiBase]);
 
   const deleteRunPlan = async (id) => {
     const confirmed = window.confirm("Delete this eval job? This will remove all run items for it.");
@@ -126,6 +152,7 @@ export function RunsPage() {
                   <thead>
                     <tr>
                       <th>Plan Name</th>
+                      <th>LM Profile</th>
                       <th>Plan ID</th>
                       <th>Run Status</th>
                       <th>Successful Runs</th>
@@ -140,6 +167,7 @@ export function RunsPage() {
                     {plans.map((plan) => (
                       <tr key={plan.id} className="runs-row-click" onClick={() => navigate(`/runs?plan=${encodeURIComponent(plan.id)}`)}>
                         <td>{plan.plan_name || "RunPlan"}</td>
+                        <td className="cap">{plan.lm_profile_id ? (profileNames[plan.lm_profile_id] || plan.lm_profile_id) : "none"}</td>
                         <td className="mono">{shortId(plan.id)}</td>
                         <td><StatusPill status={plan.status} /></td>
                         <td className="mono">{plan.completed_tasks ?? 0}/{plan.total_tasks ?? 0}</td>
@@ -219,6 +247,7 @@ export function RunsPage() {
                 <StatusPill status={runPlan.status} />
               </div>
               <p className="cap mono" style={{ marginBottom: 8 }}>Plan: {runPlan.plan_name || "RunPlan"}</p>
+              <p className="cap mono" style={{ marginBottom: 8 }}>LM profile: {runPlan.lm_profile_id ? (profileNames[runPlan.lm_profile_id] || runPlan.lm_profile_id) : "none"}</p>
               <div className="runs-kpis">
                 <Kpi
                   label="Pass/Fail"

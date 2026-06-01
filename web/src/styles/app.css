@@ -418,6 +418,25 @@ button { font-family: inherit; }
   font-size: 13px;
   color: #ffc2b8;
 }
+
+.lm-profiles-wrap { max-width: 980px; }
+.lm-profiles-head { align-items: flex-start; margin-bottom: 18px; }
+.lm-profiles-form { margin-bottom: 14px; }
+.lm-profiles-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.lm-profiles-form-error {
+  margin-top: 8px;
+  color: #ffb4a8;
+  font-size: 13px;
+}
+.lm-profiles-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
 .runs-row-click { cursor: pointer; }
 .runs-row-click:hover { background: var(--surface); }
 .runs-kpis {
@@ -549,6 +568,7 @@ button { font-family: inherit; }
   .plans-row-edit { grid-template-columns: 24px 1fr; }
   .plans-row-head { grid-template-columns: 24px 1fr; }
   .runs-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .lm-profiles-grid { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 880px) {

@@ -266,6 +266,7 @@ class AppServices:
             await conn.execute("alter table lm_profiles add column if not exists default_params jsonb not null default '{}'::jsonb;")
             await conn.execute("alter table lm_profiles add column if not exists lm_class_path text;")
             await conn.execute("alter table lm_profiles add column if not exists archived_at timestamptz;")
+            await conn.execute("alter table lm_profiles add column if not exists virtual_key text;")
             await conn.execute(
                 """
                 create table if not exists evaluation_plans (
@@ -984,6 +985,19 @@ class AppServices:
             return data
         return {"data": data}
 
+    async def _litellm_openai_request(self, path: str, payload: dict[str, Any], api_key: str) -> dict[str, Any]:
+        if self.http_client is None:
+            raise RuntimeError("http client not initialized")
+        headers = {"Authorization": f"Bearer {api_key}"}
+        url = f"{self.settings.litellm_base_url.rstrip('/')}{path}"
+        response = await self.http_client.post(url, json=payload, headers=headers)
+        if response.status_code >= 400:
+            raise RuntimeError(f"LiteLLM POST {path} failed ({response.status_code}): {response.text}")
+        data = response.json()
+        if isinstance(data, dict):
+            return data
+        return {"data": data}
+
     async def list_litellm_keys(self) -> dict[str, Any]:
         try:
             return await self._litellm_request("GET", "/key/list")
@@ -1248,26 +1262,42 @@ class AppServices:
         model_type: str,
         default_params: dict[str, Any],
         lm_class_path: str | None,
+        upstream_api_key: str | None,
     ) -> dict[str, Any]:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
         profile_id = str(uuid4())
+        clean_name = name.strip() or "Unnamed profile"
+        clean_model = model.strip()
+        clean_api_base = api_base.strip()
+        clean_model_type = model_type.strip() or "responses"
+        clean_lm_class_path = lm_class_path.strip() if isinstance(lm_class_path, str) and lm_class_path.strip() else None
+        await self._provision_litellm_model(
+            profile_ref=profile_id,
+            profile_name=clean_name,
+            model=clean_model,
+            api_base=clean_api_base,
+            model_type=clean_model_type,
+            upstream_api_key=upstream_api_key,
+        )
+        virtual_key = await self._generate_lm_profile_virtual_key(profile_id=profile_id, model=clean_model)
         now = datetime.now(timezone.utc)
         async with self.postgres_pool.acquire() as conn:
             await conn.execute(
                 """
                 insert into lm_profiles (
-                  id, name, model, api_base, model_type, default_params, lm_class_path, archived_at, created_at, updated_at
+                  id, name, model, api_base, model_type, default_params, lm_class_path, virtual_key, archived_at, created_at, updated_at
                 )
-                values ($1, $2, $3, $4, $5, $6::jsonb, $7, null, $8, $9)
+                values ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, null, $9, $10)
                 """,
                 profile_id,
-                name.strip() or "Unnamed profile",
-                model.strip(),
-                api_base.strip(),
-                model_type.strip() or "responses",
+                clean_name,
+                clean_model,
+                clean_api_base,
+                clean_model_type,
                 __import__("json").dumps(default_params if isinstance(default_params, dict) else {}),
-                lm_class_path.strip() if isinstance(lm_class_path, str) and lm_class_path.strip() else None,
+                clean_lm_class_path,
+                virtual_key,
                 now,
                 now,
             )
@@ -1282,7 +1312,7 @@ class AppServices:
         async with self.postgres_pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                select id, name, model, api_base, model_type, default_params, lm_class_path, archived_at, created_at, updated_at
+                select id, name, model, api_base, model_type, default_params, lm_class_path, virtual_key, archived_at, created_at, updated_at
                 from lm_profiles
                 where archived_at is null
                 order by created_at desc
@@ -1297,6 +1327,7 @@ class AppServices:
                 "model_type": row["model_type"],
                 "default_params": self._json_dict(row["default_params"]),
                 "lm_class_path": row["lm_class_path"],
+                "virtual_key": row["virtual_key"],
                 "created_at": row["created_at"].isoformat(),
                 "updated_at": row["updated_at"].isoformat(),
             }
@@ -1309,7 +1340,7 @@ class AppServices:
         async with self.postgres_pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                select id, name, model, api_base, model_type, default_params, lm_class_path, archived_at, created_at, updated_at
+                select id, name, model, api_base, model_type, default_params, lm_class_path, virtual_key, archived_at, created_at, updated_at
                 from lm_profiles
                 where id = $1 and archived_at is null
                 """,
@@ -1325,6 +1356,7 @@ class AppServices:
             "model_type": row["model_type"],
             "default_params": self._json_dict(row["default_params"]),
             "lm_class_path": row["lm_class_path"],
+            "virtual_key": row["virtual_key"],
             "created_at": row["created_at"].isoformat(),
             "updated_at": row["updated_at"].isoformat(),
         }
@@ -1338,6 +1370,7 @@ class AppServices:
         model_type: str | None,
         default_params: dict[str, Any] | None,
         lm_class_path: str | None,
+        upstream_api_key: str | None,
     ) -> dict[str, Any] | None:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
@@ -1359,6 +1392,14 @@ class AppServices:
             next_model_type = model_type.strip() if isinstance(model_type, str) and model_type.strip() else existing["model_type"]
             next_default_params = default_params if isinstance(default_params, dict) else self._json_dict(existing["default_params"])
             next_lm_class_path = lm_class_path.strip() if isinstance(lm_class_path, str) and lm_class_path.strip() else None
+            await self._provision_litellm_model(
+                profile_ref=lm_profile_id,
+                profile_name=next_name,
+                model=next_model,
+                api_base=next_api_base,
+                model_type=next_model_type,
+                upstream_api_key=upstream_api_key,
+            )
             await conn.execute(
                 """
                 update lm_profiles
@@ -1381,6 +1422,121 @@ class AppServices:
                 now,
             )
         return await self.get_lm_profile(lm_profile_id)
+
+    async def rotate_lm_profile_virtual_key(self, lm_profile_id: str) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            existing = await conn.fetchrow(
+                """
+                select id, model, virtual_key
+                from lm_profiles
+                where id = $1 and archived_at is null
+                """,
+                lm_profile_id,
+            )
+            if existing is None:
+                return None
+            prior_key = existing["virtual_key"]
+            if isinstance(prior_key, str) and prior_key.strip():
+                try:
+                    await self.revoke_litellm_key(prior_key)
+                except Exception:
+                    # Continue rotation even if previous key is already invalid/missing in proxy.
+                    pass
+            new_key = await self._generate_lm_profile_virtual_key(profile_id=lm_profile_id, model=existing["model"])
+            now = datetime.now(timezone.utc)
+            await conn.execute(
+                """
+                update lm_profiles
+                set virtual_key = $2,
+                    updated_at = $3
+                where id = $1
+                """,
+                lm_profile_id,
+                new_key,
+                now,
+            )
+        result = await self.get_lm_profile(lm_profile_id)
+        return result
+
+    async def test_lm_profile_connection(self, lm_profile_id: str) -> dict[str, Any] | None:
+        profile = await self.get_lm_profile(lm_profile_id)
+        if profile is None:
+            return None
+        virtual_key = profile.get("virtual_key")
+        if not isinstance(virtual_key, str) or not virtual_key.strip():
+            raise RuntimeError("lm profile has no virtual key")
+        payload = {
+            "model": f"lm-profile:{lm_profile_id}",
+            "messages": [{"role": "user", "content": "Reply with: connection-ok"}],
+            "temperature": 0,
+            "max_tokens": 24,
+        }
+        try:
+            result = await self._litellm_openai_request("/chat/completions", payload=payload, api_key=virtual_key)
+        except Exception:
+            result = await self._litellm_openai_request("/v1/chat/completions", payload=payload, api_key=virtual_key)
+        text = ""
+        try:
+            choices = result.get("choices") if isinstance(result, dict) else None
+            if isinstance(choices, list) and choices:
+                message = choices[0].get("message") if isinstance(choices[0], dict) else None
+                if isinstance(message, dict):
+                    text = str(message.get("content") or "")
+        except Exception:
+            text = ""
+        return {
+            "ok": True,
+            "model": payload["model"],
+            "reply": text,
+            "raw": result,
+        }
+
+    async def _generate_lm_profile_virtual_key(self, profile_id: str, model: str) -> str:
+        payload = await self.create_litellm_key(
+            models=[model],
+            aliases={"default": model},
+            metadata={"lm_profile_id": profile_id},
+            duration=None,
+            key_alias=f"lm-profile:{profile_id}",
+            team_id=None,
+            user_id=None,
+        )
+        key = payload.get("key")
+        if not isinstance(key, str) or not key.strip():
+            raise RuntimeError("LiteLLM key generation returned no key")
+        return key
+
+    async def _provision_litellm_model(
+        self,
+        profile_ref: str,
+        profile_name: str,
+        model: str,
+        api_base: str,
+        model_type: str,
+        upstream_api_key: str | None,
+    ) -> None:
+        clean_key = upstream_api_key.strip() if isinstance(upstream_api_key, str) else ""
+        if not clean_key:
+            return
+        payload = {
+            "model_name": f"lm-profile:{profile_ref}",
+            "litellm_params": {
+                "model": model,
+                "api_base": api_base,
+                "api_key": clean_key,
+            },
+            "model_info": {
+                "id": profile_ref,
+                "mode": model_type,
+                "metadata": {"lm_profile_name": profile_name},
+            },
+        }
+        try:
+            await self._litellm_request("POST", "/model/new", payload=payload)
+        except Exception:
+            await self._litellm_request("POST", "/v1/model/new", payload=payload)
 
     async def delete_lm_profile(self, lm_profile_id: str) -> bool:
         if self.postgres_pool is None:

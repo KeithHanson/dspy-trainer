@@ -58,6 +58,7 @@ services:
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-local-dev-master-key}
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/dspy_trainer?schema=litellm
       LITELLM_SALT_KEY: ${LITELLM_SALT_KEY:-sk-local-dev-salt-key-32-chars-minimum}
+      STORE_MODEL_IN_DB: ${STORE_MODEL_IN_DB:-True}
       LITELLM_MIGRATION_DIR: /tmp/litellm-migrations
       AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY}
       AZURE_OPENAI_API_BASE: ${AZURE_OPENAI_API_BASE}

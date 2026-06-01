@@ -23,6 +23,12 @@ describe("RunsPage", () => {
           ]),
         });
       }
+      if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([{ id: "lm-1", name: "GPT-4o" }]),
+        });
+      }
       return Promise.reject(new Error(`Unexpected URL ${url}`));
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -46,6 +52,7 @@ describe("RunsPage", () => {
           json: vi.fn().mockResolvedValue({
             id: "plan-1",
             status: "running",
+            lm_profile_id: "lm-1",
             completed_tasks: 1,
             total_tasks: 6,
             failed_tasks: 0,
@@ -63,6 +70,12 @@ describe("RunsPage", () => {
           }),
         });
       }
+      if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([{ id: "lm-1", name: "GPT-4o" }]),
+        });
+      }
       return Promise.reject(new Error(`Unexpected URL ${url}`));
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -74,6 +87,7 @@ describe("RunsPage", () => {
     );
 
     expect(await screen.findByText("Run summary")).toBeInTheDocument();
+    expect(await screen.findByText(/LM profile: GPT-4o/)).toBeInTheDocument();
     expect((await screen.findAllByText("running")).length).toBeGreaterThan(0);
     vi.unstubAllGlobals();
   });
@@ -89,6 +103,12 @@ describe("RunsPage", () => {
         });
       }
       if (String(url).endsWith("/workers") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([]),
+        });
+      }
+      if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
         return Promise.resolve({
           ok: true,
           json: vi.fn().mockResolvedValue([]),

@@ -9,6 +9,7 @@ import { DashboardPage } from "./dashboard/DashboardPage";
 import { BundlesPage } from "./bundles/BundlesPage";
 import { PlansPage } from "./plans/PlansPage";
 import { RunsPage } from "./runs/RunsPage";
+import { LmProfileEditorPage, LmProfilesPage } from "./lmProfiles/LmProfilesPage";
 
 function PlaceholderPage({ title, description }) {
   return (
@@ -65,6 +66,9 @@ export function App() {
         <Route path="/bundles" element={<BundlesPage />} />
         <Route path="/plans" element={<PlansPage />} />
         <Route path="/runs" element={<RunsPage />} />
+        <Route path="/lm-profiles" element={<LmProfilesPage />} />
+        <Route path="/lm-profiles/new" element={<LmProfileEditorPage />} />
+        <Route path="/lm-profiles/:profileId/edit" element={<LmProfileEditorPage />} />
         <Route path="/team" element={<PlaceholderPage title="Team" description="Team management screen is scaffolded for implementation." />} />
         <Route path="/settings" element={<PlaceholderPage title="Settings" description="Workspace settings foundation is available." />} />
       </Routes>
