@@ -70,6 +70,12 @@ describe("RunsPage", () => {
           }),
         });
       }
+      if (String(url).endsWith("/workers") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([{ worker_id: "worker-a", status: "listening", task_id: null }]),
+        });
+      }
       if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
         return Promise.resolve({
           ok: true,
@@ -88,6 +94,7 @@ describe("RunsPage", () => {
 
     expect(await screen.findByText("Run summary")).toBeInTheDocument();
     expect(await screen.findByText(/LM profile: GPT-4o/)).toBeInTheDocument();
+    expect(await screen.findByText("Workers")).toBeInTheDocument();
     expect((await screen.findAllByText("running")).length).toBeGreaterThan(0);
     vi.unstubAllGlobals();
   });
@@ -136,6 +143,36 @@ describe("RunsPage", () => {
 
     expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/agent-run-plans\/plan-1$/), expect.objectContaining({ method: "DELETE" }));
     expect(screen.queryByText("plan-1")).not.toBeInTheDocument();
+    vi.unstubAllGlobals();
+  });
+
+  it("still shows workers when jobs list load fails", async () => {
+    const fetchMock = vi.fn((url, init) => {
+      if (String(url).includes("/agent-run-plans?") && init?.method === "GET") {
+        return Promise.resolve({ ok: false, status: 503, json: vi.fn().mockResolvedValue({}) });
+      }
+      if (String(url).endsWith("/workers") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([{ worker_id: "worker-z", status: "listening", task_id: null }]),
+        });
+      }
+      if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter initialEntries={["/runs"]}>
+        <RunsPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("Could not load eval jobs")).toBeInTheDocument();
+    expect(await screen.findByText("Workers")).toBeInTheDocument();
+    expect(await screen.findByText("worker-z")).toBeInTheDocument();
     vi.unstubAllGlobals();
   });
 });

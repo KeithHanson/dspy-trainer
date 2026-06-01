@@ -6,6 +6,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from app.executor import module_runner
 from app.executor.module_runner import run_bundle_eval
 
 
@@ -105,3 +106,30 @@ def test_run_bundle_eval_prefers_module_build_lm_over_profile():
         },
     )
     assert result["items"][0]["score"] == 1.0
+
+
+def test_build_lm_profile_alias_omits_upstream_api_base(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class CaptureLM:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(module_runner, "_load_class", lambda _class_path: CaptureLM)
+
+    module_runner._build_lm_from_profile(
+        {
+            "id": "profile-123",
+            "model": "azure/some-deployment",
+            "api_base": "https://example.cognitiveservices.azure.com",
+            "proxy_api_base": "http://litellm-proxy:4000",
+            "virtual_key": "sk-virtual-123",
+            "model_type": "responses",
+            "lm_class_path": "ignored.path.CaptureLM",
+            "default_params": {},
+        }
+    )
+
+    assert captured["model"] == "openai/lm-profile:profile-123"
+    assert captured["api_key"] == "sk-virtual-123"
+    assert captured["api_base"] == "http://litellm-proxy:4000"

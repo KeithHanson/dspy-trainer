@@ -437,6 +437,23 @@ button { font-family: inherit; }
   align-items: center;
   gap: 10px;
 }
+.field-help {
+  margin-top: 3px;
+  padding: 6px 8px;
+  border: 1px solid color-mix(in oklch, var(--accent) 46%, transparent);
+  background: color-mix(in oklch, var(--accent-dim) 52%, var(--panel));
+  border-radius: var(--r-sm);
+  align-items: flex-start;
+}
+.field-help-icon {
+  color: var(--accent);
+  margin-top: 1px;
+  flex: none;
+}
+.field-help-copy {
+  color: color-mix(in oklch, var(--accent-hi) 45%, var(--text));
+  white-space: pre-line;
+}
 .runs-row-click { cursor: pointer; }
 .runs-row-click:hover { background: var(--surface); }
 .runs-kpis {

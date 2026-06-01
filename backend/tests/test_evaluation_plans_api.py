@@ -58,6 +58,26 @@ async def fake_delete_evaluation_plan(self, evaluation_plan_id):
     return True
 
 
+async def fake_update_evaluation_plan(self, evaluation_plan_id, project_id, scenario_id, dataset_version, name, runs_per_question, max_workers, module_import_id, lm_profile_id, eval_inputs):
+    plan = PLANS.get(evaluation_plan_id)
+    if plan is None:
+        return None
+    plan.update(
+        {
+            "project_id": project_id,
+            "scenario_id": scenario_id,
+            "dataset_version": dataset_version,
+            "name": name,
+            "runs_per_question": runs_per_question,
+            "max_workers": max_workers,
+            "module_import_id": module_import_id,
+            "lm_profile_id": lm_profile_id,
+            "eval_inputs": eval_inputs,
+        }
+    )
+    return plan
+
+
 def _patch_services(monkeypatch):
     monkeypatch.setenv("DSPY_TRAINER_POSTGRES_DSN", "postgresql://postgres:postgres@localhost:5432/dspy_trainer")
     monkeypatch.setattr(main_mod.AppServices, "connect", fake_connect)
@@ -66,6 +86,7 @@ def _patch_services(monkeypatch):
     monkeypatch.setattr(main_mod.AppServices, "list_evaluation_plans", fake_list_evaluation_plans)
     monkeypatch.setattr(main_mod.AppServices, "get_evaluation_plan", fake_get_evaluation_plan)
     monkeypatch.setattr(main_mod.AppServices, "delete_evaluation_plan", fake_delete_evaluation_plan)
+    monkeypatch.setattr(main_mod.AppServices, "update_evaluation_plan", fake_update_evaluation_plan)
 
 
 def _reset_state():
@@ -138,3 +159,42 @@ def test_delete_evaluation_plan(monkeypatch):
 
         missing = client.delete(f"/evaluation-plans/{plan_id}")
         assert missing.status_code == 404
+
+
+def test_update_evaluation_plan(monkeypatch):
+    _reset_state()
+    _patch_services(monkeypatch)
+    with TestClient(main_mod.app) as client:
+        created = client.post(
+            "/evaluation-plans",
+            json={
+                "project_id": "proj-1",
+                "scenario_id": "scn-1",
+                "dataset_version": "v1",
+                "name": "Initial",
+                "runs_per_question": 1,
+                "max_workers": 1,
+                "module_import_id": "mod-1",
+                "eval_inputs": [],
+            },
+        )
+        plan_id = created.json()["id"]
+
+        updated = client.patch(
+            f"/evaluation-plans/{plan_id}",
+            json={
+                "project_id": "proj-1",
+                "scenario_id": "scn-1",
+                "dataset_version": "v2",
+                "name": "Updated",
+                "runs_per_question": 3,
+                "max_workers": 4,
+                "module_import_id": "mod-2",
+                "lm_profile_id": "lm-2",
+                "eval_inputs": [{"input": {"question": "q"}, "label": {"expected": "a"}}],
+            },
+        )
+        assert updated.status_code == 200
+        assert updated.json()["id"] == plan_id
+        assert updated.json()["name"] == "Updated"
+        assert updated.json()["dataset_version"] == "v2"

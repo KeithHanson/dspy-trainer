@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { Button } from "../components/primitives/Button";
+import { Icon } from "../components/Icon";
 import { EmptyState } from "../components/states/EmptyState";
 import { ErrorState } from "../components/states/ErrorState";
 import { LoadingState } from "../components/states/LoadingState";
@@ -320,14 +321,17 @@ export function LmProfileEditorPage() {
             <label className="col gap-1">
               <span className="t-label">Name</span>
               <input aria-label="Name" className="bundles-input" value={form.name} onChange={(event) => setForm((prev) => ({ ...prev, name: event.target.value }))} />
+              <FieldHelp text="Friendly label shown in plans and run summaries." />
             </label>
             <label className="col gap-1">
               <span className="t-label">Model</span>
               <input aria-label="Model" className="bundles-input" value={form.model} onChange={(event) => setForm((prev) => ({ ...prev, model: event.target.value }))} />
+              <FieldHelp text={"Use provider/model format\n(for example, azure/my-deployment-name)"} />
             </label>
             <label className="col gap-1">
               <span className="t-label">API base</span>
               <input aria-label="API base" className="bundles-input" value={form.api_base} onChange={(event) => setForm((prev) => ({ ...prev, api_base: event.target.value }))} />
+              <FieldHelp text="Provider base URL only; no trailing `/v1` path needed." />
             </label>
             <label className="col gap-1">
               <span className="t-label">Model type</span>
@@ -336,18 +340,22 @@ export function LmProfileEditorPage() {
                   <option key={option} value={option}>{option}</option>
                 ))}
               </select>
+              <FieldHelp text="`responses` works for most modern OpenAI-compatible models." />
             </label>
             <label className="col gap-1">
               <span className="t-label">LM class path (optional)</span>
               <input aria-label="LM class path (optional)" className="bundles-input" value={form.lm_class_path} onChange={(event) => setForm((prev) => ({ ...prev, lm_class_path: event.target.value }))} />
+              <FieldHelp text="Override LM class only for custom adapters; otherwise leave blank." />
             </label>
             <label className="col gap-1">
               <span className="t-label">Upstream API key (sent to LiteLLM only)</span>
               <input type="password" aria-label="Upstream API key (sent to LiteLLM only)" className="bundles-input" value={form.upstream_api_key} onChange={(event) => setForm((prev) => ({ ...prev, upstream_api_key: event.target.value }))} placeholder="sk-..." autoComplete="off" />
+              <FieldHelp text="Used to initially provision proxy access." />
             </label>
             <label className="col gap-1">
               <span className="t-label">Default params (JSON object)</span>
               <textarea aria-label="Default params (JSON object)" className="plans-textarea" rows={4} value={form.default_params} onChange={(event) => setForm((prev) => ({ ...prev, default_params: event.target.value }))} />
+              <FieldHelp text="Applied to runtime calls (for example `temperature`, `max_tokens`)." />
             </label>
           </div>
           {formError ? <p className="lm-profiles-form-error">{formError}</p> : null}
@@ -372,6 +380,15 @@ export function LmProfileEditorPage() {
         </section>
       </div>
     </section>
+  );
+}
+
+function FieldHelp({ text }) {
+  return (
+    <div className="field-help row gap-2">
+      <Icon name="info" size={13} className="field-help-icon" />
+      <span className="cap field-help-copy">{text}</span>
+    </div>
   );
 }
 

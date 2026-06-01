@@ -87,7 +87,7 @@ class AppServices:
                 if self.settings.litellm_api_key.strip():
                     headers["Authorization"] = f"Bearer {self.settings.litellm_api_key}"
                 response = await self.http_client.get(
-                    f"{self.settings.litellm_base_url.rstrip('/')}/health",
+                    f"{self.settings.litellm_base_url.rstrip('/')}/health/liveness",
                     headers=headers,
                 )
                 litellm_ok = response.status_code < 500
@@ -1392,13 +1392,16 @@ class AppServices:
             next_model_type = model_type.strip() if isinstance(model_type, str) and model_type.strip() else existing["model_type"]
             next_default_params = default_params if isinstance(default_params, dict) else self._json_dict(existing["default_params"])
             next_lm_class_path = lm_class_path.strip() if isinstance(lm_class_path, str) and lm_class_path.strip() else None
-            await self._provision_litellm_model(
+            model_changed = next_model != existing["model"]
+            api_base_changed = next_api_base != existing["api_base"]
+            await self._sync_litellm_model_update(
                 profile_ref=lm_profile_id,
                 profile_name=next_name,
                 model=next_model,
                 api_base=next_api_base,
                 model_type=next_model_type,
                 upstream_api_key=upstream_api_key,
+                include_litellm_params=(model_changed or api_base_changed),
             )
             await conn.execute(
                 """
@@ -1429,7 +1432,7 @@ class AppServices:
         async with self.postgres_pool.acquire() as conn:
             existing = await conn.fetchrow(
                 """
-                select id, model, virtual_key
+                select id, name, model, api_base, model_type, virtual_key
                 from lm_profiles
                 where id = $1 and archived_at is null
                 """,
@@ -1437,6 +1440,14 @@ class AppServices:
             )
             if existing is None:
                 return None
+            await self._provision_litellm_model(
+                profile_ref=lm_profile_id,
+                profile_name=existing["name"],
+                model=existing["model"],
+                api_base=existing["api_base"],
+                model_type=existing["model_type"],
+                upstream_api_key=None,
+            )
             prior_key = existing["virtual_key"]
             if isinstance(prior_key, str) and prior_key.strip():
                 try:
@@ -1494,12 +1505,14 @@ class AppServices:
         }
 
     async def _generate_lm_profile_virtual_key(self, profile_id: str, model: str) -> str:
+        profile_model_name = f"lm-profile:{profile_id}"
+        unique_alias = f"lm-profile:{profile_id}:{str(uuid4())[:8]}"
         payload = await self.create_litellm_key(
-            models=[model],
-            aliases={"default": model},
+            models=[profile_model_name, model],
+            aliases={"default": profile_model_name},
             metadata={"lm_profile_id": profile_id},
             duration=None,
-            key_alias=f"lm-profile:{profile_id}",
+            key_alias=unique_alias,
             team_id=None,
             user_id=None,
         )
@@ -1535,12 +1548,59 @@ class AppServices:
         }
         try:
             await self._litellm_request("POST", "/model/new", payload=payload)
-        except Exception:
-            await self._litellm_request("POST", "/v1/model/new", payload=payload)
+        except Exception as exc:
+            message = str(exc)
+            if "Unique constraint failed" not in message and "Failed to add model to db" not in message:
+                raise
+            await self._litellm_request("PATCH", f"/model/{profile_ref}/update", payload=payload)
+
+    async def _sync_litellm_model_update(
+        self,
+        profile_ref: str,
+        profile_name: str,
+        model: str,
+        api_base: str,
+        model_type: str,
+        upstream_api_key: str | None,
+        include_litellm_params: bool,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "model_name": f"lm-profile:{profile_ref}",
+            "model_info": {
+                "id": profile_ref,
+                "mode": model_type,
+                "metadata": {"lm_profile_name": profile_name},
+            },
+        }
+        if include_litellm_params:
+            clean_key = upstream_api_key.strip() if isinstance(upstream_api_key, str) else ""
+            if not clean_key:
+                raise RuntimeError("upstream_api_key is required when model or api_base changes")
+            payload["litellm_params"] = {
+                "model": model,
+                "api_base": api_base,
+                "api_key": clean_key,
+            }
+        await self._litellm_request("PATCH", f"/model/{profile_ref}/update", payload=payload)
 
     async def delete_lm_profile(self, lm_profile_id: str) -> bool:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            existing = await conn.fetchrow(
+                """
+                select id, virtual_key
+                from lm_profiles
+                where id = $1 and archived_at is null
+                """,
+                lm_profile_id,
+            )
+        if existing is None:
+            return False
+        virtual_key = existing["virtual_key"]
+        if isinstance(virtual_key, str) and virtual_key.strip():
+            await self._litellm_request("POST", "/key/delete", payload={"keys": [virtual_key]})
+        await self._litellm_request("POST", "/model/delete", payload={"id": lm_profile_id})
         now = datetime.now(timezone.utc)
         async with self.postgres_pool.acquire() as conn:
             result = await conn.execute(
@@ -1730,6 +1790,59 @@ class AppServices:
         async with self.postgres_pool.acquire() as conn:
             result = await conn.execute("delete from evaluation_plans where id = $1", evaluation_plan_id)
         return result.endswith("1")
+
+    async def update_evaluation_plan(
+        self,
+        evaluation_plan_id: str,
+        project_id: str,
+        scenario_id: str,
+        dataset_version: str,
+        name: str,
+        runs_per_question: int,
+        max_workers: int,
+        module_import_id: str | None,
+        lm_profile_id: str | None,
+        eval_inputs: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        now = datetime.now(timezone.utc)
+        async with self.postgres_pool.acquire() as conn:
+            exists = await conn.fetchval("select 1 from evaluation_plans where id = $1", evaluation_plan_id)
+            if exists is None:
+                return None
+            if lm_profile_id:
+                profile_exists = await conn.fetchval("select 1 from lm_profiles where id = $1 and archived_at is null", lm_profile_id)
+                if profile_exists is None:
+                    raise ValueError("lm profile not found")
+            await conn.execute(
+                """
+                update evaluation_plans
+                set project_id = $2,
+                    scenario_id = $3,
+                    dataset_version = $4,
+                    name = $5,
+                    runs_per_question = $6,
+                    max_workers = $7,
+                    module_import_id = $8,
+                    lm_profile_id = $9,
+                    eval_inputs = $10::jsonb,
+                    updated_at = $11
+                where id = $1
+                """,
+                evaluation_plan_id,
+                project_id,
+                scenario_id,
+                dataset_version,
+                name.strip() if name.strip() else "Untitled plan",
+                max(1, runs_per_question),
+                max(1, max_workers),
+                module_import_id,
+                lm_profile_id,
+                __import__("json").dumps(eval_inputs),
+                now,
+            )
+        return await self.get_evaluation_plan(evaluation_plan_id)
 
     @staticmethod
     def _json_list(value: Any) -> list[dict[str, Any]]:
@@ -2051,7 +2164,8 @@ class AppServices:
                        lp.api_base as lm_api_base,
                        lp.model_type as lm_model_type,
                        lp.default_params as lm_default_params,
-                       lp.lm_class_path as lm_class_path
+                       lp.lm_class_path as lm_class_path,
+                       lp.virtual_key as lm_virtual_key
                 from agent_run_tasks t
                 join agent_run_plans p on p.id = t.plan_id
                 left join lm_profiles lp on lp.id = p.lm_profile_id and lp.archived_at is null
@@ -2099,9 +2213,11 @@ class AppServices:
                     "id": str(task["lm_profile_id"]),
                     "model": task["lm_model"],
                     "api_base": task["lm_api_base"],
+                    "proxy_api_base": self.settings.litellm_base_url,
                     "model_type": task["lm_model_type"],
                     "default_params": self._json_dict(task["lm_default_params"]),
                     "lm_class_path": task["lm_class_path"],
+                    "virtual_key": task["lm_virtual_key"],
                 }
             if parent_run_id:
                 from app.executor.eval import _configure_dspy_mlflow_autolog

@@ -58,6 +58,10 @@ async def fake_update_lm_profile(self, lm_profile_id, name, model, api_base, mod
     current = PROFILES.get(lm_profile_id)
     if current is None:
         return None
+    next_model = model if model is not None else current["model"]
+    next_api_base = api_base if api_base is not None else current["api_base"]
+    if (next_model != current["model"] or next_api_base != current["api_base"]) and not upstream_api_key:
+        raise RuntimeError("upstream_api_key is required when model or api_base changes")
     if name is not None:
         current["name"] = name
     if model is not None:
@@ -202,6 +206,30 @@ def test_lm_profile_test_connection(monkeypatch):
         assert tested.status_code == 200
         assert tested.json()["ok"] is True
         assert tested.json()["reply"] == "connection-ok"
+
+
+def test_lm_profile_update_model_requires_upstream_api_key(monkeypatch):
+    _reset_state()
+    _patch_services(monkeypatch)
+    with TestClient(main_mod.app) as client:
+        created = client.post(
+            "/lm-profiles",
+            json={
+                "name": "Base",
+                "model": "openai/codex-5.3",
+                "api_base": "http://litellm-proxy:4000",
+                "model_type": "responses",
+                "default_params": {},
+                "upstream_api_key": "sk-upstream-create",
+            },
+        )
+        profile_id = created.json()["id"]
+        updated = client.patch(
+            f"/lm-profiles/{profile_id}",
+            json={"model": "openai/o3"},
+        )
+        assert updated.status_code == 502
+        assert "upstream_api_key is required" in updated.json()["error"]
 
 
 def test_lm_profile_create_requires_upstream_api_key(monkeypatch):

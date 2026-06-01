@@ -4,9 +4,9 @@ import { Button } from "../components/primitives/Button";
 
 const PRIMARY_NAV = [
   { to: "/dashboard", label: "Overview", icon: "grid" },
+  { to: "/lm-profiles", label: "LM Profiles", icon: "settings" },
   { to: "/bundles", label: "Module Bundles", icon: "box" },
   { to: "/plans", label: "Evaluation Plans", icon: "layers" },
-  { to: "/lm-profiles", label: "LM Profiles", icon: "settings" },
   { to: "/runs", label: "Eval Jobs", icon: "activity" },
 ];
 

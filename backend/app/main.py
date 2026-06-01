@@ -718,6 +718,29 @@ async def get_evaluation_plan(evaluation_plan_id: str, request: Request):
     return result
 
 
+@app.patch("/evaluation-plans/{evaluation_plan_id}")
+async def update_evaluation_plan(evaluation_plan_id: str, request: Request, payload: EvaluationPlanCreateRequest):
+    services: AppServices = request.app.state.services
+    try:
+        result = await services.update_evaluation_plan(
+            evaluation_plan_id=evaluation_plan_id,
+            project_id=payload.project_id,
+            scenario_id=payload.scenario_id,
+            dataset_version=payload.dataset_version,
+            name=payload.name,
+            runs_per_question=payload.runs_per_question,
+            max_workers=payload.max_workers,
+            module_import_id=payload.module_import_id,
+            lm_profile_id=payload.lm_profile_id,
+            eval_inputs=payload.eval_inputs,
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=404, content={"error": str(exc)})
+    if result is None:
+        return JSONResponse(status_code=404, content={"error": "evaluation plan not found"})
+    return result
+
+
 @app.delete("/evaluation-plans/{evaluation_plan_id}")
 async def delete_evaluation_plan(evaluation_plan_id: str, request: Request):
     services: AppServices = request.app.state.services

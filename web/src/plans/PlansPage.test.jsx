@@ -126,4 +126,82 @@ describe("PlansPage", () => {
 
     expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/evaluation-plans\/plan-1$/), expect.objectContaining({ method: "DELETE" }));
   });
+
+  it("requires LM profile before saving", async () => {
+    const fetchMock = vi.fn((url, init) => {
+      if (String(url).endsWith("/modules") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([
+            { id: "mod-1", bundle_name: "policy-bot", bundle_version: "1.0.0", validation_status: "passed", source_ref: "bundle.zip" },
+          ]),
+        });
+      }
+      if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter initialEntries={["/plans?new=1"]}>
+        <PlansPage />
+      </MemoryRouter>,
+    );
+
+    await userEvent.type(await screen.findByLabelText("Plan name"), "No LM Profile");
+    await userEvent.type(screen.getByPlaceholderText("Input prompt"), "Question?");
+    await userEvent.type(screen.getByPlaceholderText("Expected answer"), "Answer");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(await screen.findByText("Select an LM profile.")).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalledWith(expect.stringMatching(/\/evaluation-plans$/), expect.objectContaining({ method: "POST" }));
+  });
+
+  it("updates existing plan when editing", async () => {
+    const fetchMock = vi.fn((url, init) => {
+      if (String(url).endsWith("/modules") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([
+            { id: "mod-1", bundle_name: "policy-bot", bundle_version: "1.0.0", validation_status: "passed", source_ref: "bundle.zip" },
+          ]),
+        });
+      }
+      if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "lm-1", name: "GPT-4o" }]) });
+      }
+      if (String(url).endsWith("/evaluation-plans/plan-1") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue({
+            id: "plan-1",
+            name: "Existing",
+            runs_per_question: 1,
+            max_workers: 1,
+            module_import_id: "mod-1",
+            lm_profile_id: "lm-1",
+            eval_inputs: [{ input: { question: "q1" }, label: { expected: "a1" } }],
+          }),
+        });
+      }
+      if (String(url).endsWith("/evaluation-plans/plan-1") && init?.method === "PATCH") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ id: "plan-1" }) });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter initialEntries={["/plans?new=1&id=plan-1"]}>
+        <PlansPage />
+      </MemoryRouter>,
+    );
+
+    await screen.findByDisplayValue("Existing");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/evaluation-plans\/plan-1$/), expect.objectContaining({ method: "PATCH" }));
+  });
 });

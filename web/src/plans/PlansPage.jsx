@@ -349,6 +349,10 @@ function PlanBuilder({ onBack, planId }) {
       setValidationError("Select a validated module bundle.");
       return;
     }
+    if (!selectedLmProfileId) {
+      setValidationError("Select an LM profile.");
+      return;
+    }
     if (!filledRows.length) {
       setValidationError("Add at least one question and expected answer.");
       return;
@@ -360,8 +364,8 @@ function PlanBuilder({ onBack, planId }) {
 
       const evalInputs = filledRows.map((row) => ({ input: { question: row.input }, label: { expected: row.expected } }));
 
-      const createdPlanResp = await fetch(`${apiBase}/evaluation-plans`, {
-        method: "POST",
+      const savedPlanResp = await fetch(isEditing ? `${apiBase}/evaluation-plans/${planId}` : `${apiBase}/evaluation-plans`, {
+        method: isEditing ? "PATCH" : "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           project_id: PROJECT_ID,
@@ -375,10 +379,10 @@ function PlanBuilder({ onBack, planId }) {
           lm_profile_id: selectedLmProfileId || null,
         }),
       });
-      if (!createdPlanResp.ok) {
-        throw new Error(`Could not save plan (${createdPlanResp.status})`);
+      if (!savedPlanResp.ok) {
+        throw new Error(`Could not save plan (${savedPlanResp.status})`);
       }
-      const createdPlan = await createdPlanResp.json();
+      const savedPlan = await savedPlanResp.json();
 
       if (runAfterSave) {
         const selectedBundle = validModules.find((item) => item.id === selectedBundleId);
@@ -392,7 +396,7 @@ function PlanBuilder({ onBack, planId }) {
             dataset_version: DATASET_VERSION,
             bundle_path: selectedBundle?.source_ref || selectedBundle?.bundle_name || "uploaded-bundle.zip",
             eval_inputs: [],
-            evaluation_plan_id: createdPlan.id,
+            evaluation_plan_id: savedPlan.id,
             runs_per_question: runs,
             max_workers: workers,
             lm_profile_id: selectedLmProfileId || null,
@@ -482,7 +486,7 @@ function PlanBuilder({ onBack, planId }) {
             <label className="col gap-1" htmlFor="lm-profile-select">
               <span className="t-label">Runtime model profile</span>
               <select id="lm-profile-select" className="bundles-input" value={selectedLmProfileId} onChange={(event) => setSelectedLmProfileId(event.target.value)}>
-                <option value="">None (bundle build_lm/default runtime)</option>
+                <option value="">Select an LM profile...</option>
                 {lmProfiles.map((profile) => (
                   <option key={profile.id} value={profile.id}>{profile.name || profile.id}</option>
                 ))}

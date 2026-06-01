@@ -20,6 +20,7 @@ export function RunsPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [deletingPlanId, setDeletingPlanId] = useState("");
   const [error, setError] = useState("");
+  const [workersError, setWorkersError] = useState("");
   const [profileNames, setProfileNames] = useState({});
 
   useEffect(() => {
@@ -68,6 +69,25 @@ export function RunsPage() {
   };
 
   useEffect(() => {
+    const loadWorkers = async () => {
+      try {
+        const workersResp = await fetch(`${apiBase}/workers`, { method: "GET" });
+        if (!workersResp.ok) {
+          throw new Error(`Could not load workers (${workersResp.status})`);
+        }
+        const workersPayload = await workersResp.json();
+        setWorkers(Array.isArray(workersPayload) ? workersPayload : []);
+        setWorkersError("");
+      } catch (err) {
+        setWorkersError(err instanceof Error ? err.message : "Could not load workers");
+      }
+    };
+    loadWorkers();
+    const interval = setInterval(loadWorkers, 2000);
+    return () => clearInterval(interval);
+  }, [apiBase]);
+
+  useEffect(() => {
     const load = async () => {
       setIsLoading(true);
       setError("");
@@ -80,13 +100,6 @@ export function RunsPage() {
           const listPayload = await listResp.json();
           const listedPlans = Array.isArray(listPayload) ? listPayload : [];
           setPlans(listedPlans);
-          const workersResp = await fetch(`${apiBase}/workers`, { method: "GET" });
-          if (workersResp.ok) {
-            const workersPayload = await workersResp.json();
-            setWorkers(Array.isArray(workersPayload) ? workersPayload : []);
-          } else {
-            setWorkers([]);
-          }
           setRunPlan(null);
           setTasks([]);
           return;
@@ -134,7 +147,7 @@ export function RunsPage() {
     return () => clearInterval(interval);
   }, [apiBase, planId]);
 
-  if (!planId && !isLoading && !error) {
+  if (!planId) {
     return (
       <section className="page">
         <div className="page-body plans-wrap">
@@ -145,7 +158,9 @@ export function RunsPage() {
             </div>
             <Button onClick={() => navigate("/plans")}>Back to plans</Button>
           </header>
-          {plans.length ? (
+          {isLoading ? <LoadingState label="Loading eval jobs..." /> : null}
+          {error ? <ErrorState title="Could not load eval jobs" description={error} /> : null}
+          {!isLoading && !error && plans.length ? (
             <>
               <section className="panel" style={{ overflow: "hidden" }}>
                 <table className="dashboard-table">
@@ -193,26 +208,12 @@ export function RunsPage() {
                   </tbody>
                 </table>
               </section>
-
-              <section className="panel card-pad runs-workers-section">
-                <h3 className="t-h2" style={{ marginBottom: 10 }}>Workers</h3>
-                {!workers.length ? (
-                  <div className="dashboard-zero">No workers reported yet.</div>
-                ) : (
-                  <div className="runs-workers-inline">
-                    {workers.map((worker) => (
-                      <span key={worker.worker_id} className="runs-workers-inline-item">
-                        <span className="mono cap">{worker.worker_id}</span>
-                        <span className="cap">{worker.status}{worker.task_id ? ` · ${shortId(worker.task_id)}` : ""}{worker.last_seen ? ` · seen ${formatTimeAgo(worker.last_seen)}` : ""}</span>
-                      </span>
-                    ))}
-                  </div>
-                )}
-              </section>
             </>
-          ) : (
+          ) : !isLoading && !error ? (
             <EmptyState title="No eval jobs yet" description="Run a plan from Evaluation Plans to see jobs here." />
-          )}
+          ) : null}
+
+          <WorkersSection workers={workers} workersError={workersError} />
         </div>
       </section>
     );
@@ -325,6 +326,8 @@ export function RunsPage() {
           </>
         ) : null}
 
+        <WorkersSection workers={workers} workersError={workersError} />
+
         {selectedTask ? (
           <div className="runs-drawer-backdrop" onClick={() => setSelectedTask(null)}>
             <aside className="runs-drawer panel" onClick={(event) => event.stopPropagation()}>
@@ -395,6 +398,27 @@ export function RunsPage() {
           </div>
         ) : null}
       </div>
+    </section>
+  );
+}
+
+function WorkersSection({ workers, workersError }) {
+  return (
+    <section className="panel card-pad runs-workers-section">
+      <h3 className="t-h2" style={{ marginBottom: 10 }}>Workers</h3>
+      {workersError ? <p className="cap" style={{ marginBottom: 6 }}>Worker refresh issue: {workersError}</p> : null}
+      {!workers.length ? (
+        <div className="dashboard-zero">No workers reported yet.</div>
+      ) : (
+        <div className="runs-workers-inline">
+          {workers.map((worker) => (
+            <span key={worker.worker_id} className="runs-workers-inline-item">
+              <span className="mono cap">{worker.worker_id}</span>
+              <span className="cap">{worker.status}{worker.task_id ? ` · ${shortId(worker.task_id)}` : ""}{worker.last_seen ? ` · seen ${formatTimeAgo(worker.last_seen)}` : ""}</span>
+            </span>
+          ))}
+        </div>
+      )}
     </section>
   );
 }
