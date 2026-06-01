@@ -152,6 +152,27 @@ class LmProfileUpdateRequest(BaseModel):
     lm_class_path: str | None = None
 
 
+class LiteLLMKeyCreateRequest(BaseModel):
+    models: list[str] = Field(default_factory=list)
+    aliases: dict[str, str] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    duration: str | None = None
+    key_alias: str | None = None
+    team_id: str | None = None
+    user_id: str | None = None
+
+
+class LiteLLMKeyUpdateRequest(BaseModel):
+    key: str
+    models: list[str] | None = None
+    aliases: dict[str, str] | None = None
+    metadata: dict[str, Any] | None = None
+    duration: str | None = None
+    max_budget: float | None = None
+    rpm_limit: int | None = None
+    tpm_limit: int | None = None
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -588,6 +609,62 @@ async def delete_lm_profile(lm_profile_id: str, request: Request):
     if not deleted:
         return JSONResponse(status_code=404, content={"error": "lm profile not found"})
     return {"id": lm_profile_id, "deleted": True}
+
+
+@app.get("/litellm/keys")
+async def list_litellm_keys(request: Request):
+    services: AppServices = request.app.state.services
+    return await services.list_litellm_keys()
+
+
+@app.post("/litellm/keys")
+async def create_litellm_key(request: Request, payload: LiteLLMKeyCreateRequest):
+    services: AppServices = request.app.state.services
+    return await services.create_litellm_key(
+        models=payload.models,
+        aliases=payload.aliases,
+        metadata=payload.metadata,
+        duration=payload.duration,
+        key_alias=payload.key_alias,
+        team_id=payload.team_id,
+        user_id=payload.user_id,
+    )
+
+
+@app.get("/litellm/keys/{key}")
+async def get_litellm_key(key: str, request: Request):
+    services: AppServices = request.app.state.services
+    return await services.get_litellm_key_info(key)
+
+
+@app.patch("/litellm/keys/{key}")
+async def update_litellm_key(key: str, request: Request, payload: LiteLLMKeyUpdateRequest):
+    services: AppServices = request.app.state.services
+    effective_key = payload.key or key
+    if effective_key != key:
+        return JSONResponse(status_code=400, content={"error": "path key and payload key must match"})
+    return await services.update_litellm_key(
+        key=effective_key,
+        models=payload.models,
+        aliases=payload.aliases,
+        metadata=payload.metadata,
+        duration=payload.duration,
+        max_budget=payload.max_budget,
+        rpm_limit=payload.rpm_limit,
+        tpm_limit=payload.tpm_limit,
+    )
+
+
+@app.post("/litellm/keys/{key}/revoke")
+async def revoke_litellm_key(key: str, request: Request):
+    services: AppServices = request.app.state.services
+    return await services.revoke_litellm_key(key)
+
+
+@app.post("/litellm/keys/{key}/restore")
+async def restore_litellm_key(key: str, request: Request):
+    services: AppServices = request.app.state.services
+    return await services.restore_litellm_key(key)
 
 
 @app.get("/evaluation-plans")

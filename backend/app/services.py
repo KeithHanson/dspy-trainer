@@ -963,6 +963,95 @@ class AppServices:
             raise RuntimeError(f"MLflow {method} {path} returned invalid payload")
         return data
 
+    async def _litellm_request(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+        query: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if self.http_client is None:
+            raise RuntimeError("http client not initialized")
+        headers = {}
+        if self.settings.litellm_api_key.strip():
+            headers["Authorization"] = f"Bearer {self.settings.litellm_api_key}"
+        url = f"{self.settings.litellm_base_url.rstrip('/')}{path}"
+        response = await self.http_client.request(method, url, json=payload, params=query, headers=headers)
+        if response.status_code >= 400:
+            raise RuntimeError(f"LiteLLM {method} {path} failed ({response.status_code}): {response.text}")
+        data = response.json()
+        if isinstance(data, dict):
+            return data
+        return {"data": data}
+
+    async def list_litellm_keys(self) -> dict[str, Any]:
+        try:
+            return await self._litellm_request("GET", "/key/list")
+        except Exception:
+            return await self._litellm_request("GET", "/v1/key/list")
+
+    async def create_litellm_key(
+        self,
+        models: list[str],
+        aliases: dict[str, str],
+        metadata: dict[str, Any],
+        duration: str | None,
+        key_alias: str | None,
+        team_id: str | None,
+        user_id: str | None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "models": models,
+            "aliases": aliases,
+            "metadata": metadata,
+        }
+        if duration:
+            payload["duration"] = duration
+        if key_alias:
+            payload["key_alias"] = key_alias
+        if team_id:
+            payload["team_id"] = team_id
+        if user_id:
+            payload["user_id"] = user_id
+        return await self._litellm_request("POST", "/key/generate", payload=payload)
+
+    async def get_litellm_key_info(self, key: str) -> dict[str, Any]:
+        return await self._litellm_request("GET", "/key/info", query={"key": key})
+
+    async def update_litellm_key(
+        self,
+        key: str,
+        models: list[str] | None,
+        aliases: dict[str, str] | None,
+        metadata: dict[str, Any] | None,
+        duration: str | None,
+        max_budget: float | None,
+        rpm_limit: int | None,
+        tpm_limit: int | None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"key": key}
+        if models is not None:
+            payload["models"] = models
+        if aliases is not None:
+            payload["aliases"] = aliases
+        if metadata is not None:
+            payload["metadata"] = metadata
+        if duration is not None:
+            payload["duration"] = duration
+        if max_budget is not None:
+            payload["max_budget"] = max_budget
+        if rpm_limit is not None:
+            payload["rpm_limit"] = rpm_limit
+        if tpm_limit is not None:
+            payload["tpm_limit"] = tpm_limit
+        return await self._litellm_request("POST", "/key/update", payload=payload)
+
+    async def revoke_litellm_key(self, key: str) -> dict[str, Any]:
+        return await self._litellm_request("POST", "/key/block", payload={"key": key})
+
+    async def restore_litellm_key(self, key: str) -> dict[str, Any]:
+        return await self._litellm_request("POST", "/key/unblock", payload={"key": key})
+
     async def ensure_mlflow_experiment(self, project_id: str, experiment_name: str | None = None) -> str:
         if not experiment_name:
             experiment_name = f"project:{project_id}"
