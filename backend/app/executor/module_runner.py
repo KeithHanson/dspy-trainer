@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+from importlib import import_module
+import inspect
 from pathlib import Path
 import tomllib
 from types import ModuleType
@@ -68,7 +70,51 @@ def _run_judge_metric_without_autolog(raw_metric_fn: Any, example: Any, predicti
         return raw_metric_fn(example, prediction)
 
 
-def run_bundle_eval(bundle_path: str, eval_inputs: list[dict[str, Any]], num_threads: int = 1) -> dict[str, Any]:
+def _load_class(class_path: str) -> type[Any]:
+    if "." not in class_path:
+        raise RuntimeError(f"lm_class_path must be module-qualified (got: {class_path})")
+    module_name, class_name = class_path.rsplit(".", 1)
+    module = import_module(module_name)
+    cls = getattr(module, class_name, None)
+    if cls is None:
+        raise RuntimeError(f"lm_class_path class not found: {class_path}")
+    if not isinstance(cls, type):
+        raise RuntimeError(f"lm_class_path does not point to a class: {class_path}")
+    return cls
+
+
+def _build_lm_from_profile(lm_profile: dict[str, Any]) -> Any:
+    class_path = str(lm_profile.get("lm_class_path") or "dspy.LM").strip()
+    lm_cls = _load_class(class_path)
+    default_params = lm_profile.get("default_params")
+    params = default_params if isinstance(default_params, dict) else {}
+
+    base_kwargs: dict[str, Any] = {
+        "model": str(lm_profile.get("model") or "").strip(),
+        "api_base": str(lm_profile.get("api_base") or "").strip(),
+        "model_type": str(lm_profile.get("model_type") or "responses").strip() or "responses",
+    }
+    kwargs: dict[str, Any] = {**base_kwargs, **params}
+    kwargs = {key: value for key, value in kwargs.items() if value not in (None, "")}
+
+    try:
+        signature = inspect.signature(lm_cls)
+        accepts_var_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values())
+        if not accepts_var_kwargs:
+            allowed = set(signature.parameters.keys())
+            kwargs = {key: value for key, value in kwargs.items() if key in allowed}
+    except Exception:
+        pass
+
+    return lm_cls(**kwargs)
+
+
+def run_bundle_eval(
+    bundle_path: str,
+    eval_inputs: list[dict[str, Any]],
+    num_threads: int = 1,
+    lm_profile: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     root = Path(bundle_path).expanduser().resolve()
     pass_threshold = 0.5
     toml_path = root / "bundle.toml"
@@ -90,7 +136,12 @@ def run_bundle_eval(bundle_path: str, eval_inputs: list[dict[str, Any]], num_thr
         raise RuntimeError("metric.py must define judge_metric(example, prediction)")
 
     program = module_mod.build_program()
-    lm = module_mod.build_lm() if hasattr(module_mod, "build_lm") else None
+    if hasattr(module_mod, "build_lm"):
+        lm = module_mod.build_lm()
+    elif lm_profile is not None:
+        lm = _build_lm_from_profile(lm_profile)
+    else:
+        lm = None
     if lm is not None:
         _disable_lm_cache(lm)
     raw_metric_fn = metric_mod.judge_metric

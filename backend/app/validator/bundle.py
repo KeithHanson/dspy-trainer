@@ -61,6 +61,7 @@ def _validate_module_contract(module_file: Path, diagnostics: list[dict[str, Any
     has_signature = False
     has_module_subclass = False
     has_build_program = False
+    build_lm_node: ast.FunctionDef | ast.AsyncFunctionDef | None = None
     for node in tree.body:
         if isinstance(node, ast.ClassDef):
             for base in node.bases:
@@ -71,6 +72,8 @@ def _validate_module_contract(module_file: Path, diagnostics: list[dict[str, Any
                     has_module_subclass = True
         if isinstance(node, ast.FunctionDef) and node.name == "build_program":
             has_build_program = True
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "build_lm":
+            build_lm_node = node
 
     if not has_signature:
         diagnostics.append(
@@ -82,6 +85,16 @@ def _validate_module_contract(module_file: Path, diagnostics: list[dict[str, Any
         diagnostics.append(
             _diag("error", "build_program_missing", "module.py must expose build_program() returning a dspy.Module", MODULE_FILE)
         )
+    if build_lm_node is not None:
+        if not _has_zero_required_args(build_lm_node):
+            diagnostics.append(
+                _diag(
+                    "error",
+                    "build_lm_signature_invalid",
+                    "build_lm() must not require positional arguments when defined",
+                    MODULE_FILE,
+                )
+            )
 
 
 def _validate_metric_contract(metric_file: Path, diagnostics: list[dict[str, Any]]) -> None:
@@ -176,6 +189,14 @@ def _name_of(node: ast.AST) -> str:
         parent = _name_of(node.value)
         return f"{parent}.{node.attr}" if parent else node.attr
     return ""
+
+
+def _has_zero_required_args(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    args = node.args
+    positional = list(args.posonlyargs) + list(args.args)
+    required_positional = len(positional) - len(args.defaults)
+    has_required_kwonly = any(default is None for default in args.kw_defaults)
+    return required_positional == 0 and not has_required_kwonly
 
 
 def _diag(severity: str, code: str, message: str, path: str) -> dict[str, str]:

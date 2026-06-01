@@ -1889,9 +1889,16 @@ class AppServices:
             task = await conn.fetchrow(
                 """
                 select t.id, t.plan_id, t.status, t.input_payload, t.label_payload,
-                       p.bundle_path, p.max_workers, p.mlflow_experiment_id, p.mlflow_parent_run_id, p.project_id
+                       p.bundle_path, p.max_workers, p.mlflow_experiment_id, p.mlflow_parent_run_id, p.project_id,
+                       p.lm_profile_id,
+                       lp.model as lm_model,
+                       lp.api_base as lm_api_base,
+                       lp.model_type as lm_model_type,
+                       lp.default_params as lm_default_params,
+                       lp.lm_class_path as lm_class_path
                 from agent_run_tasks t
                 join agent_run_plans p on p.id = t.plan_id
+                left join lm_profiles lp on lp.id = p.lm_profile_id and lp.archived_at is null
                 where t.id = $1
                 """,
                 task_id,
@@ -1930,6 +1937,16 @@ class AppServices:
             experiment_id = str(task["mlflow_experiment_id"] or "")
             tracking_uri = str(getattr(self.settings, "mlflow_tracking_uri", "") or "")
             trace_ids_before: set[str] = set()
+            lm_profile: dict[str, Any] | None = None
+            if task["lm_profile_id"]:
+                lm_profile = {
+                    "id": str(task["lm_profile_id"]),
+                    "model": task["lm_model"],
+                    "api_base": task["lm_api_base"],
+                    "model_type": task["lm_model_type"],
+                    "default_params": self._json_dict(task["lm_default_params"]),
+                    "lm_class_path": task["lm_class_path"],
+                }
             if parent_run_id:
                 from app.executor.eval import _configure_dspy_mlflow_autolog
                 from app.executor.eval import _link_traces_to_parent_run
@@ -1944,6 +1961,7 @@ class AppServices:
                     eval_inputs=eval_inputs,
                     num_threads=1,
                     parent_run_id=parent_run_id,
+                    lm_profile=lm_profile,
                 )
                 if tracking_uri and experiment_id:
                     trace_ids_after = _recent_trace_ids(tracking_uri, experiment_id)
@@ -1959,6 +1977,7 @@ class AppServices:
                     bundle_path=str(task["bundle_path"]),
                     eval_inputs=eval_inputs,
                     num_threads=1,
+                    lm_profile=lm_profile,
                 )
             item = result["items"][0]
             score = float(item["score"])

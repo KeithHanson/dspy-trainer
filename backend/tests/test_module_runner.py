@@ -39,3 +39,69 @@ def test_run_bundle_eval_rejects_legacy_metric_return_type():
         )
     msg = str(exc_info.value)
     assert "judge_metric must return a dict" in msg or "unsupported operand type" in msg
+
+
+def test_run_bundle_eval_uses_lm_profile_when_build_lm_absent(tmp_path):
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "module.py").write_text(
+        "import dspy\n"
+        "class QA(dspy.Signature):\n"
+        "  question = dspy.InputField()\n"
+        "  answer = dspy.OutputField()\n"
+        "class Program(dspy.Module):\n"
+        "  def __init__(self):\n"
+        "    super().__init__()\n"
+        "    self.predict = dspy.Predict(QA)\n"
+        "  def forward(self, question: str):\n"
+        "    return self.predict(question=question)\n"
+        "def build_program():\n"
+        "  return Program()\n",
+        encoding="utf-8",
+    )
+    (bundle / "metric.py").write_text(
+        "JUDGE_INSTRUCTIONS = 'Return pass when answer matches expected exactly.'\n"
+        "def judge_metric(example, prediction):\n"
+        "  expected = str(example.label.get('expected', ''))\n"
+        "  got = str(prediction.answer)\n"
+        "  matched = expected == got\n"
+        "  return {'score': 1.0 if matched else 0.0, 'rationale': 'exact_match' if matched else 'mismatch', 'flags': [] if matched else ['answer_mismatch'], 'raw_response': {'expected': expected, 'got': got}}\n",
+        encoding="utf-8",
+    )
+    (bundle / "bundle.toml").write_text(
+        "name='x'\nversion='0.1.0'\nlm_target='x'\nscore_pass_threshold=0.8\n",
+        encoding="utf-8",
+    )
+
+    result = run_bundle_eval(
+        bundle_path=str(bundle),
+        eval_inputs=[{"input": {"question": "France capital?"}, "label": {"expected": "Paris"}}],
+        num_threads=1,
+        lm_profile={
+            "model": "dummy",
+            "api_base": "http://unused",
+            "model_type": "chat",
+            "lm_class_path": "dspy.utils.DummyLM",
+            "default_params": {"answers": [{"answer": "Paris"}]},
+        },
+    )
+    assert len(result["items"]) == 1
+    assert result["items"][0]["score"] == 1.0
+
+
+def test_run_bundle_eval_prefers_module_build_lm_over_profile():
+    result = run_bundle_eval(
+        bundle_path=str(FIXTURES / "valid_bundle"),
+        eval_inputs=[
+            {"input": {"question": "France capital?"}, "label": {"expected": "Paris"}},
+        ],
+        num_threads=1,
+        lm_profile={
+            "model": "dummy",
+            "api_base": "http://unused",
+            "model_type": "chat",
+            "lm_class_path": "dspy.utils.DummyLM",
+            "default_params": {"answers": [{"answer": "London"}]},
+        },
+    )
+    assert result["items"][0]["score"] == 1.0
