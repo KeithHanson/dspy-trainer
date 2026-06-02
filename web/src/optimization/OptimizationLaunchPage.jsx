@@ -333,7 +333,7 @@ export function OptimizationLaunchPage() {
           train_inputs: [],
           val_inputs: [],
             num_threads: 1,
-            source_eval_job_id: sourceRunPlanId.trim() || null,
+            source_run_plan_id: sourceRunPlanId.trim() || null,
         }),
       });
       if (!response.ok) {

@@ -39,12 +39,12 @@ python -m json.tool <<<"${VALIDATION_JSON}"
 
 VALIDATION_STATUS="$(python -c 'import json,sys; print(json.load(sys.stdin).get("validation_status", ""))' <<<"${VALIDATION_JSON}")"
 if [[ "${VALIDATION_STATUS}" != "passed" ]]; then
-  echo "module validation failed; not creating eval job" >&2
+  echo "module validation failed; not creating run plan" >&2
   exit 1
 fi
 
-echo "Creating eval job"
-EVAL_JOB_ID="$(python - "${API_BASE}" "${MODULE_ID}" "${BUNDLE_PATH}" "${EVAL_INPUTS_PATH}" "${PROJECT_ID}" "${SCENARIO_ID}" "${DATASET_VERSION}" <<'PY'
+echo "Creating run plan"
+RUN_PLAN_ID="$(python - "${API_BASE}" "${MODULE_ID}" "${BUNDLE_PATH}" "${EVAL_INPUTS_PATH}" "${PROJECT_ID}" "${SCENARIO_ID}" "${DATASET_VERSION}" <<'PY'
 import json
 import subprocess
 import sys
@@ -84,8 +84,8 @@ payload = {
     "scenario_id": scenario_id,
     "dataset_version": dataset_version,
     "bundle_path": bundle_path,
-    "repeat_count": 1,
-    "num_threads": 1,
+    "runs_per_question": 1,
+    "max_workers": 1,
     "evaluation_plan_id": evaluation_plan_id,
 }
 
@@ -95,7 +95,7 @@ res = subprocess.run(
         "-sS",
         "-X",
         "POST",
-        f"{api_base}/eval/jobs",
+        f"{api_base}/agent-run-plans",
         "-H",
         "Content-Type: application/json",
         "-d",
@@ -109,10 +109,10 @@ print(json.loads(res.stdout)["id"])
 PY
 )"
 
-echo "EVAL_JOB_ID=${EVAL_JOB_ID}"
+echo "RUN_PLAN_ID=${RUN_PLAN_ID}"
 
-echo "Running eval job"
-curl -sS -X POST "${API_BASE}/eval/jobs/${EVAL_JOB_ID}/run" | python -m json.tool
+echo "Queueing run plan"
+curl -sS -X POST "${API_BASE}/agent-run-plans/${RUN_PLAN_ID}/enqueue" | python -m json.tool
 
-echo "Fetching eval run items"
-curl -sS "${API_BASE}/eval/jobs/${EVAL_JOB_ID}/items" | python -m json.tool
+echo "Fetching run plan tasks"
+curl -sS "${API_BASE}/agent-run-plans/${RUN_PLAN_ID}/tasks" | python -m json.tool

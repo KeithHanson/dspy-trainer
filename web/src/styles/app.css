@@ -412,6 +412,10 @@ button { font-family: inherit; }
 .optimization-wrap { max-width: 980px; }
 .optimization-head { align-items: flex-start; margin-bottom: 18px; }
 .optimization-form-block { margin-bottom: 14px; }
+.optimization-detail-layout { gap: 18px; }
+.optimization-detail-section { gap: 14px; }
+.optimization-detail-panel { padding: 16px; }
+.optimization-detail-facts { gap: 8px; }
 .optimization-grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .optimization-strategy-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .optimization-strategy-card {

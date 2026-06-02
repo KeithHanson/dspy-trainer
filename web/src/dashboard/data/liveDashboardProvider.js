@@ -117,7 +117,7 @@ export function mapDashboardOverview({ plans, modules, workers }) {
   if (failedJobs.length > 0) {
     alerts.push({
       id: "failed-runs",
-      title: `${failedJobs.length} eval job${failedJobs.length === 1 ? "" : "s"} failed`,
+      title: `${failedJobs.length} run${failedJobs.length === 1 ? "" : "s"} failed`,
       detail: "Review errored runs to inspect worker logs and failures.",
       ctaLabel: "Open runs",
       ctaTo: "/runs",

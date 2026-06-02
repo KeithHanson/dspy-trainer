@@ -132,3 +132,29 @@ def test_build_lm_profile_alias_omits_upstream_api_base(monkeypatch):
     assert captured["model"] == "openai/lm-profile:profile-123"
     assert captured["api_key"] == "sk-virtual-123"
     assert captured["api_base"] == "http://litellm-proxy:4000"
+
+
+def test_build_lm_profile_alias_uses_default_proxy_when_not_provided(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class CaptureLM:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(module_runner, "_load_class", lambda _class_path: CaptureLM)
+
+    module_runner._build_lm_from_profile(
+        {
+            "id": "profile-456",
+            "model": "azure/some-deployment",
+            "api_base": "https://example.cognitiveservices.azure.com",
+            "virtual_key": "sk-virtual-456",
+            "model_type": "responses",
+            "lm_class_path": "ignored.path.CaptureLM",
+            "default_params": {},
+        }
+    )
+
+    assert captured["model"] == "openai/lm-profile:profile-456"
+    assert captured["api_key"] == "sk-virtual-456"
+    assert captured["api_base"] == "http://litellm-proxy:4000"

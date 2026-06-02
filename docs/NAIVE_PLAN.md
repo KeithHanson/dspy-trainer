@@ -16,7 +16,7 @@ The product should support repeated evaluate/optimize loops for imported DSPy mo
 ### Services
 
 - `backend` (Python/FastAPI): system of record + API + orchestration.
-- `worker` (same image as backend): async EvalJob/OptimizationJob execution.
+- `worker` (same image as backend): async AgentRunPlan/OptimizationJob execution.
 - `postgres`: persistent relational store.
 - `redis`: queue and coordination for background jobs.
 - `mlflow`: tracking server for run metrics/artifacts/traces.
@@ -60,8 +60,8 @@ Provide generators/skeletons to minimize onboarding friction:
 - `RuntimeBundle`: contract/build/smoke-test validation status.
 - `Dataset`: versioned examples for eval and optimization.
 - `Scenario`: parameterized test cases tied to datasets.
-- `EvalJob`: repeated scenario execution job.
-- `EvalRunItem`: one scenario invocation within an EvalJob.
+- `AgentRunPlan`: repeated scenario execution plan.
+- `AgentRunTask`: one scenario invocation within an AgentRunPlan.
 - `OptimizationJob`: optimization loop using eval-derived or curated data.
 - `JudgeConfig`: model/rubric/prompt/schema for LLM-as-judge.
 - `Artifact`: logs, reports, snapshots, exported assets.
@@ -69,16 +69,16 @@ Provide generators/skeletons to minimize onboarding friction:
 ## MLflow Correlation Strategy (Locked)
 
 - Use **one project-level MLflow Experiment** per project/workspace.
-- Each `EvalJob` maps to a **parent MLflow Run**.
-- Each `EvalRunItem` maps to child trace/span-like telemetry correlated to that parent run.
+- Each `AgentRunPlan` maps to a **parent MLflow Run**.
+- Each `AgentRunTask` maps to child trace/span-like telemetry correlated to that parent run.
 - Backend DB keeps richer app metadata; MLflow stores tracking telemetry.
 
 Required correlation fields across backend + MLflow payloads:
 
 - `project_id`
 - `module_import_id`
-- `eval_job_id`
-- `eval_run_item_id`
+- `run_plan_id`
+- `run_task_id`
 - `scenario_id`
 - `dataset_version`
 - `mlflow_experiment_id`
@@ -94,8 +94,8 @@ Required correlation fields across backend + MLflow payloads:
 5. If failure: persist diagnostics and remediation hints; allow retry.
 6. If success: mark module as runnable.
 7. Register dataset + scenarios.
-8. Launch EvalJob (repetitions/concurrency/seed controls).
-9. For each EvalRunItem:
+8. Launch AgentRunPlan (repetitions/concurrency/seed controls).
+9. For each AgentRunTask:
    - Execute module eval
    - Run judge model
    - Persist outputs/scores/rationales
@@ -120,10 +120,10 @@ Required correlation fields across backend + MLflow payloads:
 
 ### Eval
 
-- `POST /eval/jobs`
-- `GET /eval/jobs/:id`
-- `GET /eval/jobs/:id/items`
-- `POST /eval/jobs/:id/cancel`
+- `POST /agent-run-plans`
+- `GET /agent-run-plans/:id`
+- `GET /agent-run-plans/:id/tasks`
+- `POST /agent-run-plans/:id/enqueue`
 
 ### Optimization
 

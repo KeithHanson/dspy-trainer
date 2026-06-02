@@ -1,16 +1,68 @@
 from __future__ import annotations
 
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import importlib.util
 from importlib import import_module
+import io
 import inspect
 import json
+import logging
 from pathlib import Path
 import shutil
+import sys
 import tomllib
 from types import ModuleType
-from typing import Any
+from typing import Any, Callable
 
 import dspy
+
+
+DEFAULT_PROXY_API_BASE = "http://litellm-proxy:4000"
+
+
+class _TeeWriter:
+    def __init__(self, primary: Any, mirror: io.StringIO):
+        self.primary = primary
+        self.mirror = mirror
+
+    def write(self, data: str) -> int:
+        written = self.primary.write(data)
+        self.primary.flush()
+        self.mirror.write(data)
+        return written
+
+    def flush(self) -> None:
+        self.primary.flush()
+        self.mirror.flush()
+
+
+@contextmanager
+def _capture_process_output(log_event: Callable[[str], None] | None):
+    if log_event is None:
+        yield
+        return
+
+    stdout_buffer = io.StringIO()
+    stderr_buffer = io.StringIO()
+    logging_buffer = io.StringIO()
+    handler = logging.StreamHandler(logging_buffer)
+    handler.setLevel(logging.NOTSET)
+    root_logger = logging.getLogger()
+    root_logger.addHandler(handler)
+    try:
+        with redirect_stdout(_TeeWriter(sys.stdout, stdout_buffer)), redirect_stderr(_TeeWriter(sys.stderr, stderr_buffer)):
+            yield
+    finally:
+        root_logger.removeHandler(handler)
+        handler.flush()
+        for label, buffer in (("stdout", stdout_buffer), ("stderr", stderr_buffer), ("logging", logging_buffer)):
+            content = buffer.getvalue().strip()
+            if not content:
+                continue
+            log_event(f"raw_{label}_begin")
+            for line in content.splitlines():
+                log_event(line)
+            log_event(f"raw_{label}_end")
 
 
 def _load_module(name: str, file_path: Path) -> ModuleType:
@@ -97,7 +149,7 @@ def _build_lm_from_profile(lm_profile: dict[str, Any]) -> Any:
     api_base = str(lm_profile.get("api_base") or "").strip()
     if profile_id and virtual_key:
         model_name = f"openai/lm-profile:{profile_id}"
-        api_base = str(lm_profile.get("proxy_api_base") or "").strip()
+        api_base = str(lm_profile.get("proxy_api_base") or DEFAULT_PROXY_API_BASE).strip()
 
     base_kwargs: dict[str, Any] = {
         "model": model_name,
@@ -233,6 +285,32 @@ def _collect_output_fields(program: Any) -> list[str]:
     return output_fields
 
 
+def _resolve_demo_output_fields(records: list[dict[str, Any]], fallback_output_fields: list[str]) -> tuple[list[str], str]:
+    prediction_fields: list[str] = []
+    for record in records:
+        prediction_payload = record.get("prediction", {})
+        if not isinstance(prediction_payload, dict):
+            continue
+        for field_name in prediction_payload.keys():
+            if field_name not in prediction_fields:
+                prediction_fields.append(field_name)
+    if prediction_fields:
+        return prediction_fields, "top_level_prediction"
+
+    label_fields: list[str] = []
+    for record in records:
+        label_payload = record.get("label", {})
+        if not isinstance(label_payload, dict):
+            continue
+        for field_name in label_payload.keys():
+            if field_name not in label_fields:
+                label_fields.append(field_name)
+    if label_fields:
+        return label_fields, "label_payload"
+
+    return fallback_output_fields, "predictor_outputs"
+
+
 def _normalize_demo_target(
     label_payload: dict[str, Any],
     prediction_payload: dict[str, Any],
@@ -263,6 +341,7 @@ def _build_demo_examples(
     examples: list[dspy.Example] = []
     skipped_reasons: dict[str, int] = {}
     target_provenance_counts: dict[str, int] = {}
+    skipped_preview: list[dict[str, Any]] = []
 
     for record in records:
         input_payload = record.get("input", {})
@@ -270,6 +349,8 @@ def _build_demo_examples(
         prediction_payload = record.get("prediction", {})
         if not isinstance(input_payload, dict) or not input_payload:
             skipped_reasons["missing_input"] = skipped_reasons.get("missing_input", 0) + 1
+            if len(skipped_preview) < 3:
+                skipped_preview.append({"reason": "missing_input"})
             continue
         if not isinstance(label_payload, dict):
             label_payload = {}
@@ -279,6 +360,16 @@ def _build_demo_examples(
         target_payload, target_provenance = _normalize_demo_target(label_payload, prediction_payload, output_fields)
         if not target_payload:
             skipped_reasons["unmappable_demo_target"] = skipped_reasons.get("unmappable_demo_target", 0) + 1
+            if len(skipped_preview) < 3:
+                skipped_preview.append(
+                    {
+                        "reason": "unmappable_demo_target",
+                        "input_keys": sorted(input_payload.keys()),
+                        "label_keys": sorted(label_payload.keys()),
+                        "prediction_keys": sorted(prediction_payload.keys()),
+                        "expected_output_fields": output_fields,
+                    }
+                )
             continue
 
         gold_label = label_payload or target_payload
@@ -293,6 +384,7 @@ def _build_demo_examples(
         "skipped_record_count": sum(skipped_reasons.values()),
         "skipped_reasons": skipped_reasons,
         "target_provenance_counts": target_provenance_counts,
+        "skipped_preview": skipped_preview,
     }
 
 
@@ -418,10 +510,17 @@ def run_bundle_optimization(
     execution_lm_profile: dict[str, Any] | None = None,
     helper_lm_profile: dict[str, Any] | None = None,
     dspy_config: dict[str, Any] | None = None,
+    log_event: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
+    def _log(message: str) -> None:
+        if log_event is not None:
+            log_event(message)
+
     _, pass_threshold, module_mod, metric_mod = _load_bundle(bundle_path)
     raw_metric_fn = metric_mod.judge_metric
     config = dict(dspy_config or {})
+    _log(f"bundle_path={bundle_path}")
+    _log(f"pass_threshold={pass_threshold}")
 
     def _build_execution_lm() -> Any:
         if execution_lm_profile is not None:
@@ -447,177 +546,195 @@ def run_bundle_optimization(
     if helper_lm is not None:
         _disable_lm_cache(helper_lm)
 
-    output_fields = _collect_output_fields(student_program)
-    trainset, dataset_summary = _build_demo_examples(train_records, output_fields)
-    if not trainset:
-        raise RuntimeError("optimization dataset produced no usable demo examples")
-
-    evaluation_inputs = val_inputs or [{"input": record.get("input", {}), "label": record.get("label", {})} for record in train_records]
-    compile_valset = [_build_eval_example(item) for item in evaluation_inputs]
-
-    def compile_metric(example: Any, prediction: Any, trace: Any = None) -> float:
-        del trace
-        result = _normalize_judge_result(
-            _run_judge_metric_without_autolog(raw_metric_fn, example, prediction, execution_lm),
-            0,
-        )
-        return float(result["score"])
-
-    normalized_strategy = strategy.strip().lower().replace("-", "_")
-    if normalized_strategy == "bootstrapfewshot":
-        normalized_strategy = "bootstrap_fewshot"
-    auto_budget = _normalize_auto_budget(config.get("auto"))
-
-    if normalized_strategy == "bootstrap_fewshot":
-        optimizer = dspy.BootstrapFewShot(
-            metric=compile_metric,
-            metric_threshold=pass_threshold,
-            max_bootstrapped_demos=max(1, int(config.get("max_bootstrapped_demos", 4))),
-            max_labeled_demos=max(1, int(config.get("max_labeled_demos", 16))),
-        )
-        teacher = None
-        if helper_lm is not None and helper_lm is not execution_lm:
-            teacher = module_mod.build_program()
-            teacher.set_lm(helper_lm)
-        compile_context = dspy.context(lm=execution_lm) if execution_lm is not None else dspy.context()
-        with compile_context:
-            compiled_program = optimizer.compile(student_program, teacher=teacher, trainset=trainset)
-        strategy_summary = {
-            "optimizer_class": "BootstrapFewShot",
-            "max_bootstrapped_demos": max(1, int(config.get("max_bootstrapped_demos", 4))),
-            "max_labeled_demos": max(1, int(config.get("max_labeled_demos", 16))),
-            "teacher_lm_profile_id": config.get("teacher_lm_profile_id"),
-        }
-    elif normalized_strategy == "miprov2":
-        optimizer = dspy.MIPROv2(
-            metric=compile_metric,
-            prompt_model=helper_lm or execution_lm,
-            task_model=execution_lm,
-            auto=auto_budget,  # pyright: ignore[reportArgumentType]
-            max_bootstrapped_demos=max(1, int(config.get("max_bootstrapped_demos", 4))),
-            max_labeled_demos=max(1, int(config.get("max_labeled_demos", 16))),
-            num_threads=max(1, int(num_threads)),
-            track_stats=True,
-            metric_threshold=pass_threshold,
-        )
-        compile_context = dspy.context(lm=execution_lm) if execution_lm is not None else dspy.context()
-        with compile_context:
-            compiled_program = optimizer.compile(student_program, trainset=trainset, valset=compile_valset)
-        strategy_summary = {
-            "optimizer_class": "MIPROv2",
-            "auto": auto_budget,
-            "max_bootstrapped_demos": max(1, int(config.get("max_bootstrapped_demos", 4))),
-            "max_labeled_demos": max(1, int(config.get("max_labeled_demos", 16))),
-            "candidate_program_count": len(getattr(compiled_program, "candidate_programs", []) or []),
-            "prompt_model_total_calls": getattr(compiled_program, "prompt_model_total_calls", 0),
-            "total_calls": getattr(compiled_program, "total_calls", 0),
-        }
-    elif normalized_strategy == "gepa":
-        feedback_trainset, feedback_dataset_summary = _build_feedback_examples(train_records, output_fields)
-        if not feedback_trainset:
+    with _capture_process_output(log_event):
+        predictor_output_fields = _collect_output_fields(student_program)
+        output_fields, output_field_source = _resolve_demo_output_fields(train_records, predictor_output_fields)
+        _log(f"predictor_output_fields={','.join(predictor_output_fields) if predictor_output_fields else '<none>'}")
+        _log(f"output_fields={','.join(output_fields) if output_fields else '<none>'}")
+        _log(f"output_field_source={output_field_source}")
+        trainset, dataset_summary = _build_demo_examples(train_records, output_fields)
+        _log(f"usable_train_examples={len(trainset)}")
+        _log(f"demo_dataset_summary={json.dumps(dataset_summary, sort_keys=True)}")
+        if not trainset:
             raise RuntimeError("optimization dataset produced no usable demo examples")
 
-        trainset = feedback_trainset
-        dataset_summary = feedback_dataset_summary
+        evaluation_inputs = val_inputs or [{"input": record.get("input", {}), "label": record.get("label", {})} for record in train_records]
+        compile_valset = [_build_eval_example(item) for item in evaluation_inputs]
+        _log(f"compile_valset_size={len(compile_valset)}")
 
-        auto_budget = _normalize_auto_budget(config.get("auto"))
-        reflection_lm = helper_lm or execution_lm
-        if reflection_lm is not None:
-            _disable_lm_cache(reflection_lm)
-
-        def gepa_metric(
-            example: Any,
-            prediction: Any,
-            trace: Any = None,
-            pred_name: str | None = None,
-            pred_trace: Any = None,
-        ) -> dict[str, Any]:
-            del trace, pred_name, pred_trace
+        def compile_metric(example: Any, prediction: Any, trace: Any = None) -> float:
+            del trace
             result = _normalize_judge_result(
                 _run_judge_metric_without_autolog(raw_metric_fn, example, prediction, execution_lm),
                 0,
             )
-            record_feedback = _coerce_feedback_text(getattr(example, "optimization_feedback", None))
-            rationale_feedback = result["rationale"]
-            if record_feedback and rationale_feedback:
-                combined = f"{record_feedback}\n\nJudge rationale: {rationale_feedback}"
-            else:
-                combined = record_feedback or rationale_feedback
-            return {"score": float(result["score"]), "feedback": combined or f"This trajectory got a score of {result['score']}."}
+            return float(result["score"])
 
-        optimizer = dspy.GEPA(
-            metric=gepa_metric,
-            auto=auto_budget,  # pyright: ignore[reportArgumentType]
-            track_stats=bool(config.get("track_stats", True)),
-            reflection_lm=reflection_lm,
-            num_threads=max(1, int(num_threads)),
-            log_dir=str(Path(artifact_dir).expanduser().resolve() / "gepa_logs"),
-        )
+        normalized_strategy = strategy.strip().lower().replace("-", "_")
+        if normalized_strategy == "bootstrapfewshot":
+            normalized_strategy = "bootstrap_fewshot"
+        auto_budget = _normalize_auto_budget(config.get("auto"))
 
-        compile_context = dspy.context(lm=execution_lm) if execution_lm is not None else dspy.context()
-        with compile_context:
-            compiled_program = optimizer.compile(student_program, trainset=trainset, valset=compile_valset)
+        if normalized_strategy == "bootstrap_fewshot":
+            _log("optimizer=BootstrapFewShot")
+            optimizer = dspy.BootstrapFewShot(
+                metric=compile_metric,
+                metric_threshold=pass_threshold,
+                max_bootstrapped_demos=max(1, int(config.get("max_bootstrapped_demos", 4))),
+                max_labeled_demos=max(1, int(config.get("max_labeled_demos", 16))),
+            )
+            teacher = None
+            if helper_lm is not None and helper_lm is not execution_lm:
+                teacher = module_mod.build_program()
+                teacher.set_lm(helper_lm)
+            compile_context = dspy.context(lm=execution_lm) if execution_lm is not None else dspy.context()
+            with compile_context:
+                compiled_program = optimizer.compile(student_program, teacher=teacher, trainset=trainset)
+            _log("compile_complete=true")
+            strategy_summary = {
+                "optimizer_class": "BootstrapFewShot",
+                "max_bootstrapped_demos": max(1, int(config.get("max_bootstrapped_demos", 4))),
+                "max_labeled_demos": max(1, int(config.get("max_labeled_demos", 16))),
+                "teacher_lm_profile_id": config.get("teacher_lm_profile_id"),
+            }
+        elif normalized_strategy == "miprov2":
+            _log("optimizer=MIPROv2")
+            optimizer = dspy.MIPROv2(
+                metric=compile_metric,
+                prompt_model=helper_lm or execution_lm,
+                task_model=execution_lm,
+                auto=auto_budget,  # pyright: ignore[reportArgumentType]
+                max_bootstrapped_demos=max(1, int(config.get("max_bootstrapped_demos", 4))),
+                max_labeled_demos=max(1, int(config.get("max_labeled_demos", 16))),
+                num_threads=max(1, int(num_threads)),
+                track_stats=True,
+                metric_threshold=pass_threshold,
+            )
+            compile_context = dspy.context(lm=execution_lm) if execution_lm is not None else dspy.context()
+            with compile_context:
+                compiled_program = optimizer.compile(student_program, trainset=trainset, valset=compile_valset)
+            _log("compile_complete=true")
+            strategy_summary = {
+                "optimizer_class": "MIPROv2",
+                "auto": auto_budget,
+                "max_bootstrapped_demos": max(1, int(config.get("max_bootstrapped_demos", 4))),
+                "max_labeled_demos": max(1, int(config.get("max_labeled_demos", 16))),
+                "candidate_program_count": len(getattr(compiled_program, "candidate_programs", []) or []),
+                "prompt_model_total_calls": getattr(compiled_program, "prompt_model_total_calls", 0),
+                "total_calls": getattr(compiled_program, "total_calls", 0),
+            }
+        elif normalized_strategy == "gepa":
+            _log("optimizer=GEPA")
+            feedback_trainset, feedback_dataset_summary = _build_feedback_examples(train_records, output_fields)
+            _log(f"usable_feedback_examples={len(feedback_trainset)}")
+            if not feedback_trainset:
+                raise RuntimeError("optimization dataset produced no usable demo examples")
 
-        detailed_results = getattr(compiled_program, "detailed_results", None)
-        strategy_summary = {
-            "optimizer_class": "GEPA",
-            "auto": auto_budget,
-            "track_stats": bool(config.get("track_stats", True)),
-            "candidate_count": len(getattr(detailed_results, "candidates", []) or []),
-            "total_metric_calls": getattr(detailed_results, "total_metric_calls", None),
-            "num_full_val_evals": getattr(detailed_results, "num_full_val_evals", None),
-            "reflection_lm_profile_id": config.get("reflection_lm_profile_id"),
+            trainset = feedback_trainset
+            dataset_summary = feedback_dataset_summary
+
+            auto_budget = _normalize_auto_budget(config.get("auto"))
+            reflection_lm = helper_lm or execution_lm
+            if reflection_lm is not None:
+                _disable_lm_cache(reflection_lm)
+
+            def gepa_metric(
+                example: Any,
+                prediction: Any,
+                trace: Any = None,
+                pred_name: str | None = None,
+                pred_trace: Any = None,
+            ) -> dict[str, Any]:
+                del trace, pred_name, pred_trace
+                result = _normalize_judge_result(
+                    _run_judge_metric_without_autolog(raw_metric_fn, example, prediction, execution_lm),
+                    0,
+                )
+                record_feedback = _coerce_feedback_text(getattr(example, "optimization_feedback", None))
+                rationale_feedback = result["rationale"]
+                if record_feedback and rationale_feedback:
+                    combined = f"{record_feedback}\n\nJudge rationale: {rationale_feedback}"
+                else:
+                    combined = record_feedback or rationale_feedback
+                return {"score": float(result["score"]), "feedback": combined or f"This trajectory got a score of {result['score']}."}
+
+            optimizer = dspy.GEPA(
+                metric=gepa_metric,
+                auto=auto_budget,  # pyright: ignore[reportArgumentType]
+                track_stats=bool(config.get("track_stats", True)),
+                reflection_lm=reflection_lm,
+                num_threads=max(1, int(num_threads)),
+                log_dir=str(Path(artifact_dir).expanduser().resolve() / "gepa_logs"),
+            )
+
+            compile_context = dspy.context(lm=execution_lm) if execution_lm is not None else dspy.context()
+            with compile_context:
+                compiled_program = optimizer.compile(student_program, trainset=trainset, valset=compile_valset)
+            _log("compile_complete=true")
+
+            detailed_results = getattr(compiled_program, "detailed_results", None)
+            strategy_summary = {
+                "optimizer_class": "GEPA",
+                "auto": auto_budget,
+                "track_stats": bool(config.get("track_stats", True)),
+                "candidate_count": len(getattr(detailed_results, "candidates", []) or []),
+                "total_metric_calls": getattr(detailed_results, "total_metric_calls", None),
+                "num_full_val_evals": getattr(detailed_results, "num_full_val_evals", None),
+                "reflection_lm_profile_id": config.get("reflection_lm_profile_id"),
+            }
+        else:
+            raise RuntimeError(f"unsupported optimization strategy: {strategy}")
+
+        baseline_eval_lm = _build_execution_lm()
+        if baseline_eval_lm is not None:
+            _disable_lm_cache(baseline_eval_lm)
+        optimized_eval_lm = _build_execution_lm()
+        if optimized_eval_lm is not None:
+            _disable_lm_cache(optimized_eval_lm)
+
+        baseline_report = _evaluate_program(baseline_program, raw_metric_fn, evaluation_inputs, pass_threshold, baseline_eval_lm)
+        optimized_report = _evaluate_program(compiled_program, raw_metric_fn, evaluation_inputs, pass_threshold, optimized_eval_lm)
+        _log(f"baseline_score_pct={baseline_report['score_pct']}")
+        _log(f"optimized_score_pct={optimized_report['score_pct']}")
+
+        artifact_root = Path(artifact_dir).expanduser().resolve()
+        if artifact_root.exists():
+            shutil.rmtree(artifact_root)
+        artifact_root.mkdir(parents=True, exist_ok=True)
+        program_state_path = artifact_root / "program.json"
+        _save_program_state(compiled_program, program_state_path)
+        _log(f"program_state_path={program_state_path}")
+
+        predictor_demos = _summarize_predictor_demos(compiled_program)
+        comparison_summary = {
+            "baseline_score_pct": baseline_report["score_pct"],
+            "optimized_score_pct": optimized_report["score_pct"],
+            "score_delta_pct": optimized_report["score_pct"] - baseline_report["score_pct"],
+            "baseline_item_count": len(baseline_report["items"]),
+            "optimized_item_count": len(optimized_report["items"]),
         }
-    else:
-        raise RuntimeError(f"unsupported optimization strategy: {strategy}")
+        telemetry_summary = {
+            "strategy": normalized_strategy,
+            "score_pass_threshold": pass_threshold,
+            "dataset_summary": dataset_summary,
+            "evaluation_item_count": len(evaluation_inputs),
+            "selected_demos": predictor_demos,
+            "strategy_details": strategy_summary,
+        }
+        artifact_metadata = {
+            "artifact_type": "dspy_program_state",
+            "artifact_dir": str(artifact_root),
+            "program_state_path": str(program_state_path),
+            "predictor_count": len(compiled_program.predictors()),
+            "selected_demo_count": sum(item["demo_count"] for item in predictor_demos),
+        }
 
-    baseline_eval_lm = _build_execution_lm()
-    if baseline_eval_lm is not None:
-        _disable_lm_cache(baseline_eval_lm)
-    optimized_eval_lm = _build_execution_lm()
-    if optimized_eval_lm is not None:
-        _disable_lm_cache(optimized_eval_lm)
-
-    baseline_report = _evaluate_program(baseline_program, raw_metric_fn, evaluation_inputs, pass_threshold, baseline_eval_lm)
-    optimized_report = _evaluate_program(compiled_program, raw_metric_fn, evaluation_inputs, pass_threshold, optimized_eval_lm)
-
-    artifact_root = Path(artifact_dir).expanduser().resolve()
-    if artifact_root.exists():
-        shutil.rmtree(artifact_root)
-    artifact_root.mkdir(parents=True, exist_ok=True)
-    program_state_path = artifact_root / "program.json"
-    _save_program_state(compiled_program, program_state_path)
-
-    predictor_demos = _summarize_predictor_demos(compiled_program)
-    comparison_summary = {
-        "baseline_score_pct": baseline_report["score_pct"],
-        "optimized_score_pct": optimized_report["score_pct"],
-        "score_delta_pct": optimized_report["score_pct"] - baseline_report["score_pct"],
-        "baseline_item_count": len(baseline_report["items"]),
-        "optimized_item_count": len(optimized_report["items"]),
-    }
-    telemetry_summary = {
-        "strategy": normalized_strategy,
-        "score_pass_threshold": pass_threshold,
-        "dataset_summary": dataset_summary,
-        "evaluation_item_count": len(evaluation_inputs),
-        "selected_demos": predictor_demos,
-        "strategy_details": strategy_summary,
-    }
-    artifact_metadata = {
-        "artifact_type": "dspy_program_state",
-        "artifact_dir": str(artifact_root),
-        "program_state_path": str(program_state_path),
-        "predictor_count": len(compiled_program.predictors()),
-        "selected_demo_count": sum(item["demo_count"] for item in predictor_demos),
-    }
-
-    return {
-        "artifact_path": str(program_state_path),
-        "artifact_metadata": artifact_metadata,
-        "telemetry_summary": telemetry_summary,
-        "comparison_summary": comparison_summary,
-    }
+        return {
+            "artifact_path": str(program_state_path),
+            "artifact_metadata": artifact_metadata,
+            "telemetry_summary": telemetry_summary,
+            "comparison_summary": comparison_summary,
+        }
 
 
 def run_bundle_eval(

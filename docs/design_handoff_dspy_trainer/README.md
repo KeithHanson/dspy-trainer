@@ -50,7 +50,7 @@ All application data in the prototype is **mocked** (`app/mockdata.js`) and the 
   - Greeting row: "Good morning, Kira" (display 27px) + subtitle; right: **Upload bundle** + **New plan** buttons.
   - **Live strip** (only when a job is running): full-width card, accent-tinted border, gradient bg. Left: pulsing dot + plan name + mono meta (bundle, workers, runs). Right: "Open live monitor" primary button. Below: segmented progress bar + 4 stats (pass/fail/running/queued). Entire card is clickable → run monitor.
   - **KPI row:** 4 cards (`Pass rate · 7d`, `Eval jobs · 7d`, `Tasks judged`, `Avg item latency`), each = mono label + 24px value + delta + a CSS sparkline (`.bars`).
-  - **Recent eval jobs** table (plan, bundle, status badge, segmented progress + count, pass %, started, chevron). Rows clickable → run monitor.
+- **Recent runs** table (plan, bundle, status badge, segmented progress + count, pass %, started, chevron). Rows clickable → run monitor.
   - **Two-up:** "Needs attention" (fail-tinted + warn-tinted alert rows with Fix/Review buttons) and "Quick start" (3 actionable rows: download example, upload module, invite team).
 
 ### 3. Module Bundles (`screen_bundles.jsx`)

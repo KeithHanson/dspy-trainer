@@ -1,3 +1,4 @@
+import { useEffect, useMemo, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import { Icon } from "../components/Icon";
 import { Button } from "../components/primitives/Button";
@@ -7,8 +8,9 @@ const PRIMARY_NAV = [
   { to: "/lm-profiles", label: "LM Profiles", icon: "settings" },
   { to: "/bundles", label: "Module Bundles", icon: "box" },
   { to: "/plans", label: "Evaluation Plans", icon: "layers" },
+  { to: "/runs", label: "Runs", icon: "activity" },
   { to: "/optimization", label: "Optimization", icon: "search" },
-  { to: "/runs", label: "Eval Jobs", icon: "activity" },
+  { to: "/optimization/jobs", label: "Optimization Jobs", icon: "activity" },
 ];
 
 const SECONDARY_NAV = [
@@ -22,14 +24,16 @@ const BREADCRUMB_LABELS = {
   "/plans": "Evaluation Plans",
   "/lm-profiles": "LM Profiles",
   "/optimization": "Optimization",
-  "/runs": "Eval Jobs",
+  "/optimization/jobs": "Optimization Jobs",
+  "/runs": "Runs",
   "/team": "Team",
   "/settings": "Settings",
 };
 
-function NavSection({ items }) {
+function NavSection({ items, hasActiveRun }) {
   return items.map((item) => (
     <NavLink
+      end
       key={item.to}
       className={({ isActive }) => (isActive ? "shell-nav-item shell-nav-item-active" : "shell-nav-item")}
       to={item.to}
@@ -38,7 +42,7 @@ function NavSection({ items }) {
         <>
           <Icon className="shell-nav-icon" name={item.icon} size={item.icon === "settings" ? 18 : 16} active={isActive} />
           <span>{item.label}</span>
-          {item.to === "/runs" ? <span className="dot d-live" aria-hidden="true" /> : null}
+          {item.to === "/runs" && hasActiveRun ? <span className="dot d-live" aria-hidden="true" /> : null}
         </>
       )}
     </NavLink>
@@ -63,6 +67,8 @@ function Breadcrumbs({ orgName }) {
 }
 
 export function AppShell({ children, onSignOut, user, orgName = "Default" }) {
+  const apiBase = useMemo(() => (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, ""), []);
+  const [hasActiveRun, setHasActiveRun] = useState(false);
   const name = user?.name ?? "Authenticated User";
   const email = user?.email ?? "";
   const initials = name
@@ -71,6 +77,41 @@ export function AppShell({ children, onSignOut, user, orgName = "Default" }) {
     .slice(0, 2)
     .map((part) => part[0]?.toUpperCase())
     .join("") || "AU";
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadRunActivity = async () => {
+      try {
+        const response = await fetch(`${apiBase}/agent-run-plans?limit=50&offset=0`, { method: "GET" });
+        if (!response.ok) {
+          if (isMounted) {
+            setHasActiveRun(false);
+          }
+          return;
+        }
+        const payload = await response.json();
+        const plans = Array.isArray(payload) ? payload : [];
+        const nextHasActive = plans.some(
+          (plan) => plan?.status === "queued" || plan?.status === "running" || Number(plan?.running_tasks || 0) > 0,
+        );
+        if (isMounted) {
+          setHasActiveRun(nextHasActive);
+        }
+      } catch {
+        if (isMounted) {
+          setHasActiveRun(false);
+        }
+      }
+    };
+
+    loadRunActivity();
+    const interval = setInterval(loadRunActivity, 10000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, [apiBase]);
 
   return (
     <div className="shell-root">
@@ -87,9 +128,9 @@ export function AppShell({ children, onSignOut, user, orgName = "Default" }) {
         </div>
 
         <div className="col shell-nav-wrap">
-          <NavSection items={PRIMARY_NAV} />
+          <NavSection items={PRIMARY_NAV} hasActiveRun={hasActiveRun} />
           <hr className="hr shell-divider" />
-          <NavSection items={SECONDARY_NAV} />
+          <NavSection items={SECONDARY_NAV} hasActiveRun={false} />
         </div>
 
         <footer className="row gap-3 shell-user">

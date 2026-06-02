@@ -117,7 +117,7 @@ describe("OptimizationLaunchPage", () => {
     expect(payload.execution_lm_profile_id).toBe("lm-exec-1");
     expect(payload.helper_lm_profile_id).toBe("lm-help-2");
     expect(payload.dataset_id).toBe("ods-1");
-    expect(payload.source_eval_job_id).toBe("plan-123");
+  expect(payload.source_run_plan_id).toBe("plan-123");
     expect(payload.request_config).toMatchObject({
       budget: "medium",
       max_bootstrapped_demos: 4,

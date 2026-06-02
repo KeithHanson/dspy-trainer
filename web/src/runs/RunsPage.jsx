@@ -49,7 +49,7 @@ export function RunsPage() {
   }, [apiBase]);
 
   const deleteRunPlan = async (id) => {
-    const confirmed = window.confirm("Delete this eval job? This will remove all run items for it.");
+    const confirmed = window.confirm("Delete this run? This will remove all run items for it.");
     if (!confirmed) {
       return;
     }
@@ -58,11 +58,11 @@ export function RunsPage() {
     try {
       const response = await fetch(`${apiBase}/agent-run-plans/${id}`, { method: "DELETE" });
       if (!response.ok) {
-        throw new Error(`Could not delete eval job (${response.status})`);
+        throw new Error(`Could not delete run (${response.status})`);
       }
       setPlans((current) => current.filter((plan) => plan.id !== id));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not delete eval job");
+      setError(err instanceof Error ? err.message : "Could not delete run");
     } finally {
       setDeletingPlanId("");
     }
@@ -95,7 +95,7 @@ export function RunsPage() {
         if (!planId) {
           const listResp = await fetch(`${apiBase}/agent-run-plans?limit=50&offset=0`, { method: "GET" });
           if (!listResp.ok) {
-            throw new Error(`Could not load eval jobs (${listResp.status})`);
+            throw new Error(`Could not load runs (${listResp.status})`);
           }
           const listPayload = await listResp.json();
           const listedPlans = Array.isArray(listPayload) ? listPayload : [];
@@ -153,13 +153,13 @@ export function RunsPage() {
         <div className="page-body plans-wrap">
           <header className="row between plans-head">
             <div className="col gap-1">
-              <h1 className="t-display" style={{ fontSize: 22 }}>Eval Jobs</h1>
+              <h1 className="t-display" style={{ fontSize: 22 }}>Runs</h1>
               <p className="muted t-sm">Each job is one execution of a saved evaluation plan.</p>
             </div>
             <Button onClick={() => navigate("/plans")}>Back to plans</Button>
           </header>
-          {isLoading ? <LoadingState label="Loading eval jobs..." /> : null}
-          {error ? <ErrorState title="Could not load eval jobs" description={error} /> : null}
+          {isLoading ? <LoadingState label="Loading runs..." /> : null}
+          {error ? <ErrorState title="Could not load runs" description={error} /> : null}
           {!isLoading && !error && plans.length ? (
             <>
               <section className="panel" style={{ overflow: "hidden" }}>
@@ -210,7 +210,7 @@ export function RunsPage() {
               </section>
             </>
           ) : !isLoading && !error ? (
-            <EmptyState title="No eval jobs yet" description="Run a plan from Evaluation Plans to see jobs here." />
+            <EmptyState title="No runs yet" description="Run a plan from Evaluation Plans to see runs here." />
           ) : null}
 
           <WorkersSection workers={workers} workersError={workersError} />
@@ -228,7 +228,7 @@ export function RunsPage() {
       <div className="page-body plans-wrap">
         <header className="row between plans-head">
           <div className="col gap-1">
-            <h1 className="t-display" style={{ fontSize: 22 }}>Eval Jobs</h1>
+              <h1 className="t-display" style={{ fontSize: 22 }}>Runs</h1>
             <p className="muted t-sm">Live run monitor for one evaluation plan execution.</p>
           </div>
           <div className="row gap-2">

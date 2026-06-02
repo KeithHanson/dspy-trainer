@@ -37,7 +37,7 @@ describe("DashboardPage", () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByText("Live eval job: Live plan")).toBeInTheDocument();
+  expect(await screen.findByText("Live run: Live plan")).toBeInTheDocument();
 
     rerender(
       <MemoryRouter>
@@ -45,7 +45,7 @@ describe("DashboardPage", () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByText("No eval jobs yet.")).toBeInTheDocument();
+  expect(await screen.findByText("No runs yet.")).toBeInTheDocument();
   });
 
   it("renders recent jobs empty state", async () => {

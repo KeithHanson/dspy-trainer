@@ -33,7 +33,7 @@ function Dashboard({ nav, liveJob }) {
 
         {/* recent jobs */}
         <div className="row between" style={{ margin: '30px 0 12px' }}>
-          <div className="t-h2">Recent eval jobs</div>
+          <div className="t-h2">Recent runs</div>
           <span className="lnk t-sm" onClick={() => nav('runs')}>View all <Icon name="arrowRight" size={13} style={{ verticalAlign: -2 }} /></span>
         </div>
         <div className="panel" style={{ overflow: 'hidden' }}>

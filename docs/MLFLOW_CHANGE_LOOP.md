@@ -9,7 +9,7 @@ Edit the relevant files (typically under `backend/app/executor/`, `backend/app/s
 Recommended quick test before rebuilding:
 
 ```bash
-pytest -q backend/tests/test_eval_executor_mlflow.py backend/tests/test_eval_jobs_api.py
+pytest -q backend/tests/test_optimization_dataset_builders.py backend/tests/test_optimization_jobs_api.py
 ```
 
 ## 2) Rebuild and restart containers in daemon mode
@@ -30,10 +30,9 @@ This recreates backend/worker with your latest code and keeps services running i
 
 Capture these values from output:
 
-- `EVAL_JOB_ID`
+- `RUN_PLAN_ID`
 - `mlflow_parent_run_id`
-- `eval_name`
-- each `mlflow_trace_id` in `Fetching eval run items`
+- each `mlflow_trace_id` in `Fetching run plan tasks`
 
 ## 4) Verify in MLflow UI
 
@@ -43,8 +42,8 @@ Open MLflow:
 
 Check the newest run:
 
-- Exactly one parent eval run for the job
-- Trace rows exist for each eval item
+- Exactly one parent run for the run plan
+- Trace rows exist for each run task
 - `judge_metric` appears once per trace (no `1 (2)` duplication)
 
 ## 5) Verify with MCP (authoritative checks)
@@ -54,7 +53,7 @@ Run MCP checks for the latest parent run id.
 ### A. Confirm run shape
 
 - `mlflow_mcp_describe_run` on the parent run id
-- Expect: run name matches `eval_name`, status `FINISHED`, `eval_job_id` tag present
+- Expect: status `FINISHED`, `plan_id` tag present
 
 ### B. Confirm traces linked to the parent run
 
@@ -62,7 +61,7 @@ Use client search (or MCP trace search where available) filtered by `run_id`.
 
 Expected:
 
-- trace count equals number of eval items (normally 2)
+- trace count equals number of run tasks (normally 2)
 
 ### C. Confirm assessments on traces
 
@@ -77,7 +76,7 @@ Expected:
 ## 6) Troubleshooting checklist
 
 - **No new behavior after code edits**: forgot `--build` on `docker compose up -d`.
-- **No traces linked**: inspect `mlflow_parent_run_id` and trace linking path in `backend/app/executor/eval.py`.
+- **No traces linked**: inspect `mlflow_parent_run_id` and trace linking path in the agent run task execution flow.
 - **Duplicate assessments (`1 (2)`)**: inspect dedupe logic in `_cleanup_duplicate_judge_assessments` and normalization pass.
 - **NaN in AVG**: verify assessments are numeric and run-scoped metadata is present.
 

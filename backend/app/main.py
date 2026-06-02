@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
-from app.executor import run_bundle_eval, run_eval_job
+from app.executor import run_bundle_eval
 from app.services import AppServices
 from app.validator import validate_bundle
 
@@ -85,20 +85,6 @@ class SmokeTestRequest(BaseModel):
     num_threads: int = 1
 
 
-class EvalJobCreateRequest(BaseModel):
-    project_id: str
-    module_import_id: str
-    scenario_id: str
-    dataset_version: str
-    bundle_path: str
-    repeat_count: int = 1
-    num_threads: int = 1
-    eval_inputs: list[dict[str, Any]] = Field(default_factory=list)
-    evaluation_plan_id: str | None = None
-    mlflow_experiment_id: str | None = None
-    mlflow_parent_run_id: str | None = None
-
-
 class OptimizationJobCreateRequest(BaseModel):
     project_id: str
     module_import_id: str
@@ -114,7 +100,7 @@ class OptimizationJobCreateRequest(BaseModel):
     train_inputs: list[dict[str, Any]] = Field(default_factory=list)
     val_inputs: list[dict[str, Any]] = Field(default_factory=list)
     num_threads: int = 1
-    source_eval_job_id: str | None = None
+    source_run_plan_id: str | None = None
 
 
 class OptimizationDatasetCreateRequest(BaseModel):
@@ -123,7 +109,7 @@ class OptimizationDatasetCreateRequest(BaseModel):
     name: str
     dataset_kind: str
     source_type: str
-    source_eval_job_ids: list[str] = Field(default_factory=list)
+    source_run_plan_ids: list[str] = Field(default_factory=list)
     source_filters: dict[str, Any] = Field(default_factory=dict)
     records: list[dict[str, Any]] = Field(default_factory=list)
     input_keys: list[str] = Field(default_factory=list)
@@ -139,7 +125,7 @@ class OptimizationDatasetDeriveRequest(BaseModel):
     name: str = "Derived optimization dataset"
     dataset_kind: str
     source_type: str
-    source_eval_job_ids: list[str] = Field(default_factory=list)
+    source_run_plan_ids: list[str] = Field(default_factory=list)
     source_filters: dict[str, Any] = Field(default_factory=dict)
     notes: str | None = None
     persist: bool = False
@@ -416,47 +402,6 @@ async def module_diagnostics(module_id: str, request: Request):
     return result
 
 
-@app.post("/eval/jobs")
-async def create_eval_job(request: Request, payload: EvalJobCreateRequest):
-    services: AppServices = request.app.state.services
-    result = await services.create_eval_job(
-        project_id=payload.project_id,
-        module_import_id=payload.module_import_id,
-        scenario_id=payload.scenario_id,
-        dataset_version=payload.dataset_version,
-        bundle_path=payload.bundle_path,
-        repeat_count=payload.repeat_count,
-        num_threads=payload.num_threads,
-        eval_inputs=payload.eval_inputs,
-        evaluation_plan_id=payload.evaluation_plan_id,
-        mlflow_experiment_id=payload.mlflow_experiment_id,
-        mlflow_parent_run_id=payload.mlflow_parent_run_id,
-    )
-    if result is None:
-        return JSONResponse(status_code=404, content={"error": "module not found"})
-    return result
-
-
-@app.get("/eval/jobs/{eval_job_id}")
-async def get_eval_job(eval_job_id: str, request: Request):
-    services: AppServices = request.app.state.services
-    result = await services.get_eval_job(eval_job_id)
-    if result is None:
-        return JSONResponse(status_code=404, content={"error": "eval job not found"})
-    return result
-
-
-@app.get("/modules/{module_id}/eval-jobs")
-async def list_module_eval_jobs(request: Request, module_id: str, limit: int = 50, offset: int = 0):
-    services: AppServices = request.app.state.services
-    safe_limit = max(1, min(limit, 500))
-    safe_offset = max(0, offset)
-    result = await services.list_eval_jobs_for_module(module_import_id=module_id, limit=safe_limit, offset=safe_offset)
-    if result is None:
-        return JSONResponse(status_code=404, content={"error": "module not found"})
-    return result
-
-
 @app.get("/modules/{module_id}/agent-run-plans")
 async def list_module_agent_run_plans(request: Request, module_id: str, limit: int = 50, offset: int = 0):
     services: AppServices = request.app.state.services
@@ -465,35 +410,6 @@ async def list_module_agent_run_plans(request: Request, module_id: str, limit: i
     result = await services.list_agent_run_plans_for_module(module_import_id=module_id, limit=safe_limit, offset=safe_offset)
     if result is None:
         return JSONResponse(status_code=404, content={"error": "module not found"})
-    return result
-
-
-@app.post("/eval/jobs/{eval_job_id}/cancel")
-async def cancel_eval_job(eval_job_id: str, request: Request):
-    services: AppServices = request.app.state.services
-    result = await services.cancel_eval_job(eval_job_id)
-    if result is None:
-        return JSONResponse(status_code=404, content={"error": "eval job not found"})
-    return result
-
-
-@app.get("/eval/jobs/{eval_job_id}/items")
-async def list_eval_job_items(eval_job_id: str, request: Request, limit: int = 50, offset: int = 0):
-    services: AppServices = request.app.state.services
-    safe_limit = max(1, min(limit, 500))
-    safe_offset = max(0, offset)
-    result = await services.list_eval_run_items(eval_job_id, limit=safe_limit, offset=safe_offset)
-    if result is None:
-        return JSONResponse(status_code=404, content={"error": "eval job not found"})
-    return result
-
-
-@app.post("/eval/jobs/{eval_job_id}/run")
-async def run_eval_job_endpoint(eval_job_id: str, request: Request):
-    services: AppServices = request.app.state.services
-    result = await run_eval_job(services, eval_job_id)
-    if result is None:
-        return JSONResponse(status_code=404, content={"error": "eval job not found"})
     return result
 
 
@@ -529,10 +445,11 @@ async def create_optimization_job(request: Request, payload: OptimizationJobCrea
         train_inputs=payload.train_inputs,
         val_inputs=payload.val_inputs,
         num_threads=payload.num_threads,
-        source_eval_job_id=payload.source_eval_job_id,
+        source_run_plan_id=payload.source_run_plan_id,
     )
     if result is None:
         return JSONResponse(status_code=404, content={"error": "module, dataset, or lm profile not found"})
+    await services.enqueue_optimization_job(str(result["id"]))
     return result
 
 
@@ -580,7 +497,7 @@ async def create_optimization_dataset(request: Request, payload: OptimizationDat
         name=payload.name,
         dataset_kind=payload.dataset_kind,
         source_type=payload.source_type,
-        source_eval_job_ids=payload.source_eval_job_ids,
+        source_run_plan_ids=payload.source_run_plan_ids,
         source_filters=payload.source_filters,
         records=payload.records,
         input_keys=payload.input_keys,
@@ -603,13 +520,13 @@ async def derive_optimization_dataset(request: Request, payload: OptimizationDat
         name=payload.name,
         dataset_kind=payload.dataset_kind,
         source_type=payload.source_type,
-        source_eval_job_ids=payload.source_eval_job_ids,
+        source_run_plan_ids=payload.source_run_plan_ids,
         source_filters=payload.source_filters,
         notes=payload.notes,
         persist=payload.persist,
     )
     if result is None:
-        return JSONResponse(status_code=404, content={"error": "eval job or module not found"})
+        return JSONResponse(status_code=404, content={"error": "run plan or module not found"})
     return result
 
 

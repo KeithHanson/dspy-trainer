@@ -39,7 +39,7 @@ describe("RunsPage", () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByText("Eval Jobs")).toBeInTheDocument();
+    expect(await screen.findByText("Runs")).toBeInTheDocument();
     expect(await screen.findByText("running")).toBeInTheDocument();
     vi.unstubAllGlobals();
   });
@@ -99,7 +99,7 @@ describe("RunsPage", () => {
     vi.unstubAllGlobals();
   });
 
-  it("deletes an eval job from list", async () => {
+it("deletes a run from list", async () => {
     const fetchMock = vi.fn((url, init) => {
       if (String(url).includes("/agent-run-plans?") && init?.method === "GET") {
         return Promise.resolve({
@@ -170,7 +170,7 @@ describe("RunsPage", () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByText("Could not load eval jobs")).toBeInTheDocument();
+  expect(await screen.findByText("Could not load runs")).toBeInTheDocument();
     expect(await screen.findByText("Workers")).toBeInTheDocument();
     expect(await screen.findByText("worker-z")).toBeInTheDocument();
     vi.unstubAllGlobals();

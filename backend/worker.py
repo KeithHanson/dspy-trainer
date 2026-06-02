@@ -43,6 +43,25 @@ async def process_job(services: AppServices, raw_payload: str, worker_id: str) -
         result = await services.run_agent_run_task(str(task_id), worker_id=worker_id)
         await _heartbeat(services, worker_id, "listening")
         logger.info("Processed agent run task: %s", result)
+        return
+
+    if job_type == "optimization_job":
+        job_id = payload.get("job_id")
+        if not job_id:
+            logger.error("Missing job_id in optimization_job payload")
+            return
+        await services.append_optimization_process_log(
+            str(job_id),
+            [
+                f"worker_id={worker_id}",
+                f"worker_picked_up_at={__import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()}",
+                "status=worker_picked_up",
+            ],
+        )
+        await _heartbeat(services, worker_id, "running", str(job_id))
+        result = await services.run_optimization_job(str(job_id))
+        await _heartbeat(services, worker_id, "listening")
+        logger.info("Processed optimization job: %s", result)
 
 
 async def run_worker() -> None:

@@ -218,11 +218,20 @@ export function OptimizationJobsPage() {
         {error ? <ErrorState title="Could not load optimization job" description={error} /> : null}
 
         {job ? (
-          <>
-            <section className="col gap-2">
+          <div className="optimization-detail-layout col">
+            {job.status === "failed" ? (
+              <ErrorState
+                title="Optimization job failed"
+                description={job.failure_reason || "The optimization job failed without a reported reason."}
+              />
+            ) : null}
+
+            <section className="col optimization-detail-section">
               <h2 className="t-h2">Run summary</h2>
-              <p className="cap mono">Job ID: {job.id}</p>
-              <p className="cap mono">Module: {job.module_import_id ? (moduleNames[job.module_import_id] || job.module_import_id) : "-"}</p>
+              <div className="optimization-detail-facts col">
+                <p className="cap mono">Job ID: {job.id}</p>
+                <p className="cap mono">Module: {job.module_import_id ? (moduleNames[job.module_import_id] || job.module_import_id) : "-"}</p>
+              </div>
 
               <div className="runs-kpis">
                 <Kpi label="Status" value={<StatusPill status={job.status} />} />
@@ -231,7 +240,7 @@ export function OptimizationJobsPage() {
                 <Kpi label="Optimized score" value={formatPercent(comparison?.optimized_score_pct)} />
               </div>
 
-              <div className="panel card-pad" style={{ marginTop: 10 }}>
+              <div className="panel card-pad optimization-detail-panel">
                 <div className="row between" style={{ marginBottom: 10 }}>
                   <h3 className="t-h2">Comparison</h3>
                   <span className="t-label">{formatDeltaLabel(comparison?.score_delta_pct)}</span>
@@ -249,53 +258,62 @@ export function OptimizationJobsPage() {
               </div>
             </section>
 
-            <section className="col gap-2 optimization-form-block">
-              <div className="panel card-pad">
+            <section className="col optimization-detail-section optimization-form-block">
+              <div className="panel card-pad optimization-detail-panel">
                 <h3 className="t-h2">Run configuration</h3>
-                <p className="cap mono">Strategy: {job.strategy || "-"}</p>
-                <p className="cap mono">Objective: {job.objective || "-"}</p>
-                <p className="cap mono">Execution LM: {executionLm}</p>
-                <p className="cap mono">Helper LM: {helperLm}</p>
-                <p className="cap mono">Training dataset: {job.dataset_id || "not set"}</p>
-                <p className="cap mono">Validation dataset: {job.validation_dataset_id || "not set"}</p>
-                {job.source_eval_job_id ? (
+                <div className="optimization-detail-facts col">
+                  <p className="cap mono">Strategy: {job.strategy || "-"}</p>
+                  <p className="cap mono">Objective: {job.objective || "-"}</p>
+                  <p className="cap mono">Execution LM: {executionLm}</p>
+                  <p className="cap mono">Helper LM: {helperLm}</p>
+                  <p className="cap mono">Training dataset: {job.dataset_id || "not set"}</p>
+                  <p className="cap mono">Validation dataset: {job.validation_dataset_id || "not set"}</p>
+                </div>
+                {job.source_run_plan_id ? (
                   <p className="cap">
-                    Source eval plan:
-                    <Link className="lnk" to={`/runs?plan=${encodeURIComponent(job.source_eval_job_id)}`}>
-                      {job.source_eval_job_id}
+                    Source run plan:
+                    <Link className="lnk" to={`/runs?plan=${encodeURIComponent(job.source_run_plan_id)}`}>
+                      {job.source_run_plan_id}
                     </Link>
                   </p>
                 ) : null}
               </div>
 
-              <div className="panel card-pad">
+              <div className="panel card-pad optimization-detail-panel">
                 <h3 className="t-h2">Timing</h3>
-                <p className="cap mono">Created: {formatDateTime(job.created_at)}</p>
-                <p className="cap mono">Started: {startedAt}</p>
-                <p className="cap mono">Finished: {finishedAt}</p>
+                <div className="optimization-detail-facts col">
+                  <p className="cap mono">Created: {formatDateTime(job.created_at)}</p>
+                  <p className="cap mono">Started: {startedAt}</p>
+                  <p className="cap mono">Finished: {finishedAt}</p>
+                </div>
               </div>
 
-              <div className="panel card-pad">
+              <div className="panel card-pad optimization-detail-panel">
                 <h3 className="t-h2">Compiled artifact metadata</h3>
                 <pre className="optimization-request-config-preview"><code>{JSON.stringify(artifactMetadata, null, 2)}</code></pre>
               </div>
 
-              <div className="panel card-pad">
+              <div className="panel card-pad optimization-detail-panel">
                 <h3 className="t-h2">Strategy details</h3>
                 <pre className="optimization-request-config-preview"><code>{JSON.stringify(strategyDetails, null, 2)}</code></pre>
               </div>
 
-              <div className="panel card-pad">
+              <div className="panel card-pad optimization-detail-panel">
                 <h3 className="t-h2">Request config</h3>
                 <pre className="optimization-request-config-preview"><code>{JSON.stringify(job.request_config || {}, null, 2)}</code></pre>
               </div>
 
-              <div className="panel card-pad">
+              <div className="panel card-pad optimization-detail-panel">
                 <h3 className="t-h2">Normalized config</h3>
                 <pre className="optimization-request-config-preview"><code>{JSON.stringify(job.normalized_config || {}, null, 2)}</code></pre>
               </div>
+
+              <div className="panel card-pad optimization-detail-panel">
+                <h3 className="t-h2">Process log</h3>
+                <pre className="optimization-request-config-preview"><code>{job.execution_log || "No execution log captured yet."}</code></pre>
+              </div>
             </section>
-          </>
+          </div>
         ) : null}
       </div>
     </section>

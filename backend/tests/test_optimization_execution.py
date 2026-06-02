@@ -75,17 +75,20 @@ class _FakeConn:
     async def execute(self, query, *params):
         if "set status='running'" in query:
             self.state["job"]["status"] = "running"
+            self.state["job"]["execution_log"] = params[2]
             self.state["job"]["run_started_at"] = params[1].isoformat()
         elif "set status='succeeded'" in query:
             self.state["job"]["status"] = "succeeded"
-            self.state["job"]["artifact_path"] = params[1]
-            self.state["job"]["artifact_metadata"] = json.loads(params[2])
-            self.state["job"]["telemetry_summary"] = json.loads(params[3])
-            self.state["job"]["comparison_summary"] = json.loads(params[4])
-            self.state["job"]["finished_at"] = params[5].isoformat()
+            self.state["job"]["execution_log"] = params[1]
+            self.state["job"]["artifact_path"] = params[2]
+            self.state["job"]["artifact_metadata"] = json.loads(params[3])
+            self.state["job"]["telemetry_summary"] = json.loads(params[4])
+            self.state["job"]["comparison_summary"] = json.loads(params[5])
+            self.state["job"]["finished_at"] = params[6].isoformat()
         elif "set status='failed'" in query:
             self.state["job"]["status"] = "failed"
             self.state["job"]["failure_reason"] = params[1]
+            self.state["job"]["execution_log"] = params[2]
         return "UPDATE 1"
 
 
@@ -132,7 +135,8 @@ class _PersistentDbConn:
                 "train_inputs": params[12],
                 "val_inputs": params[13],
                 "num_threads": params[14],
-                "source_eval_job_id": params[15],
+                "source_run_plan_id": params[15],
+                "execution_log": params[16],
                 "artifact_path": None,
                 "artifact_metadata": "{}",
                 "telemetry_summary": "{}",
@@ -140,8 +144,8 @@ class _PersistentDbConn:
                 "failure_reason": None,
                 "run_started_at": None,
                 "finished_at": None,
-                "created_at": params[16],
-                "updated_at": params[17],
+                "created_at": params[17],
+                "updated_at": params[18],
             }
             return "INSERT 1"
 
@@ -153,7 +157,7 @@ class _PersistentDbConn:
                 "name": params[3],
                 "dataset_kind": params[4],
                 "source_type": params[5],
-                "source_eval_job_ids": json.loads(params[6]),
+                "source_run_plan_ids": json.loads(params[6]),
                 "source_filters": json.loads(params[7]),
                 "records": json.loads(params[8]),
                 "record_count": params[9],
@@ -168,19 +172,21 @@ class _PersistentDbConn:
             return "INSERT 1"
 
         if "update optimization_jobs set status='running'" in normalized:
-            job_id, started_at = params[0], params[1]
+            job_id, started_at, execution_log = params[0], params[1], params[2]
             job = self.state["optimization_jobs"].get(str(job_id))
             if job is not None:
                 job["status"] = "running"
+                job["execution_log"] = execution_log
                 job["run_started_at"] = started_at
                 job["updated_at"] = started_at
             return "UPDATE 1"
 
         if "update optimization_jobs set status='succeeded'" in normalized:
-            job_id, artifact_path, artifact_metadata, telemetry_summary, comparison_summary, finished_at = params[:6]
+            job_id, execution_log, artifact_path, artifact_metadata, telemetry_summary, comparison_summary, finished_at = params[:7]
             job = self.state["optimization_jobs"].get(str(job_id)) or self.state.get("job")
             if isinstance(job, dict):
                 job["status"] = "succeeded"
+                job["execution_log"] = execution_log
                 job["artifact_path"] = artifact_path
                 job["artifact_metadata"] = artifact_metadata if isinstance(artifact_metadata, str) else json.dumps(artifact_metadata)
                 job["telemetry_summary"] = telemetry_summary if isinstance(telemetry_summary, str) else json.dumps(telemetry_summary)
@@ -191,11 +197,12 @@ class _PersistentDbConn:
             return "UPDATE 1"
 
         if "update optimization_jobs set status='failed'" in normalized:
-            job_id, reason, finished_at = params[0], params[1], params[2]
+            job_id, reason, execution_log, finished_at = params[0], params[1], params[2], params[3]
             job = self.state["optimization_jobs"].get(str(job_id)) or self.state.get("job")
             if isinstance(job, dict):
                 job["status"] = "failed"
                 job["failure_reason"] = reason
+                job["execution_log"] = execution_log
                 job["finished_at"] = finished_at
                 job["updated_at"] = finished_at
             return "UPDATE 1"
@@ -420,6 +427,7 @@ def test_run_optimization_job_persists_artifact_and_summaries(monkeypatch):
     def fake_run_bundle_optimization(**kwargs):
         assert kwargs["strategy"] == "bootstrap_fewshot"
         assert kwargs["train_records"][0]["prediction"] == {"answer": "Paris"}
+        kwargs["log_event"]("bootstrap raw stdout line")
         return {
             "artifact_path": "/tmp/dspy-trainer/optimization_artifacts/opt-1/program.json",
             "artifact_metadata": {"artifact_type": "dspy_program_state"},
@@ -439,6 +447,9 @@ def test_run_optimization_job_persists_artifact_and_summaries(monkeypatch):
 
     assert result is not None
     assert result["status"] == "succeeded"
+    assert "status=succeeded" in result["execution_log"]
+    assert "bootstrap raw stdout line" in result["execution_log"]
+    assert "artifact_path=/tmp/dspy-trainer/optimization_artifacts/opt-1/program.json" in result["execution_log"]
     assert result["artifact_path"].endswith("program.json")
     assert result["artifact_metadata"] == {"artifact_type": "dspy_program_state"}
     assert result["telemetry_summary"]["selected_demos"][0]["demo_count"] == 1
@@ -486,6 +497,7 @@ def test_run_optimization_job_gepa_calls_bundle_optimization(monkeypatch):
     def fake_run_bundle_optimization(**kwargs):
         assert kwargs["strategy"] == "gepa"
         assert len(kwargs["train_records"]) == 1
+        kwargs["log_event"]("gepa raw log line")
         return {
             "artifact_path": "/tmp/dspy-trainer/optimization_artifacts/opt-2/program.json",
             "artifact_metadata": {"artifact_type": "dspy_program_state"},
@@ -510,9 +522,82 @@ def test_run_optimization_job_gepa_calls_bundle_optimization(monkeypatch):
 
     assert result is not None
     assert result["status"] == "succeeded"
+    assert "normalized_strategy=gepa" in result["execution_log"]
+    assert "gepa raw log line" in result["execution_log"]
     assert result["artifact_path"].endswith("program.json")
     assert result["telemetry_summary"]["strategy"] == "gepa"
     assert result["telemetry_summary"]["strategy_details"]["optimizer_class"] == "GEPA"
+
+
+def test_run_optimization_job_derives_records_from_source_run_plan(monkeypatch):
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+    state = {
+        "job": {
+            "id": "opt-derive",
+            "status": "queued",
+            "project_id": "proj-1",
+            "module_import_id": "mod-1",
+            "bundle_path": str(FIXTURES / "valid_bundle"),
+            "strategy": "bootstrap_fewshot",
+            "dataset_id": None,
+            "validation_dataset_id": None,
+            "execution_lm_profile_id": None,
+            "helper_lm_profile_id": None,
+            "normalized_config": {"dataset_requirements": {"dataset_kind": "demo"}, "dspy_config": {"max_bootstrapped_demos": 2}},
+            "train_inputs": [],
+            "val_inputs": [],
+            "num_threads": 1,
+            "source_run_plan_id": "plan-1",
+            "artifact_path": None,
+            "artifact_metadata": {},
+            "telemetry_summary": {},
+            "comparison_summary": {},
+            "failure_reason": None,
+            "run_started_at": None,
+            "finished_at": None,
+        }
+    }
+    setattr(services, "postgres_pool", FakePool(state))
+
+    async def fake_get_optimization_job(job_id):
+        assert job_id == "opt-derive"
+        return dict(state["job"])
+
+    async def fake_derive_optimization_dataset(**kwargs):
+        assert kwargs["source_run_plan_ids"] == ["plan-1"]
+        assert kwargs["dataset_kind"] == "demo"
+        assert kwargs["source_type"] == "eval_passes"
+        return {
+            "records": [
+                {
+                    "input": {"question": "France capital?"},
+                    "label": {"expected": "Paris"},
+                    "prediction": {"answer": "Paris"},
+                }
+            ]
+        }
+
+    def fake_run_bundle_optimization(**kwargs):
+        assert kwargs["train_records"][0]["label"] == {"expected": "Paris"}
+        assert kwargs["train_records"][0]["prediction"] == {"answer": "Paris"}
+        kwargs["log_event"]("derived dataset raw line")
+        return {
+            "artifact_path": "/tmp/dspy-trainer/optimization_artifacts/opt-derive/program.json",
+            "artifact_metadata": {"artifact_type": "dspy_program_state"},
+            "telemetry_summary": {"strategy": "bootstrap_fewshot"},
+            "comparison_summary": {"baseline_score_pct": 50.0, "optimized_score_pct": 100.0, "score_delta_pct": 50.0},
+        }
+
+    monkeypatch.setattr(services, "get_optimization_job", fake_get_optimization_job)
+    monkeypatch.setattr(services, "derive_optimization_dataset", fake_derive_optimization_dataset)
+    monkeypatch.setattr("app.executor.module_runner.run_bundle_optimization", fake_run_bundle_optimization)
+
+    result = asyncio.run(services.run_optimization_job("opt-derive"))
+
+    assert result is not None
+    assert result["status"] == "succeeded"
+    assert "derived_source_run_plan_id=plan-1" in result["execution_log"]
+    assert "derived dataset raw line" in result["execution_log"]
 
 
 def test_optimization_job_json_fields_persist_through_service_db_roundtrip(monkeypatch):
@@ -529,7 +614,7 @@ def test_optimization_job_json_fields_persist_through_service_db_roundtrip(monke
                 "name": "Passes",
                 "dataset_kind": "demo",
                 "source_type": "eval_passes",
-                "source_eval_job_ids": ["job-1"],
+                "source_run_plan_ids": ["plan-1"],
                 "source_filters": {"score_threshold": 0.8},
                 "records": [
                     {
@@ -568,7 +653,7 @@ def test_optimization_job_json_fields_persist_through_service_db_roundtrip(monke
             train_inputs=[],
             val_inputs=[],
             num_threads=1,
-            source_eval_job_id=None,
+            source_run_plan_id=None,
         )
     )
     assert created is not None

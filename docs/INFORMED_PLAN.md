@@ -15,7 +15,7 @@ The platform supports repeated evaluation and optimization loops for imported DS
 ### Core Services (Compose)
 
 - `backend`: FastAPI control plane, data model, API, validation pipeline.
-- `worker`: async execution engine for EvalJob and OptimizationJob.
+- `worker`: async execution engine for AgentRunPlan and OptimizationJob.
 - `postgres`: relational metadata + structured JSON payloads.
 - `redis`: queueing/coordinator for background jobs.
 - `mlflow`: experiment tracking and artifacts.
@@ -66,8 +66,8 @@ Reference files:
 Use `dspy.Evaluate` as inner evaluation engine:
 
 - One `Evaluate(...)` call runs one pass over a devset.
-- Backend `EvalJob` orchestrates repeated passes (`repeat_count`) and scenario slicing.
-- `EvaluationResult.results` tuples map to `EvalRunItem` rows.
+- Backend `AgentRunPlan` orchestrates repeated passes (`runs_per_question`) and scenario slicing.
+- `EvaluationResult.results` tuples map to `AgentRunTask` rows.
 
 Reference files:
 
@@ -106,8 +106,8 @@ Reference files:
 - `Dataset`
 - `Scenario`
 - `JudgeConfig`
-- `EvalJob`
-- `EvalRunItem`
+- `AgentRunPlan`
+- `AgentRunTask`
 - `OptimizationJob`
 - `Artifact`
 - `LLMConfigProfile`
@@ -129,16 +129,16 @@ Jobs reference profile IDs, not raw API keys or provider internals.
 ## MLflow Correlation Strategy (Locked)
 
 - One project-level MLflow experiment per project.
-- Each `EvalJob` maps to one parent MLflow run.
-- Each `EvalRunItem` maps to correlated child trace/span-like telemetry.
+- Each `AgentRunPlan` maps to one parent MLflow run.
+- Each `AgentRunTask` maps to correlated child trace/span-like telemetry.
 - Backend remains richer source of truth; MLflow is tracking plane.
 
 Required cross-system fields:
 
 - `project_id`
 - `module_import_id`
-- `eval_job_id`
-- `eval_run_item_id`
+- `run_plan_id`
+- `run_task_id`
 - `scenario_id`
 - `dataset_version`
 - `mlflow_experiment_id`
@@ -152,8 +152,8 @@ Required cross-system fields:
 3. Build container image and run smoke test with temporary payload.
 4. Persist diagnostics if failing; enable fast re-validate/retry.
 5. Register dataset + scenarios.
-6. Launch EvalJob (repetitions, concurrency, seed controls).
-7. For each EvalRunItem:
+6. Launch AgentRunPlan (repetitions, concurrency, seed controls).
+7. For each AgentRunTask:
    - execute module
    - run judge via LiteLLM profile
    - persist score/rationale/outputs
@@ -186,10 +186,10 @@ Required cross-system fields:
 
 ### Evaluation
 
-- `POST /eval/jobs`
-- `GET /eval/jobs/:id`
-- `GET /eval/jobs/:id/items`
-- `POST /eval/jobs/:id/cancel`
+- `POST /agent-run-plans`
+- `GET /agent-run-plans/:id`
+- `GET /agent-run-plans/:id/tasks`
+- `POST /agent-run-plans/:id/enqueue`
 
 ### Optimization
 
@@ -274,6 +274,6 @@ Required cross-system fields:
 
 1. Define `LLMConfigProfile` DB schema and secret resolution strategy.
 2. Define module contract validator rules and smoke-test payload format.
-3. Implement `EvalJobRunner` skeleton around `dspy.Evaluate` with repeat orchestration.
+3. Implement `AgentRunPlan` execution around `dspy.Evaluate` with repeat orchestration.
 4. Implement first optimization path using `MIPROv2`.
 5. Draft OpenAPI spec for v1 endpoints in this plan.

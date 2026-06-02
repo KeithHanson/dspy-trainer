@@ -14,6 +14,7 @@ JOBS: dict[str, dict] = {}
 DATASETS: dict[str, dict] = {}
 NEXT_JOB_ID = 1
 NEXT_DATASET_ID = 1
+ENQUEUED_JOB_IDS: list[str] = []
 
 
 async def fake_connect(self):
@@ -40,7 +41,7 @@ async def fake_create_optimization_job(
     train_inputs,
     val_inputs,
     num_threads,
-    source_eval_job_id,
+    source_run_plan_id,
 ):
     global NEXT_JOB_ID
     if module_import_id not in MODULES:
@@ -68,7 +69,8 @@ async def fake_create_optimization_job(
         "train_inputs": train_inputs,
         "val_inputs": val_inputs,
         "num_threads": num_threads,
-        "source_eval_job_id": source_eval_job_id,
+        "source_run_plan_id": source_run_plan_id,
+        "execution_log": None,
         "artifact_path": None,
         "artifact_metadata": {},
         "telemetry_summary": {},
@@ -108,7 +110,7 @@ async def fake_create_optimization_dataset(
     name,
     dataset_kind,
     source_type,
-    source_eval_job_ids,
+    source_run_plan_ids,
     source_filters,
     records,
     input_keys,
@@ -129,7 +131,7 @@ async def fake_create_optimization_dataset(
         "name": name,
         "dataset_kind": dataset_kind,
         "source_type": source_type,
-        "source_eval_job_ids": source_eval_job_ids,
+        "source_run_plan_ids": source_run_plan_ids,
         "source_filters": source_filters,
         "records": records,
         "record_count": len(records),
@@ -161,12 +163,12 @@ async def fake_derive_optimization_dataset(
     name,
     dataset_kind,
     source_type,
-    source_eval_job_ids,
+    source_run_plan_ids,
     source_filters,
     notes,
     persist,
 ):
-    if module_import_id not in MODULES or source_eval_job_ids == ["missing"]:
+    if module_import_id not in MODULES or source_run_plan_ids == ["missing"]:
         return None
     payload = {
         "project_id": project_id,
@@ -174,7 +176,7 @@ async def fake_derive_optimization_dataset(
         "name": name,
         "dataset_kind": dataset_kind,
         "source_type": source_type,
-        "source_eval_job_ids": source_eval_job_ids,
+        "source_run_plan_ids": source_run_plan_ids,
         "source_filters": source_filters,
         "records": [{"input": {"question": "x"}, "label": {"expected": "y"}}],
         "record_count": 1,
@@ -218,9 +220,14 @@ async def fake_run_optimization_job(self, optimization_job_id):
         "baseline_item_count": 1,
         "optimized_item_count": 1,
     }
+    job["execution_log"] = "job=opt-1\nstatus=running\nstatus=succeeded"
     job["run_started_at"] = "2026-01-01T00:01:00+00:00"
     job["finished_at"] = "2026-01-01T00:02:00+00:00"
     return job
+
+
+async def fake_enqueue_optimization_job(self, optimization_job_id):
+    ENQUEUED_JOB_IDS.append(optimization_job_id)
 
 
 def _patch_services(monkeypatch):
@@ -228,6 +235,7 @@ def _patch_services(monkeypatch):
     monkeypatch.setattr(main_mod.AppServices, "connect", fake_connect)
     monkeypatch.setattr(main_mod.AppServices, "disconnect", fake_disconnect)
     monkeypatch.setattr(main_mod.AppServices, "create_optimization_job", fake_create_optimization_job)
+    monkeypatch.setattr(main_mod.AppServices, "enqueue_optimization_job", fake_enqueue_optimization_job)
     monkeypatch.setattr(main_mod.AppServices, "get_optimization_job", fake_get_optimization_job)
     monkeypatch.setattr(main_mod.AppServices, "list_optimization_jobs", fake_list_optimization_jobs)
     monkeypatch.setattr(main_mod.AppServices, "cancel_optimization_job", fake_cancel_optimization_job)
@@ -242,6 +250,7 @@ def _reset_state():
     global NEXT_JOB_ID, NEXT_DATASET_ID
     JOBS.clear()
     DATASETS.clear()
+    ENQUEUED_JOB_IDS.clear()
     NEXT_JOB_ID = 1
     NEXT_DATASET_ID = 1
 
@@ -255,10 +264,10 @@ def test_optimization_job_create_get_run_cancel(monkeypatch):
             json={
                 "project_id": "proj-1",
                 "module_import_id": "mod-1",
-                "name": "Eval Passes",
+                "name": "Run Passes",
                 "dataset_kind": "demo",
                 "source_type": "eval_passes",
-                "source_eval_job_ids": ["job-1"],
+                "source_run_plan_ids": ["plan-1"],
                 "source_filters": {"score_threshold": 0.8},
                 "records": [{"input": {"question": "x"}, "accepted_output": {"answer": "y"}}],
                 "input_keys": ["question"],
@@ -282,7 +291,7 @@ def test_optimization_job_create_get_run_cancel(monkeypatch):
                 "name": "Derived preview",
                 "dataset_kind": "feedback",
                 "source_type": "eval_feedback",
-                "source_eval_job_ids": ["job-1"],
+                "source_run_plan_ids": ["plan-1"],
                 "persist": False,
             },
         )
@@ -306,11 +315,12 @@ def test_optimization_job_create_get_run_cancel(monkeypatch):
                 "train_inputs": [{"input": {"question": "x"}, "label": {"expected": "y"}}],
                 "val_inputs": [{"input": {"question": "x"}, "label": {"expected": "y"}}],
                 "num_threads": 2,
-                "source_eval_job_id": "job-1",
+                "source_run_plan_id": "plan-1",
             },
         )
         assert created.status_code == 200
         job_id = created.json()["id"]
+        assert ENQUEUED_JOB_IDS == [job_id]
 
         fetched = client.get(f"/optimization/jobs/{job_id}")
         assert fetched.status_code == 200
@@ -447,7 +457,7 @@ def test_optimization_job_not_found_paths(monkeypatch):
                 "name": "Missing derive",
                 "dataset_kind": "feedback",
                 "source_type": "eval_feedback",
-                "source_eval_job_ids": ["missing"],
+                "source_run_plan_ids": ["missing"],
             },
         )
         assert derived_missing.status_code == 404

@@ -67,7 +67,7 @@ describe("OptimizationJobsPage", () => {
             helper_lm_profile_id: null,
             dataset_id: "ods-1",
             validation_dataset_id: null,
-            source_eval_job_id: "plan-111",
+    source_run_plan_id: "plan-111",
             created_at: "2026-01-01T00:00:00+00:00",
             run_started_at: "2026-01-01T00:01:00+00:00",
             finished_at: "2026-01-01T00:05:00+00:00",
@@ -94,6 +94,7 @@ describe("OptimizationJobsPage", () => {
             normalized_config: {
               optimizer_class: "GEPA",
             },
+            execution_log: "job=opt-job-001\nstatus=running\nstatus=succeeded",
           }),
         });
       }
@@ -125,6 +126,8 @@ describe("OptimizationJobsPage", () => {
     expect(await screen.findByText("dspy_program_state")).toBeInTheDocument();
     expect(await screen.findByText(/programs\/opt-job-001\/program\.json/i)).toBeInTheDocument();
     expect(await screen.findByText("50.0% / 100.0% / +50.0%")).toBeInTheDocument();
+    expect(await screen.findByText("Process log")).toBeInTheDocument();
+    expect(await screen.findByText(/job=opt-job-001/i)).toBeInTheDocument();
 
     vi.unstubAllGlobals();
   });
@@ -183,6 +186,63 @@ describe("OptimizationJobsPage", () => {
     );
 
     expect(await screen.findByText("Could not load optimization job")).toBeInTheDocument();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("shows backend failure reason on failed optimization job detail", async () => {
+    const fetchMock = vi.fn((url, init) => {
+      if (String(url).endsWith("/optimization/jobs/opt-job-failed") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue({
+            id: "opt-job-failed",
+            status: "failed",
+            module_import_id: "mod-1",
+            strategy: "bootstrap_fewshot",
+            objective: "optimize_demo_quality",
+            execution_lm_profile_id: "lm-1",
+            helper_lm_profile_id: null,
+            dataset_id: null,
+            validation_dataset_id: null,
+            source_run_plan_id: "plan-111",
+            created_at: "2026-01-01T00:00:00+00:00",
+            run_started_at: "2026-01-01T00:01:00+00:00",
+            finished_at: "2026-01-01T00:05:00+00:00",
+            artifact_path: null,
+            artifact_metadata: {},
+            comparison_summary: {},
+            telemetry_summary: {},
+            request_config: {},
+            normalized_config: {},
+            execution_log: "job=opt-job-failed\nstatus=running\nstatus=failed\nerror=optimization dataset produced no usable demo examples",
+            failure_reason: "optimization dataset produced no usable demo examples",
+          }),
+        });
+      }
+      if (String(url).endsWith("/modules") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "mod-1", bundle_name: "Echo" }]) });
+      }
+      if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([{ id: "lm-1", name: "Execution Profile" }]),
+        });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter initialEntries={["/optimization/jobs?job=opt-job-failed"]}>
+        <OptimizationJobsPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("Optimization job failed")).toBeInTheDocument();
+    expect(await screen.findByText("optimization dataset produced no usable demo examples")).toBeInTheDocument();
+    expect(await screen.findByText(/status=failed/i)).toBeInTheDocument();
 
     vi.unstubAllGlobals();
   });

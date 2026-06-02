@@ -79,7 +79,7 @@ export function DashboardPage({ adapter, onOpenRun, user }) {
             <div className="row between">
               <div className="col gap-1">
                 <div className="t-h2">
-                  {data.liveJob ? "Live eval job" : "Most recent eval"}: {data.spotlightJob.planName}
+                  {data.liveJob ? "Live run" : "Most recent run"}: {data.spotlightJob.planName}
                 </div>
                 <div className="cap">{data.spotlightJob.bundleName}</div>
                 <div className="dashboard-live-breakdown">
@@ -107,7 +107,7 @@ export function DashboardPage({ adapter, onOpenRun, user }) {
             </div>
           </div>
         ) : (
-          <div className="panel dashboard-zero dashboard-live-empty" role="status">No eval jobs yet.</div>
+           <div className="panel dashboard-zero dashboard-live-empty" role="status">No runs yet.</div>
         )}
 
         <section className="dashboard-kpis">
@@ -124,7 +124,7 @@ export function DashboardPage({ adapter, onOpenRun, user }) {
 
         <section className="dashboard-section">
           <div className="row between dashboard-section-head">
-            <h2 className="t-h2">Recent eval jobs</h2>
+              <h2 className="t-h2">Recent runs</h2>
             <Button variant="ghost" size="sm" onClick={() => navigate("/runs")}>View all</Button>
           </div>
           {data.recentJobs.length === 0 ? (
