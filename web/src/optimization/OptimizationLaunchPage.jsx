@@ -372,9 +372,9 @@ export function OptimizationLaunchPage() {
               <Icon name="activity" size={14} />
               <span className="optimization-success-title">Optimization job queued</span>
             </div>
-                <span className="optimization-success-id">Job ID: {createdJobId}</span>
+            <span className="optimization-success-id">Job ID: {createdJobId}</span>
             <div className="optimization-success-copy">
-              Use <Link className="lnk" to="/runs">Runs</Link> for current run monitoring while this scaffold matures.
+              Open <Link className="lnk" to={`/optimization/jobs?job=${encodeURIComponent(createdJobId)}`}>optimization job monitoring</Link>.
             </div>
           </div>
         ) : null}
