@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import random
+import tomllib
 import traceback
 from typing import Any
 from uuid import uuid4
@@ -33,6 +34,52 @@ class ReadinessStatus:
     @property
     def ok(self) -> bool:
         return self.postgres and self.redis and self.mlflow and self.litellm
+
+
+def _load_score_threshold(bundle_path: str | None) -> float:
+    if not bundle_path:
+        return 0.5
+    toml_path = Path(bundle_path).expanduser().resolve() / "bundle.toml"
+    if not toml_path.exists():
+        return 0.5
+    try:
+        payload = tomllib.loads(toml_path.read_text(encoding="utf-8"))
+    except Exception:
+        return 0.5
+    threshold_value = payload.get("score_pass_threshold")
+    if isinstance(threshold_value, bool) or not isinstance(threshold_value, (int, float)):
+        return 0.5
+    return min(1.0, max(0.0, float(threshold_value)))
+
+
+def _normalize_optimization_strategy(strategy: str | None) -> str:
+    raw = (strategy or "").strip().lower().replace("-", "_")
+    aliases = {
+        "": "bootstrap_fewshot",
+        "bootstrapfewshot": "bootstrap_fewshot",
+        "bootstrap_fewshot": "bootstrap_fewshot",
+        "bootstrap": "bootstrap_fewshot",
+        "gepa": "gepa",
+        "mipro": "miprov2",
+        "mipro_v2": "miprov2",
+        "miprov2": "miprov2",
+    }
+    normalized = aliases.get(raw)
+    if normalized is None:
+        raise ValueError("strategy must be one of: bootstrap_fewshot, gepa, miprov2")
+    return normalized
+
+
+def _normalize_budget(value: Any, *, default: str = "medium") -> str:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+    else:
+        normalized = str(value).strip().lower()
+    if normalized in {"light", "medium", "heavy"}:
+        return normalized
+    raise ValueError("budget must be one of: light, medium, heavy")
 
 
 class AppServices:
@@ -230,23 +277,83 @@ class AppServices:
             await conn.execute("alter table eval_run_items add column if not exists mlflow_trace_id text;")
             await conn.execute(
                 """
+                create table if not exists optimization_datasets (
+                  id text primary key,
+                  project_id text not null,
+                  module_import_id text not null references module_imports(id) on delete restrict,
+                  name text not null,
+                  dataset_kind text not null,
+                  source_type text not null,
+                  source_eval_job_ids jsonb not null default '[]'::jsonb,
+                  source_filters jsonb not null default '{}'::jsonb,
+                  records jsonb not null default '[]'::jsonb,
+                  record_count int not null default 0,
+                  input_keys jsonb not null default '[]'::jsonb,
+                  label_keys jsonb not null default '[]'::jsonb,
+                  optimizer_contract text not null default 'dspy_example_v1',
+                  provenance_summary jsonb not null default '{}'::jsonb,
+                  notes text,
+                  created_at timestamptz not null,
+                  updated_at timestamptz not null
+                );
+                """
+            )
+            await conn.execute("alter table optimization_datasets add column if not exists dataset_kind text;")
+            await conn.execute("alter table optimization_datasets add column if not exists source_type text;")
+            await conn.execute("alter table optimization_datasets add column if not exists source_eval_job_ids jsonb not null default '[]'::jsonb;")
+            await conn.execute("alter table optimization_datasets add column if not exists source_filters jsonb not null default '{}'::jsonb;")
+            await conn.execute("alter table optimization_datasets add column if not exists records jsonb not null default '[]'::jsonb;")
+            await conn.execute("alter table optimization_datasets add column if not exists record_count int not null default 0;")
+            await conn.execute("alter table optimization_datasets add column if not exists input_keys jsonb not null default '[]'::jsonb;")
+            await conn.execute("alter table optimization_datasets add column if not exists label_keys jsonb not null default '[]'::jsonb;")
+            await conn.execute("alter table optimization_datasets add column if not exists optimizer_contract text not null default 'dspy_example_v1';")
+            await conn.execute("alter table optimization_datasets add column if not exists provenance_summary jsonb not null default '{}'::jsonb;")
+            await conn.execute("alter table optimization_datasets add column if not exists notes text;")
+            await conn.execute(
+                """
                 create table if not exists optimization_jobs (
                   id text primary key,
                   status text not null,
                   project_id text not null,
                   module_import_id text not null references module_imports(id) on delete restrict,
                   bundle_path text not null,
+                  strategy text not null default 'bootstrap_fewshot',
+                  objective text not null default 'optimize_demo_quality',
+                  dataset_id text references optimization_datasets(id) on delete set null,
+                  validation_dataset_id text references optimization_datasets(id) on delete set null,
+                  execution_lm_profile_id text,
+                  helper_lm_profile_id text,
+                  request_config jsonb not null default '{}'::jsonb,
+                  normalized_config jsonb not null default '{}'::jsonb,
                   train_inputs jsonb not null default '[]'::jsonb,
                   val_inputs jsonb not null default '[]'::jsonb,
                   num_threads int not null default 1,
                   source_eval_job_id text,
                   artifact_path text,
+                  artifact_metadata jsonb not null default '{}'::jsonb,
+                  telemetry_summary jsonb not null default '{}'::jsonb,
+                  comparison_summary jsonb not null default '{}'::jsonb,
                   failure_reason text,
+                  run_started_at timestamptz,
+                  finished_at timestamptz,
                   created_at timestamptz not null,
                   updated_at timestamptz not null
                 );
                 """
             )
+            await conn.execute("alter table optimization_jobs add column if not exists strategy text not null default 'bootstrap_fewshot';")
+            await conn.execute("alter table optimization_jobs add column if not exists objective text not null default 'optimize_demo_quality';")
+            await conn.execute("alter table optimization_jobs add column if not exists dataset_id text references optimization_datasets(id) on delete set null;")
+            await conn.execute("alter table optimization_jobs add column if not exists validation_dataset_id text references optimization_datasets(id) on delete set null;")
+            await conn.execute("alter table optimization_jobs add column if not exists execution_lm_profile_id text;")
+            await conn.execute("alter table optimization_jobs add column if not exists helper_lm_profile_id text;")
+            await conn.execute("alter table optimization_jobs add column if not exists request_config jsonb not null default '{}'::jsonb;")
+            await conn.execute("alter table optimization_jobs add column if not exists normalized_config jsonb not null default '{}'::jsonb;")
+            await conn.execute("alter table optimization_jobs add column if not exists artifact_metadata jsonb not null default '{}'::jsonb;")
+            await conn.execute("alter table optimization_jobs add column if not exists telemetry_summary jsonb not null default '{}'::jsonb;")
+            await conn.execute("alter table optimization_jobs add column if not exists comparison_summary jsonb not null default '{}'::jsonb;")
+            await conn.execute("alter table optimization_jobs add column if not exists run_started_at timestamptz;")
+            await conn.execute("alter table optimization_jobs add column if not exists finished_at timestamptz;")
             await conn.execute(
                 """
                 create table if not exists lm_profiles (
@@ -1159,11 +1266,99 @@ class AppServices:
             {"run_id": run_id, "status": status},
         )
 
+    def prepare_optimization_job_payload(
+        self,
+        *,
+        strategy: str,
+        objective: str,
+        dataset_id: str | None,
+        validation_dataset_id: str | None,
+        execution_lm_profile_id: str | None,
+        helper_lm_profile_id: str | None,
+        request_config: dict[str, Any] | None,
+        client_normalized_config: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        normalized_strategy = _normalize_optimization_strategy(strategy)
+        clean_objective = objective.strip() or "optimize_demo_quality"
+        clean_request_config = dict(request_config or {})
+        execution_role = (execution_lm_profile_id or "").strip() or None
+        helper_role = (helper_lm_profile_id or "").strip() or None
+        if execution_role is None:
+            raise ValueError("execution_lm_profile_id is required for optimization jobs")
+
+        if normalized_strategy == "bootstrap_fewshot":
+            dataset_kind = "demo"
+            dspy_config = {
+                "teacher_lm_profile_id": helper_role or execution_role,
+                "max_bootstrapped_demos": max(1, int(clean_request_config.get("max_bootstrapped_demos", 4))),
+                "max_labeled_demos": max(1, int(clean_request_config.get("max_labeled_demos", 16))),
+            }
+            optimizer_class = "BootstrapFewShot"
+        elif normalized_strategy == "miprov2":
+            budget = _normalize_budget(clean_request_config.get("budget"), default="medium")
+            dataset_kind = "demo"
+            dspy_config = {
+                "task_model_lm_profile_id": execution_role,
+                "prompt_model_lm_profile_id": helper_role or execution_role,
+                "auto": budget,
+                "max_bootstrapped_demos": max(1, int(clean_request_config.get("max_bootstrapped_demos", 4))),
+                "max_labeled_demos": max(1, int(clean_request_config.get("max_labeled_demos", 16))),
+            }
+            optimizer_class = "MIPROv2"
+        else:
+            budget = _normalize_budget(clean_request_config.get("budget"), default="medium")
+            dataset_kind = "feedback"
+            dspy_config = {
+                "reflection_lm_profile_id": helper_role or execution_role,
+                "auto": budget,
+                "track_stats": True,
+            }
+            optimizer_class = "GEPA"
+
+        persisted_request_config = {
+            **clean_request_config,
+            "_audit": {
+                "strategy": normalized_strategy,
+                "objective": clean_objective,
+                "dataset_id": dataset_id,
+                "validation_dataset_id": validation_dataset_id,
+                "execution_lm_profile_id": execution_role,
+                "helper_lm_profile_id": helper_role,
+                "client_normalized_config": dict(client_normalized_config or {}),
+            },
+        }
+        normalized_config = {
+            "strategy": normalized_strategy,
+            "optimizer_family": normalized_strategy,
+            "optimizer_class": optimizer_class,
+            "objective": clean_objective,
+            "compile_mode": "offline",
+            "dataset_requirements": {
+                "dataset_kind": dataset_kind,
+                "dataset_id": dataset_id,
+                "validation_dataset_id": validation_dataset_id,
+            },
+            "lm_roles": {
+                "execution_lm_profile_id": execution_role,
+                "helper_lm_profile_id": helper_role,
+            },
+            "dspy_config": dspy_config,
+        }
+        return persisted_request_config, normalized_config
+
     async def create_optimization_job(
         self,
         project_id: str,
         module_import_id: str,
         bundle_path: str,
+        strategy: str,
+        objective: str,
+        dataset_id: str | None,
+        validation_dataset_id: str | None,
+        execution_lm_profile_id: str | None,
+        helper_lm_profile_id: str | None,
+        request_config: dict[str, Any],
+        normalized_config: dict[str, Any],
         train_inputs: list[dict[str, Any]],
         val_inputs: list[dict[str, Any]],
         num_threads: int,
@@ -1177,18 +1372,55 @@ class AppServices:
             module_exists = await conn.fetchval("select 1 from module_imports where id = $1", module_import_id)
             if module_exists is None:
                 return None
+            if execution_lm_profile_id is not None:
+                execution_profile_exists = await conn.fetchval(
+                    "select 1 from lm_profiles where id = $1 and archived_at is null",
+                    execution_lm_profile_id,
+                )
+                if execution_profile_exists is None:
+                    return None
+            if helper_lm_profile_id is not None:
+                helper_profile_exists = await conn.fetchval(
+                    "select 1 from lm_profiles where id = $1 and archived_at is null",
+                    helper_lm_profile_id,
+                )
+                if helper_profile_exists is None:
+                    return None
+            if dataset_id is not None:
+                dataset_exists = await conn.fetchval("select 1 from optimization_datasets where id = $1", dataset_id)
+                if dataset_exists is None:
+                    return None
+            if validation_dataset_id is not None:
+                val_dataset_exists = await conn.fetchval("select 1 from optimization_datasets where id = $1", validation_dataset_id)
+                if val_dataset_exists is None:
+                    return None
             await conn.execute(
                 """
                 insert into optimization_jobs (
-                  id, status, project_id, module_import_id, bundle_path, train_inputs, val_inputs,
-                  num_threads, source_eval_job_id, artifact_path, failure_reason, created_at, updated_at
+                  id, status, project_id, module_import_id, bundle_path, strategy, objective, dataset_id,
+                  validation_dataset_id, execution_lm_profile_id, helper_lm_profile_id, request_config,
+                  normalized_config, train_inputs, val_inputs, num_threads, source_eval_job_id, artifact_path,
+                  artifact_metadata, telemetry_summary, comparison_summary, failure_reason, run_started_at,
+                  finished_at, created_at, updated_at
                 )
-                values ($1, 'queued', $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, null, null, $9, $10)
+                values (
+                  $1, 'queued', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb,
+                  $13::jsonb, $14::jsonb, $15, $16, null, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
+                  null, null, null, $17, $18
+                )
                 """,
                 job_id,
                 project_id,
                 module_import_id,
                 bundle_path,
+                strategy.strip() or "bootstrap_fewshot",
+                objective.strip() or "optimize_demo_quality",
+                dataset_id,
+                validation_dataset_id,
+                execution_lm_profile_id,
+                helper_lm_profile_id,
+                json.dumps(request_config or {}),
+                json.dumps(normalized_config or {}),
                 __import__("json").dumps(train_inputs),
                 __import__("json").dumps(val_inputs),
                 max(1, num_threads),
@@ -1204,8 +1436,11 @@ class AppServices:
         async with self.postgres_pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                select id, status, project_id, module_import_id, bundle_path, train_inputs, val_inputs,
-                       num_threads, source_eval_job_id, artifact_path, failure_reason, created_at, updated_at
+                select id, status, project_id, module_import_id, bundle_path, strategy, objective, dataset_id,
+                       validation_dataset_id, execution_lm_profile_id, helper_lm_profile_id, request_config,
+                       normalized_config, train_inputs, val_inputs, num_threads, source_eval_job_id,
+                       artifact_path, artifact_metadata, telemetry_summary, comparison_summary,
+                       failure_reason, run_started_at, finished_at, created_at, updated_at
                 from optimization_jobs where id = $1
                 """,
                 optimization_job_id,
@@ -1218,15 +1453,348 @@ class AppServices:
             "project_id": row["project_id"],
             "module_import_id": row["module_import_id"],
             "bundle_path": row["bundle_path"],
+            "strategy": row["strategy"],
+            "objective": row["objective"],
+            "dataset_id": row["dataset_id"],
+            "validation_dataset_id": row["validation_dataset_id"],
+            "execution_lm_profile_id": row["execution_lm_profile_id"],
+            "helper_lm_profile_id": row["helper_lm_profile_id"],
+            "request_config": row["request_config"],
+            "normalized_config": row["normalized_config"],
             "train_inputs": row["train_inputs"],
             "val_inputs": row["val_inputs"],
             "num_threads": row["num_threads"],
             "source_eval_job_id": row["source_eval_job_id"],
             "artifact_path": row["artifact_path"],
+            "artifact_metadata": row["artifact_metadata"],
+            "telemetry_summary": row["telemetry_summary"],
+            "comparison_summary": row["comparison_summary"],
             "failure_reason": row["failure_reason"],
+            "run_started_at": row["run_started_at"].isoformat() if row["run_started_at"] is not None else None,
+            "finished_at": row["finished_at"].isoformat() if row["finished_at"] is not None else None,
             "created_at": row["created_at"].isoformat(),
             "updated_at": row["updated_at"].isoformat(),
         }
+
+    async def list_optimization_jobs(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                select id from optimization_jobs
+                order by created_at desc
+                limit $1 offset $2
+                """,
+                limit,
+                offset,
+            )
+        jobs: list[dict[str, Any]] = []
+        for row in rows:
+            job = await self.get_optimization_job(str(row["id"]))
+            if job is not None:
+                jobs.append(job)
+        return jobs
+
+    async def create_optimization_dataset(
+        self,
+        project_id: str,
+        module_import_id: str,
+        name: str,
+        dataset_kind: str,
+        source_type: str,
+        source_eval_job_ids: list[str],
+        source_filters: dict[str, Any],
+        records: list[dict[str, Any]],
+        input_keys: list[str],
+        label_keys: list[str],
+        optimizer_contract: str,
+        provenance_summary: dict[str, Any],
+        notes: str | None,
+    ) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        now = datetime.now(timezone.utc)
+        dataset_id = str(uuid4())
+        async with self.postgres_pool.acquire() as conn:
+            module_exists = await conn.fetchval("select 1 from module_imports where id = $1", module_import_id)
+            if module_exists is None:
+                return None
+            await conn.execute(
+                """
+                insert into optimization_datasets (
+                  id, project_id, module_import_id, name, dataset_kind, source_type, source_eval_job_ids,
+                  source_filters, records, record_count, input_keys, label_keys, optimizer_contract,
+                  provenance_summary, notes, created_at, updated_at
+                )
+                values (
+                  $1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10, $11::jsonb, $12::jsonb,
+                  $13, $14::jsonb, $15, $16, $17
+                )
+                """,
+                dataset_id,
+                project_id,
+                module_import_id,
+                name.strip() or "Unnamed optimization dataset",
+                dataset_kind.strip(),
+                source_type.strip(),
+                json.dumps(source_eval_job_ids or []),
+                json.dumps(source_filters or {}),
+                json.dumps(records or []),
+                len(records or []),
+                json.dumps(input_keys or []),
+                json.dumps(label_keys or []),
+                optimizer_contract.strip() or "dspy_example_v1",
+                json.dumps(provenance_summary or {}),
+                notes,
+                now,
+                now,
+            )
+        return await self.get_optimization_dataset(dataset_id)
+
+    async def _list_all_eval_run_items(self, eval_job_id: str) -> list[dict[str, Any]]:
+        all_items: list[dict[str, Any]] = []
+        offset = 0
+        limit = 500
+        while True:
+            page = await self.list_eval_run_items(eval_job_id, limit=limit, offset=offset)
+            if page is None:
+                return []
+            items = page.get("items") if isinstance(page, dict) else None
+            if not isinstance(items, list) or not items:
+                break
+            all_items.extend(items)
+            if len(items) < limit:
+                break
+            offset += limit
+        return all_items
+
+    @staticmethod
+    def _derive_demo_record(item: dict[str, Any], score_threshold: float) -> tuple[dict[str, Any] | None, str | None]:
+        input_payload = AppServices._json_dict(item.get("input_payload"))
+        if not input_payload:
+            return None, "missing_input_payload"
+
+        score = item.get("score")
+        if isinstance(score, bool) or not isinstance(score, (int, float)):
+            return None, "missing_score"
+        if float(score) < score_threshold:
+            return None, "score_below_threshold"
+
+        label_payload = AppServices._json_dict(item.get("label_payload"))
+        prediction_payload = AppServices._json_dict(item.get("prediction_payload"))
+        if label_payload:
+            label = label_payload
+            label_provenance = "label_payload"
+        elif prediction_payload:
+            label = prediction_payload
+            label_provenance = "accepted_run_output"
+        else:
+            return None, "missing_demo_target"
+
+        return {
+            "input": input_payload,
+            "label": label,
+            "input_keys": sorted(input_payload.keys()),
+            "label_keys": sorted(label.keys()),
+            "source_eval_job_id": item.get("eval_job_id"),
+            "source_eval_item_id": item.get("id") or item.get("eval_run_item_id"),
+            "score": float(score),
+            "rationale": str(item.get("rationale") or ""),
+            "label_provenance": label_provenance,
+            # Target contract for later execution is dspy.Example(...).with_inputs(...).
+            "optimizer_contract": "dspy_example_v1",
+        }, None
+
+    @staticmethod
+    def _derive_feedback_record(item: dict[str, Any], score_threshold: float) -> tuple[dict[str, Any] | None, str | None]:
+        input_payload = AppServices._json_dict(item.get("input_payload"))
+        if not input_payload:
+            return None, "missing_input_payload"
+
+        score = item.get("score")
+        if isinstance(score, bool) or not isinstance(score, (int, float)):
+            return None, "missing_score"
+
+        label_payload = AppServices._json_dict(item.get("label_payload"))
+        prediction_payload = AppServices._json_dict(item.get("prediction_payload"))
+        return {
+            "input": input_payload,
+            "label": label_payload,
+            "prediction": prediction_payload,
+            "input_keys": sorted(input_payload.keys()),
+            "label_keys": sorted(label_payload.keys()),
+            "source_eval_job_id": item.get("eval_job_id"),
+            "source_eval_item_id": item.get("id") or item.get("eval_run_item_id"),
+            "score": float(score),
+            "passed": bool(float(score) >= score_threshold),
+            "rationale": str(item.get("rationale") or ""),
+            # GEPA uses score + feedback/rationale across both passing and failing rows.
+            "feedback": str(item.get("rationale") or ""),
+            "optimizer_contract": "dspy_example_v1",
+        }, None
+
+    async def derive_optimization_dataset(
+        self,
+        project_id: str,
+        module_import_id: str,
+        name: str,
+        dataset_kind: str,
+        source_type: str,
+        source_eval_job_ids: list[str],
+        source_filters: dict[str, Any],
+        notes: str | None = None,
+        persist: bool = False,
+    ) -> dict[str, Any] | None:
+        if not source_eval_job_ids:
+            return None
+
+        jobs: list[dict[str, Any]] = []
+        all_items: list[dict[str, Any]] = []
+        for eval_job_id in source_eval_job_ids:
+            job = await self.get_eval_job(eval_job_id)
+            if job is None:
+                return None
+            if str(job.get("project_id")) != project_id or str(job.get("module_import_id")) != module_import_id:
+                return None
+            jobs.append(job)
+            all_items.extend(await self._list_all_eval_run_items(eval_job_id))
+
+        requested_threshold = source_filters.get("score_threshold") if isinstance(source_filters, dict) else None
+        fallback_threshold = max((_load_score_threshold(str(job.get("bundle_path") or "")) for job in jobs), default=0.5)
+        if isinstance(requested_threshold, bool) or not isinstance(requested_threshold, (int, float)):
+            score_threshold = fallback_threshold
+        else:
+            score_threshold = min(1.0, max(0.0, float(requested_threshold)))
+
+        records: list[dict[str, Any]] = []
+        excluded_reasons: dict[str, int] = {}
+        input_keys: set[str] = set()
+        label_keys: set[str] = set()
+        label_provenance_counts: dict[str, int] = {}
+        passed_count = 0
+        failed_count = 0
+
+        derive_record = self._derive_demo_record if dataset_kind == "demo" else self._derive_feedback_record
+        for item in all_items:
+            record, reason = derive_record(item, score_threshold)
+            if record is None:
+                if reason is not None:
+                    excluded_reasons[reason] = excluded_reasons.get(reason, 0) + 1
+                continue
+            records.append(record)
+            input_keys.update(record.get("input_keys") or [])
+            label_keys.update(record.get("label_keys") or [])
+            provenance = str(record.get("label_provenance") or "")
+            if provenance:
+                label_provenance_counts[provenance] = label_provenance_counts.get(provenance, 0) + 1
+            if bool(record.get("passed", float(record.get("score") or 0.0) >= score_threshold)):
+                passed_count += 1
+            else:
+                failed_count += 1
+
+        provenance_summary = {
+            "included_records": len(records),
+            "excluded_records": sum(excluded_reasons.values()),
+            "excluded_reasons": excluded_reasons,
+            "label_provenance_counts": label_provenance_counts,
+            "score_threshold": score_threshold,
+            "source_eval_job_count": len(jobs),
+            "passing_records": passed_count,
+            "failing_records": failed_count,
+        }
+        dataset_payload = {
+            "project_id": project_id,
+            "module_import_id": module_import_id,
+            "name": name.strip() or "Derived optimization dataset",
+            "dataset_kind": dataset_kind,
+            "source_type": source_type,
+            "source_eval_job_ids": source_eval_job_ids,
+            "source_filters": {**(source_filters or {}), "score_threshold": score_threshold},
+            "records": records,
+            "record_count": len(records),
+            "input_keys": sorted(input_keys),
+            "label_keys": sorted(label_keys),
+            "optimizer_contract": "dspy_example_v1",
+            "provenance_summary": provenance_summary,
+            "notes": notes,
+            "preview": not persist,
+        }
+
+        if not persist:
+            return dataset_payload
+
+        return await self.create_optimization_dataset(
+            project_id=project_id,
+            module_import_id=module_import_id,
+            name=dataset_payload["name"],
+            dataset_kind=dataset_kind,
+            source_type=source_type,
+            source_eval_job_ids=source_eval_job_ids,
+            source_filters=dataset_payload["source_filters"],
+            records=records,
+            input_keys=dataset_payload["input_keys"],
+            label_keys=dataset_payload["label_keys"],
+            optimizer_contract="dspy_example_v1",
+            provenance_summary=provenance_summary,
+            notes=notes,
+        )
+
+    async def get_optimization_dataset(self, dataset_id: str) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                select id, project_id, module_import_id, name, dataset_kind, source_type, source_eval_job_ids,
+                       source_filters, records, record_count, input_keys, label_keys, optimizer_contract,
+                       provenance_summary, notes, created_at, updated_at
+                from optimization_datasets
+                where id = $1
+                """,
+                dataset_id,
+            )
+        if row is None:
+            return None
+        return {
+            "id": row["id"],
+            "project_id": row["project_id"],
+            "module_import_id": row["module_import_id"],
+            "name": row["name"],
+            "dataset_kind": row["dataset_kind"],
+            "source_type": row["source_type"],
+            "source_eval_job_ids": row["source_eval_job_ids"],
+            "source_filters": row["source_filters"],
+            "records": row["records"],
+            "record_count": row["record_count"],
+            "input_keys": row["input_keys"],
+            "label_keys": row["label_keys"],
+            "optimizer_contract": row["optimizer_contract"],
+            "provenance_summary": row["provenance_summary"],
+            "notes": row["notes"],
+            "created_at": row["created_at"].isoformat(),
+            "updated_at": row["updated_at"].isoformat(),
+        }
+
+    async def list_optimization_datasets(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                select id from optimization_datasets
+                order by created_at desc
+                limit $1 offset $2
+                """,
+                limit,
+                offset,
+            )
+        datasets: list[dict[str, Any]] = []
+        for row in rows:
+            dataset = await self.get_optimization_dataset(str(row["id"]))
+            if dataset is not None:
+                datasets.append(dataset)
+        return datasets
 
     async def cancel_optimization_job(self, optimization_job_id: str) -> dict[str, Any] | None:
         if self.postgres_pool is None:
@@ -1256,30 +1824,117 @@ class AppServices:
             return job
         now = datetime.now(timezone.utc)
         async with self.postgres_pool.acquire() as conn:
-            await conn.execute("update optimization_jobs set status='running', updated_at=$2 where id=$1", optimization_job_id, now)
+            await conn.execute(
+                "update optimization_jobs set status='running', run_started_at=$2, updated_at=$2 where id=$1",
+                optimization_job_id,
+                now,
+            )
 
         try:
-            from app.executor.module_runner import run_bundle_eval
+            strategy = _normalize_optimization_strategy(str(job.get("strategy") or "bootstrap_fewshot"))
+            if strategy in {"bootstrap_fewshot", "miprov2", "gepa"}:
+                from app.executor.module_runner import run_bundle_optimization
 
-            result = run_bundle_eval(
-                bundle_path=job["bundle_path"],
-                eval_inputs=job["val_inputs"] or job["train_inputs"],
-                num_threads=job["num_threads"],
-            )
-            artifact_path = f"optimization://{optimization_job_id}/score-{result['score_pct']}"
+                train_records: list[dict[str, Any]] = []
+                if job.get("dataset_id"):
+                    dataset = await self.get_optimization_dataset(str(job["dataset_id"]))
+                    if dataset is None:
+                        raise RuntimeError("optimization dataset not found")
+                    train_records = self._json_list(dataset.get("records"))
+                else:
+                    train_records = self._json_list(job.get("train_inputs"))
+
+                validation_inputs = self._json_list(job.get("val_inputs"))
+                if not validation_inputs and job.get("validation_dataset_id"):
+                    validation_dataset = await self.get_optimization_dataset(str(job["validation_dataset_id"]))
+                    if validation_dataset is None:
+                        raise RuntimeError("validation optimization dataset not found")
+                    validation_inputs = [
+                        {
+                            "input": self._json_dict(record.get("input")),
+                            "label": self._json_dict(record.get("label")),
+                        }
+                        for record in self._json_list(validation_dataset.get("records"))
+                    ]
+
+                execution_lm_profile = None
+                if job.get("execution_lm_profile_id"):
+                    execution_lm_profile = await self.get_lm_profile(str(job["execution_lm_profile_id"]))
+                    if execution_lm_profile is None:
+                        raise RuntimeError("execution lm profile not found")
+
+                helper_lm_profile = None
+                if job.get("helper_lm_profile_id"):
+                    helper_lm_profile = await self.get_lm_profile(str(job["helper_lm_profile_id"]))
+                    if helper_lm_profile is None:
+                        raise RuntimeError("helper lm profile not found")
+
+                artifact_root = Path("/tmp/dspy-trainer/optimization_artifacts") / optimization_job_id
+                optimization_result = run_bundle_optimization(
+                    bundle_path=str(job["bundle_path"]),
+                    strategy=str(job["strategy"]),
+                    train_records=train_records,
+                    val_inputs=validation_inputs,
+                    artifact_dir=str(artifact_root),
+                    num_threads=int(job["num_threads"]),
+                    execution_lm_profile=execution_lm_profile,
+                    helper_lm_profile=helper_lm_profile,
+                    dspy_config=self._json_dict(job.get("normalized_config")).get("dspy_config", {}),
+                )
+            else:
+                from app.executor.module_runner import run_bundle_eval
+
+                evaluation_result = run_bundle_eval(
+                    bundle_path=job["bundle_path"],
+                    eval_inputs=job["val_inputs"] or job["train_inputs"],
+                    num_threads=job["num_threads"],
+                )
+                optimization_result = {
+                    "artifact_path": f"optimization://{optimization_job_id}/score-{evaluation_result['score_pct']}",
+                    "artifact_metadata": {
+                        "artifact_type": "optimization_placeholder",
+                        "evaluation_item_count": len(evaluation_result["items"]),
+                    },
+                    "telemetry_summary": {
+                        "strategy": strategy,
+                        "score_pass_threshold": evaluation_result.get("score_pass_threshold"),
+                    },
+                    "comparison_summary": {
+                        "baseline_score_pct": evaluation_result["score_pct"],
+                        "optimized_score_pct": evaluation_result["score_pct"],
+                        "score_delta_pct": 0.0,
+                        "baseline_item_count": len(evaluation_result["items"]),
+                        "optimized_item_count": len(evaluation_result["items"]),
+                    },
+                }
+
             now2 = datetime.now(timezone.utc)
             async with self.postgres_pool.acquire() as conn:
                 await conn.execute(
-                    "update optimization_jobs set status='succeeded', artifact_path=$2, failure_reason=null, updated_at=$3 where id=$1",
+                    """
+                    update optimization_jobs
+                    set status='succeeded',
+                        artifact_path=$2,
+                        artifact_metadata=$3::jsonb,
+                        telemetry_summary=$4::jsonb,
+                        comparison_summary=$5::jsonb,
+                        failure_reason=null,
+                        finished_at=$6,
+                        updated_at=$6
+                    where id=$1
+                    """,
                     optimization_job_id,
-                    artifact_path,
+                    optimization_result["artifact_path"],
+                    json.dumps(optimization_result.get("artifact_metadata") or {}),
+                    json.dumps(optimization_result.get("telemetry_summary") or {}),
+                    json.dumps(optimization_result.get("comparison_summary") or {}),
                     now2,
                 )
         except Exception as exc:
             now3 = datetime.now(timezone.utc)
             async with self.postgres_pool.acquire() as conn:
                 await conn.execute(
-                    "update optimization_jobs set status='failed', failure_reason=$2, updated_at=$3 where id=$1",
+                    "update optimization_jobs set status='failed', failure_reason=$2, finished_at=$3, updated_at=$3 where id=$1",
                     optimization_job_id,
                     str(exc),
                     now3,

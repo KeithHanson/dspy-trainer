@@ -103,10 +103,46 @@ class OptimizationJobCreateRequest(BaseModel):
     project_id: str
     module_import_id: str
     bundle_path: str
+    strategy: str = "bootstrap_fewshot"
+    objective: str = "optimize_demo_quality"
+    dataset_id: str | None = None
+    validation_dataset_id: str | None = None
+    execution_lm_profile_id: str | None = None
+    helper_lm_profile_id: str | None = None
+    request_config: dict[str, Any] = Field(default_factory=dict)
+    normalized_config: dict[str, Any] = Field(default_factory=dict)
     train_inputs: list[dict[str, Any]] = Field(default_factory=list)
     val_inputs: list[dict[str, Any]] = Field(default_factory=list)
     num_threads: int = 1
     source_eval_job_id: str | None = None
+
+
+class OptimizationDatasetCreateRequest(BaseModel):
+    project_id: str
+    module_import_id: str
+    name: str
+    dataset_kind: str
+    source_type: str
+    source_eval_job_ids: list[str] = Field(default_factory=list)
+    source_filters: dict[str, Any] = Field(default_factory=dict)
+    records: list[dict[str, Any]] = Field(default_factory=list)
+    input_keys: list[str] = Field(default_factory=list)
+    label_keys: list[str] = Field(default_factory=list)
+    optimizer_contract: str = "dspy_example_v1"
+    provenance_summary: dict[str, Any] = Field(default_factory=dict)
+    notes: str | None = None
+
+
+class OptimizationDatasetDeriveRequest(BaseModel):
+    project_id: str
+    module_import_id: str
+    name: str = "Derived optimization dataset"
+    dataset_kind: str
+    source_type: str
+    source_eval_job_ids: list[str] = Field(default_factory=list)
+    source_filters: dict[str, Any] = Field(default_factory=dict)
+    notes: str | None = None
+    persist: bool = False
 
 
 class AgentRunPlanCreateRequest(BaseModel):
@@ -442,18 +478,47 @@ async def run_eval_job_endpoint(eval_job_id: str, request: Request):
 @app.post("/optimization/jobs")
 async def create_optimization_job(request: Request, payload: OptimizationJobCreateRequest):
     services: AppServices = request.app.state.services
+    try:
+        request_config, normalized_config = services.prepare_optimization_job_payload(
+            strategy=payload.strategy,
+            objective=payload.objective,
+            dataset_id=payload.dataset_id,
+            validation_dataset_id=payload.validation_dataset_id,
+            execution_lm_profile_id=payload.execution_lm_profile_id,
+            helper_lm_profile_id=payload.helper_lm_profile_id,
+            request_config=payload.request_config,
+            client_normalized_config=payload.normalized_config,
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
     result = await services.create_optimization_job(
         project_id=payload.project_id,
         module_import_id=payload.module_import_id,
         bundle_path=payload.bundle_path,
+        strategy=payload.strategy,
+        objective=payload.objective,
+        dataset_id=payload.dataset_id,
+        validation_dataset_id=payload.validation_dataset_id,
+        execution_lm_profile_id=payload.execution_lm_profile_id,
+        helper_lm_profile_id=payload.helper_lm_profile_id,
+        request_config=request_config,
+        normalized_config=normalized_config,
         train_inputs=payload.train_inputs,
         val_inputs=payload.val_inputs,
         num_threads=payload.num_threads,
         source_eval_job_id=payload.source_eval_job_id,
     )
     if result is None:
-        return JSONResponse(status_code=404, content={"error": "module not found"})
+        return JSONResponse(status_code=404, content={"error": "module, dataset, or lm profile not found"})
     return result
+
+
+@app.get("/optimization/jobs")
+async def list_optimization_jobs(request: Request, limit: int = 50, offset: int = 0):
+    services: AppServices = request.app.state.services
+    safe_limit = max(1, min(limit, 500))
+    safe_offset = max(0, offset)
+    return await services.list_optimization_jobs(limit=safe_limit, offset=safe_offset)
 
 
 @app.get("/optimization/jobs/{optimization_job_id}")
@@ -480,6 +545,65 @@ async def run_optimization_job_endpoint(optimization_job_id: str, request: Reque
     result = await services.run_optimization_job(optimization_job_id)
     if result is None:
         return JSONResponse(status_code=404, content={"error": "optimization job not found"})
+    return result
+
+
+@app.post("/optimization/datasets")
+async def create_optimization_dataset(request: Request, payload: OptimizationDatasetCreateRequest):
+    services: AppServices = request.app.state.services
+    result = await services.create_optimization_dataset(
+        project_id=payload.project_id,
+        module_import_id=payload.module_import_id,
+        name=payload.name,
+        dataset_kind=payload.dataset_kind,
+        source_type=payload.source_type,
+        source_eval_job_ids=payload.source_eval_job_ids,
+        source_filters=payload.source_filters,
+        records=payload.records,
+        input_keys=payload.input_keys,
+        label_keys=payload.label_keys,
+        optimizer_contract=payload.optimizer_contract,
+        provenance_summary=payload.provenance_summary,
+        notes=payload.notes,
+    )
+    if result is None:
+        return JSONResponse(status_code=404, content={"error": "module not found"})
+    return result
+
+
+@app.post("/optimization/datasets/derive")
+async def derive_optimization_dataset(request: Request, payload: OptimizationDatasetDeriveRequest):
+    services: AppServices = request.app.state.services
+    result = await services.derive_optimization_dataset(
+        project_id=payload.project_id,
+        module_import_id=payload.module_import_id,
+        name=payload.name,
+        dataset_kind=payload.dataset_kind,
+        source_type=payload.source_type,
+        source_eval_job_ids=payload.source_eval_job_ids,
+        source_filters=payload.source_filters,
+        notes=payload.notes,
+        persist=payload.persist,
+    )
+    if result is None:
+        return JSONResponse(status_code=404, content={"error": "eval job or module not found"})
+    return result
+
+
+@app.get("/optimization/datasets")
+async def list_optimization_datasets(request: Request, limit: int = 50, offset: int = 0):
+    services: AppServices = request.app.state.services
+    safe_limit = max(1, min(limit, 500))
+    safe_offset = max(0, offset)
+    return await services.list_optimization_datasets(limit=safe_limit, offset=safe_offset)
+
+
+@app.get("/optimization/datasets/{dataset_id}")
+async def get_optimization_dataset(dataset_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    result = await services.get_optimization_dataset(dataset_id)
+    if result is None:
+        return JSONResponse(status_code=404, content={"error": "optimization dataset not found"})
     return result
 
 
