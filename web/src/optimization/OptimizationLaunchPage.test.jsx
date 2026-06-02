@@ -1,0 +1,265 @@
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router-dom";
+import { vi } from "vitest";
+import { OptimizationLaunchPage } from "./OptimizationLaunchPage";
+
+describe("OptimizationLaunchPage", () => {
+  it("submits scaffolded optimization payload with strategy defaults", async () => {
+    const fetchMock = vi.fn((url, init) => {
+      if (String(url).endsWith("/modules") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([
+            { id: "mod-1", bundle_name: "Echo Support", validation_status: "passed", source_ref: "module.zip" },
+          ]),
+        });
+      }
+      if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([
+            { id: "lm-exec-1", name: "Execution Profile" },
+            { id: "lm-help-2", name: "Helper Profile" },
+          ]),
+        });
+      }
+      if (String(url).endsWith("/optimization/datasets") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([
+            { id: "ods-1", name: "Demo corpus", dataset_kind: "demo" },
+          ]),
+        });
+      }
+      if (String(url).endsWith("/modules/mod-1/agent-run-plans?limit=100&offset=0") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([
+            { id: "plan-123", plan_name: "Baseline run plan", status: "finished" },
+            { id: "plan-124", plan_name: "Retry run plan", status: "running" },
+          ]),
+        });
+      }
+      if (String(url).endsWith("/optimization/jobs") && init?.method === "POST") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue({ id: "opt-1" }),
+        });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter>
+        <OptimizationLaunchPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByLabelText("Target module")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "MIPROv2" })).toBeInTheDocument();
+    expect(await screen.findByRole("option", { name: /Baseline run plan/ })).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "MIPROv2" }));
+    await userEvent.selectOptions(screen.getByLabelText("Execution LM profile"), "lm-exec-1");
+    await userEvent.selectOptions(screen.getByLabelText("Helper LM profile (optional)"), "lm-help-2");
+    await userEvent.selectOptions(screen.getByLabelText("Training dataset (optional)"), "ods-1");
+    await userEvent.selectOptions(screen.getByLabelText("Source run plan (optional)"), "plan-123");
+
+    await userEvent.click(screen.getByRole("button", { name: "Launch optimization job" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringMatching(/\/optimization\/jobs$/),
+      expect.objectContaining({ method: "POST" }),
+    ));
+
+    const postCall = fetchMock.mock.calls.find(([callUrl, callInit]) =>
+      String(callUrl).endsWith("/optimization/jobs") && callInit?.method === "POST",
+    );
+    expect(postCall).toBeTruthy();
+    const payload = JSON.parse(postCall[1].body);
+
+    expect(payload.strategy).toBe("miprov2");
+    expect(payload.objective).toBe("optimize_demo_quality");
+    expect(payload.module_import_id).toBe("mod-1");
+    expect(payload.execution_lm_profile_id).toBe("lm-exec-1");
+    expect(payload.helper_lm_profile_id).toBe("lm-help-2");
+    expect(payload.dataset_id).toBe("ods-1");
+    expect(payload.source_eval_job_id).toBe("plan-123");
+    expect(payload.request_config).toMatchObject({
+      budget: "medium",
+      max_bootstrapped_demos: 4,
+      max_labeled_demos: 16,
+    });
+    expect(payload.normalized_config).toMatchObject({ optimizer_family: "miprov2" });
+
+    expect(await screen.findByText(/Optimization job queued/)).toBeInTheDocument();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("scopes source run plans to the selected module and handles no matches", async () => {
+    const fetchMock = vi.fn((url, init) => {
+      if (String(url).endsWith("/modules") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([
+            { id: "mod-1", bundle_name: "Echo Support", validation_status: "passed", source_ref: "module.zip" },
+            { id: "mod-2", bundle_name: "Other Module", validation_status: "passed", source_ref: "module2.zip" },
+          ]),
+        });
+      }
+      if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "lm-exec-1", name: "Execution Profile" }]) });
+      }
+      if (String(url).endsWith("/optimization/datasets") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
+      }
+      if (String(url).endsWith("/modules/mod-1/agent-run-plans?limit=100&offset=0") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([
+            { id: "plan-201", plan_name: "Run Plan One", status: "finished" },
+          ]),
+        });
+      }
+      if (String(url).endsWith("/modules/mod-2/agent-run-plans?limit=100&offset=0") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter>
+        <OptimizationLaunchPage />
+      </MemoryRouter>,
+    );
+
+    const moduleSelect = await screen.findByLabelText("Target module");
+    expect(moduleSelect).toBeInTheDocument();
+    await userEvent.selectOptions(moduleSelect, "mod-2");
+
+    const sourceRunPlanSelect = await screen.findByLabelText("Source run plan (optional)");
+    expect(sourceRunPlanSelect).toBeEnabled();
+    expect(await screen.findByRole("option", { name: "No matching source run plans for this module" })).toBeInTheDocument();
+
+    expect(sourceRunPlanSelect).toHaveValue("");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("accepts paginated source run plan payloads", async () => {
+    const fetchMock = vi.fn((url, init) => {
+      if (String(url).endsWith("/modules") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([
+            { id: "mod-1", bundle_name: "Echo Support", validation_status: "passed", source_ref: "module.zip" },
+          ]),
+        });
+      }
+      if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "lm-exec-1", name: "Execution Profile" }]) });
+      }
+      if (String(url).endsWith("/optimization/datasets") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
+      }
+      if (String(url).endsWith("/modules/mod-1/agent-run-plans?limit=100&offset=0") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue({
+            items: [
+              { id: "plan-777", plan_name: "Paginated run plan", status: "finished" },
+            ],
+            limit: 100,
+            offset: 0,
+            total: 1,
+            count: 1,
+          }),
+        });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter>
+        <OptimizationLaunchPage />
+      </MemoryRouter>,
+    );
+
+    const sourceRunPlanSelect = await screen.findByLabelText("Source run plan (optional)");
+    expect(await screen.findByRole("option", { name: /Paginated run plan/ })).toBeInTheDocument();
+    expect(sourceRunPlanSelect).toHaveValue("");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps the source run plan selector disabled until a module is selected", async () => {
+    const fetchMock = vi.fn((url, init) => {
+      if (String(url).endsWith("/modules") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
+      }
+      if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
+      }
+      if (String(url).endsWith("/optimization/datasets") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter>
+        <OptimizationLaunchPage />
+      </MemoryRouter>,
+    );
+
+    const sourceRunPlanSelect = await screen.findByLabelText("Source run plan (optional)");
+    expect(sourceRunPlanSelect).toBeDisabled();
+    expect(screen.getByRole("option", { name: "Select a validated module first" })).toBeInTheDocument();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("requires an execution LM profile before submit", async () => {
+    const fetchMock = vi.fn((url, init) => {
+      if (String(url).endsWith("/modules") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([
+            { id: "mod-1", bundle_name: "Echo Support", validation_status: "passed", source_ref: "module.zip" },
+          ]),
+        });
+      }
+      if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
+      }
+      if (String(url).endsWith("/optimization/datasets") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter>
+        <OptimizationLaunchPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByRole("button", { name: "Launch optimization job" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Launch optimization job" }));
+
+    expect(await screen.findByText("Execution LM profile is required to launch optimization.")).toBeInTheDocument();
+    const postCall = fetchMock.mock.calls.find(([callUrl, callInit]) =>
+      String(callUrl).endsWith("/optimization/jobs") && callInit?.method === "POST",
+    );
+    expect(postCall).toBeUndefined();
+
+    vi.unstubAllGlobals();
+  });
+});

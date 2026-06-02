@@ -73,6 +73,6 @@ describe("App auth gating", () => {
     );
 
     expect(screen.getByRole("link", { name: "Overview" })).toBeInTheDocument();
-    expect(await screen.findByText("Good morning, Test")).toBeInTheDocument();
+    expect(await screen.findByText("Test User")).toBeInTheDocument();
   });
 });

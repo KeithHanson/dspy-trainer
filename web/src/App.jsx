@@ -10,6 +10,7 @@ import { BundlesPage } from "./bundles/BundlesPage";
 import { PlansPage } from "./plans/PlansPage";
 import { RunsPage } from "./runs/RunsPage";
 import { LmProfileEditorPage, LmProfilesPage } from "./lmProfiles/LmProfilesPage";
+import { OptimizationLaunchPage } from "./optimization/OptimizationLaunchPage";
 
 function PlaceholderPage({ title, description }) {
   return (
@@ -65,6 +66,7 @@ export function App() {
         <Route path="/dashboard" element={<DashboardPage user={user} />} />
         <Route path="/bundles" element={<BundlesPage />} />
         <Route path="/plans" element={<PlansPage />} />
+        <Route path="/optimization" element={<OptimizationLaunchPage />} />
         <Route path="/runs" element={<RunsPage />} />
         <Route path="/lm-profiles" element={<LmProfilesPage />} />
         <Route path="/lm-profiles/new" element={<LmProfileEditorPage />} />

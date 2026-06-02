@@ -48,6 +48,7 @@ async def fake_create_eval_job(
     job = {
         "id": job_id,
         "status": "queued",
+        "eval_name": f"eval-{job_id}",
         "project_id": project_id,
         "module_import_id": module_import_id,
         "scenario_id": scenario_id,
@@ -124,6 +125,27 @@ async def fake_list_eval_run_items(self, eval_job_id, limit, offset):
         "count": len(page),
         "total": len(items),
     }
+
+
+async def fake_list_eval_jobs_for_module(self, module_import_id, limit, offset):
+    if module_import_id not in MODULES:
+        return None
+
+    jobs = [
+        {
+            "id": job["id"],
+            "status": job["status"],
+            "eval_name": job["eval_name"],
+            "created_at": job["created_at"],
+            "updated_at": job["updated_at"],
+        }
+        for job in EVAL_JOBS.values()
+        if job["module_import_id"] == module_import_id
+    ]
+
+    jobs.sort(key=lambda item: item["id"], reverse=True)
+    paged = jobs[offset : offset + limit]
+    return paged
 
 
 async def fake_set_eval_job_status(self, eval_job_id, status, failure_reason=None):
@@ -235,6 +257,7 @@ def _patch_services(monkeypatch):
     monkeypatch.setattr(main_mod.AppServices, "cancel_eval_job", fake_cancel_eval_job)
     monkeypatch.setattr(main_mod.AppServices, "seed_eval_run_items", fake_seed_eval_run_items)
     monkeypatch.setattr(main_mod.AppServices, "list_eval_run_items", fake_list_eval_run_items)
+    monkeypatch.setattr(main_mod.AppServices, "list_eval_jobs_for_module", fake_list_eval_jobs_for_module)
     monkeypatch.setattr(main_mod.AppServices, "set_eval_job_status", fake_set_eval_job_status)
     monkeypatch.setattr(main_mod.AppServices, "create_eval_run_item", fake_create_eval_run_item)
     monkeypatch.setattr(main_mod.AppServices, "set_eval_job_mlflow", fake_set_eval_job_mlflow)
@@ -250,6 +273,8 @@ def _reset_state():
     global NEXT_JOB_ID
     global NEXT_ITEM_ID
     global NEXT_TRACE_ID
+    MODULES.clear()
+    MODULES.update({"mod-1"})
     EVAL_JOBS.clear()
     EVAL_ITEMS.clear()
     NEXT_JOB_ID = 1
@@ -428,3 +453,58 @@ def test_eval_job_run_repeats_and_persists_items(monkeypatch):
         assert items["items"][0]["repeat_index"] == 0
         assert items["items"][0]["item_index"] == 0
         assert items["items"][0]["score"] == 1.0
+
+
+def test_module_eval_jobs_list(monkeypatch):
+    _reset_state()
+    MODULES.add("mod-2")
+    _patch_services(monkeypatch)
+
+    with TestClient(main_mod.app) as client:
+        created_mod_one = [
+            client.post(
+                "/eval/jobs",
+                json={
+                    "project_id": "proj-1",
+                    "module_import_id": "mod-1",
+                    "scenario_id": "scenario-a",
+                    "dataset_version": "v1",
+                    "bundle_path": "examples/module_bundles/simple_echo_agent",
+                },
+            ).json()["id"]
+            for _ in range(2)
+        ]
+
+        created_mod_two = client.post(
+            "/eval/jobs",
+            json={
+                "project_id": "proj-1",
+                "module_import_id": "mod-2",
+                "scenario_id": "scenario-b",
+                "dataset_version": "v1",
+                "bundle_path": "examples/module_bundles/simple_echo_agent",
+            },
+        ).json()["id"]
+
+        response = client.get("/modules/mod-1/eval-jobs")
+        assert response.status_code == 200
+        payload = response.json()
+        assert len(payload) == 2
+        assert all(item["id"] in set(created_mod_one) for item in payload)
+        assert all(item["status"] == "queued" for item in payload)
+        assert any(item["eval_name"] for item in payload)
+        assert not any(item["id"] == created_mod_two for item in payload)
+
+        paged = client.get("/modules/mod-1/eval-jobs", params={"limit": 1, "offset": 1})
+        assert paged.status_code == 200
+        paged_payload = paged.json()
+        assert len(paged_payload) == 1
+
+
+def test_module_eval_jobs_list_missing_module_returns_404(monkeypatch):
+    _reset_state()
+    _patch_services(monkeypatch)
+    with TestClient(main_mod.app) as client:
+        response = client.get("/modules/does-not-exist/eval-jobs")
+        assert response.status_code == 404
+        assert response.json()["error"] == "module not found"

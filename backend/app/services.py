@@ -780,6 +780,43 @@ class AppServices:
             "updated_at": row["updated_at"].isoformat(),
         }
 
+    async def list_eval_jobs_for_module(
+        self,
+        module_import_id: str,
+        limit: int,
+        offset: int,
+    ) -> list[dict[str, Any]] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            module_exists = await conn.fetchval("select 1 from module_imports where id = $1", module_import_id)
+            if module_exists is None:
+                return None
+            rows = await conn.fetch(
+                """
+                select id, status, eval_name, created_at, updated_at
+                from eval_jobs
+                where module_import_id = $1
+                order by created_at desc
+                limit $2 offset $3
+                """,
+                module_import_id,
+                limit,
+                offset,
+            )
+        jobs: list[dict[str, Any]] = []
+        for row in rows:
+            jobs.append(
+                {
+                    "id": row["id"],
+                    "status": row["status"],
+                    "eval_name": row["eval_name"],
+                    "created_at": row["created_at"].isoformat(),
+                    "updated_at": row["updated_at"].isoformat(),
+                },
+            )
+        return jobs
+
     async def cancel_eval_job(self, eval_job_id: str) -> dict[str, Any] | None:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
@@ -2659,6 +2696,41 @@ class AppServices:
                 "completed_tasks": row["completed_tasks"],
                 "failed_tasks": row["failed_tasks"],
                 "failure_reason": row["failure_reason"],
+                "created_at": row["created_at"].isoformat(),
+                "updated_at": row["updated_at"].isoformat(),
+            }
+            for row in rows
+        ]
+
+    async def list_agent_run_plans_for_module(
+        self,
+        module_import_id: str,
+        limit: int,
+        offset: int,
+    ) -> list[dict[str, Any]] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            module_exists = await conn.fetchval("select 1 from module_imports where id = $1", module_import_id)
+            if module_exists is None:
+                return None
+            rows = await conn.fetch(
+                """
+                select id, status, plan_name, created_at, updated_at
+                from agent_run_plans
+                where module_import_id = $1
+                order by created_at desc
+                limit $2 offset $3
+                """,
+                module_import_id,
+                limit,
+                offset,
+            )
+        return [
+            {
+                "id": row["id"],
+                "status": row["status"],
+                "plan_name": row["plan_name"],
                 "created_at": row["created_at"].isoformat(),
                 "updated_at": row["updated_at"].isoformat(),
             }

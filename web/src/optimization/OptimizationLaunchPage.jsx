@@ -1,0 +1,508 @@
+import { useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
+import { Button } from "../components/primitives/Button";
+import { Icon } from "../components/Icon";
+import { ErrorState } from "../components/states/ErrorState";
+import { LoadingState } from "../components/states/LoadingState";
+
+const PROJECT_ID = "proj-1";
+
+const STRATEGY_OPTIONS = [
+  {
+    id: "bootstrap_fewshot",
+    label: "BootstrapFewShot",
+    objective: "optimize_demo_quality",
+    datasetKind: "demo",
+    requestConfigDefaults: {
+      max_bootstrapped_demos: 4,
+      max_labeled_demos: 16,
+    },
+    description: "Bootstrap-style optimization from few-shot demos with a strong execution + fallback teacher model path.",
+  },
+  {
+    id: "miprov2",
+    label: "MIPROv2",
+    objective: "optimize_demo_quality",
+    datasetKind: "demo",
+    requestConfigDefaults: {
+      budget: "medium",
+      max_bootstrapped_demos: 4,
+      max_labeled_demos: 16,
+    },
+    description: "Prompt synthesis and selection with separate execution and helper roles for richer candidate search.",
+  },
+  {
+    id: "gepa",
+    label: "GEPA",
+    objective: "optimize_judge_feedback",
+    datasetKind: "feedback",
+    requestConfigDefaults: {
+      budget: "medium",
+      track_stats: true,
+    },
+    description: "Generation-anchored optimization that tunes from feedback-style datasets using a judge loop.",
+  },
+];
+
+const STRATEGY_BY_ID = Object.fromEntries(STRATEGY_OPTIONS.map((strategy) => [strategy.id, strategy]));
+
+function toArray(payload) {
+  return Array.isArray(payload) ? payload : [];
+}
+
+function toItemList(payload) {
+  if (Array.isArray(payload)) {
+    return payload;
+  }
+  if (payload && Array.isArray(payload.items)) {
+    return payload.items;
+  }
+  return [];
+}
+
+function formatDateTime(value) {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return "unknown";
+  }
+  return parsed.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function resolveBundlePath(moduleRow) {
+  return moduleRow?.source_ref || moduleRow?.bundle_name || "uploaded-bundle.zip";
+}
+
+export function OptimizationLaunchPage() {
+  const apiBase = useMemo(() => (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, ""), []);
+  const [modules, setModules] = useState([]);
+  const [lmProfiles, setLmProfiles] = useState([]);
+  const [datasets, setDatasets] = useState([]);
+  const [selectedModuleId, setSelectedModuleId] = useState("");
+  const [selectedStrategy, setSelectedStrategy] = useState(STRATEGY_OPTIONS[0]?.id || "bootstrap_fewshot");
+  const [executionLmProfileId, setExecutionLmProfileId] = useState("");
+  const [helperLmProfileId, setHelperLmProfileId] = useState("");
+  const [datasetId, setDatasetId] = useState("");
+  const [validationDatasetId, setValidationDatasetId] = useState("");
+  const [sourceRunPlanId, setSourceRunPlanId] = useState("");
+  const [sourceRunPlans, setSourceRunPlans] = useState([]);
+  const [isLoadingModules, setIsLoadingModules] = useState(false);
+  const [isLoadingProfiles, setIsLoadingProfiles] = useState(false);
+  const [isLoadingDatasets, setIsLoadingDatasets] = useState(false);
+  const [isLoadingSourceRunPlans, setIsLoadingSourceRunPlans] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const [validationError, setValidationError] = useState("");
+  const [createdJobId, setCreatedJobId] = useState("");
+
+  const validModules = useMemo(() => modules.filter((item) => item.validation_status === "passed"), [modules]);
+  const selectedModule = useMemo(() => modules.find((item) => item.id === selectedModuleId) || null, [modules, selectedModuleId]);
+  const selectedStrategyDef = STRATEGY_BY_ID[selectedStrategy] || STRATEGY_OPTIONS[0];
+  const selectedDataset = useMemo(() => datasets.find((item) => item.id === datasetId) || null, [datasets, datasetId]);
+  const datasetKindMismatch =
+    selectedDataset && selectedStrategyDef?.datasetKind && selectedDataset.dataset_kind && selectedDataset.dataset_kind !== selectedStrategyDef.datasetKind;
+  const isLoading = isLoadingModules || isLoadingProfiles || isLoadingDatasets;
+
+  const defaultRequestConfig = useMemo(
+    () => ({
+      ...(selectedStrategyDef?.requestConfigDefaults ? { ...selectedStrategyDef.requestConfigDefaults } : {}),
+    }),
+    [selectedStrategyDef],
+  );
+
+  useEffect(() => {
+    const loadModules = async () => {
+      setIsLoadingModules(true);
+      setError("");
+      try {
+        const modulesResp = await fetch(`${apiBase}/modules`, { method: "GET" });
+        if (!modulesResp.ok) {
+          throw new Error(`Could not load modules (${modulesResp.status})`);
+        }
+        const payload = await modulesResp.json();
+        const moduleRows = toArray(payload);
+        setModules(moduleRows);
+        if (!selectedModuleId && moduleRows.length) {
+          const firstValid = moduleRows.find((item) => item.validation_status === "passed");
+          if (firstValid) {
+            setSelectedModuleId(firstValid.id);
+          }
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Could not load modules");
+      } finally {
+        setIsLoadingModules(false);
+      }
+    };
+
+    const loadProfiles = async () => {
+      setIsLoadingProfiles(true);
+      try {
+        const response = await fetch(`${apiBase}/lm-profiles`, { method: "GET" });
+        if (!response.ok) {
+          return;
+        }
+        const payload = await response.json();
+        const profileRows = toArray(payload);
+        setLmProfiles(profileRows);
+        if (!executionLmProfileId && profileRows.length) {
+          setExecutionLmProfileId(profileRows[0].id || "");
+        }
+      } catch {
+        setLmProfiles([]);
+      } finally {
+        setIsLoadingProfiles(false);
+      }
+    };
+
+    const loadDatasets = async () => {
+      setIsLoadingDatasets(true);
+      try {
+        const response = await fetch(`${apiBase}/optimization/datasets`, { method: "GET" });
+        if (!response.ok) {
+          return;
+        }
+        const payload = await response.json();
+        const datasetRows = toArray(payload);
+        setDatasets(datasetRows);
+      } catch {
+        setDatasets([]);
+      } finally {
+        setIsLoadingDatasets(false);
+      }
+    };
+
+    loadModules();
+    loadProfiles();
+    loadDatasets();
+  }, [apiBase, executionLmProfileId, selectedModuleId]);
+
+  useEffect(() => {
+    const loadSourceRunPlans = async () => {
+      if (!selectedModuleId) {
+        setSourceRunPlans([]);
+        setSourceRunPlanId("");
+        return;
+      }
+
+      setIsLoadingSourceRunPlans(true);
+      try {
+        const response = await fetch(`${apiBase}/modules/${selectedModuleId}/agent-run-plans?limit=100&offset=0`, { method: "GET" });
+        if (!response.ok) {
+          setSourceRunPlans([]);
+          setSourceRunPlanId("");
+          return;
+        }
+        const payload = await response.json();
+        const planRows = toItemList(payload);
+        setSourceRunPlans(planRows);
+        setSourceRunPlanId((currentId) => (planRows.some((runPlan) => runPlan?.id === currentId) ? currentId : ""));
+      } catch {
+        setSourceRunPlans([]);
+      } finally {
+        setIsLoadingSourceRunPlans(false);
+      }
+    };
+
+    loadSourceRunPlans();
+  }, [apiBase, selectedModuleId]);
+
+  const submit = async () => {
+    setValidationError("");
+    setError("");
+    setCreatedJobId("");
+    if (!selectedModuleId) {
+      setValidationError("Select a validated module bundle.");
+      return;
+    }
+    if (!executionLmProfileId) {
+      setValidationError("Execution LM profile is required to launch optimization.");
+      return;
+    }
+    if (datasetKindMismatch) {
+      setValidationError(`The selected dataset is not suitable for ${selectedStrategyDef.label}. Use ${selectedStrategyDef.datasetKind} dataset kind.`);
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const response = await fetch(`${apiBase}/optimization/jobs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          project_id: PROJECT_ID,
+          module_import_id: selectedModuleId,
+          bundle_path: resolveBundlePath(selectedModule),
+          strategy: selectedStrategy,
+          objective: selectedStrategyDef.objective || "optimize_demo_quality",
+          dataset_id: datasetId || null,
+          validation_dataset_id: validationDatasetId || null,
+          execution_lm_profile_id: executionLmProfileId,
+          helper_lm_profile_id: helperLmProfileId || null,
+          request_config: defaultRequestConfig,
+          normalized_config: {
+            optimizer_family: selectedStrategy,
+          },
+          train_inputs: [],
+          val_inputs: [],
+          num_threads: 1,
+          source_eval_job_id: sourceRunPlanId.trim() || null,
+        }),
+      });
+      if (!response.ok) {
+        const detail = await readApiError(response);
+        throw new Error(detail || `Could not launch optimization job (${response.status})`);
+      }
+      const payload = await response.json();
+      setCreatedJobId(typeof payload?.id === "string" ? payload.id : "");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not launch optimization job");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <section className="page">
+      <div className="page-body optimization-wrap">
+        <header className="row between optimization-head">
+          <div className="col gap-1">
+            <h1 className="t-display" style={{ fontSize: 22 }}>Optimization Launch</h1>
+            <p className="muted t-sm">Create an optimization run with strategy family, role routing, and module context.</p>
+          </div>
+          <Button variant="primary" onClick={submit} disabled={isSubmitting || isLoading}>
+            {isSubmitting ? "Launching..." : "Launch optimization job"}
+          </Button>
+        </header>
+
+        {isLoading ? <LoadingState label="Loading optimization context..." /> : null}
+        {validationError ? <ErrorState title="Validation required" description={validationError} /> : null}
+        {error ? <ErrorState title="Could not launch optimization" description={error} /> : null}
+
+        {createdJobId ? (
+          <div className="optimization-success" role="status" aria-live="polite">
+            <div className="row gap-2" style={{ marginBottom: 8 }}>
+              <Icon name="activity" size={14} />
+              <span className="optimization-success-title">Optimization job queued</span>
+            </div>
+                <span className="optimization-success-id">Job ID: {createdJobId}</span>
+            <div className="optimization-success-copy">
+              Use <Link className="lnk" to="/runs">Runs</Link> for current run monitoring while this scaffold matures.
+            </div>
+          </div>
+        ) : null}
+
+        <section className="panel card-pad optimization-form-block">
+          <h2 className="t-h2">Target module and context</h2>
+
+          <label className="col gap-1" htmlFor="optimization-module-select">
+            <span className="t-label">Target module</span>
+            <select
+              id="optimization-module-select"
+              className="bundles-input"
+              value={selectedModuleId}
+              onChange={(event) => setSelectedModuleId(event.target.value)}
+            >
+              <option value="">Select a validated module...</option>
+                {validModules.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {`${item.bundle_name || item.source_ref || item.id} (v${item.bundle_version || "unknown"}, ${formatDateTime(item.created_at)})`}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+          <FieldHelp text="The selected module is the source for optimization. Re-run its bundle upload if this is stale." />
+
+          <label className="col gap-1" htmlFor="optimization-source-run">
+            <span className="t-label">Source run plan (optional)</span>
+            <select
+              id="optimization-source-run"
+              className="bundles-input"
+              value={sourceRunPlanId}
+              onChange={(event) => setSourceRunPlanId(event.target.value)}
+              disabled={!selectedModuleId}
+            >
+              <option value="">
+                {selectedModuleId
+                   ? isLoadingSourceRunPlans
+                     ? "Loading source run plans..."
+                     : sourceRunPlans.length
+                       ? "Select a source run plan..."
+                       : "No matching source run plans for this module"
+                   : "Select a validated module first"}
+              </option>
+                {sourceRunPlans.map((plan) => (
+                  <option key={plan.id} value={plan.id}>
+                    {`${plan.plan_name || plan.id} (${plan.status || "unknown"}, ${formatDateTime(plan.created_at)})`}
+                  </option>
+                ))}
+              </select>
+          </label>
+          <FieldHelp
+            text={
+                !selectedModuleId
+                  ? "Select a validated module to scope source runs/plans by module."
+                  : sourceRunPlans.length
+                    ? "Optional. Scope this optimization to one previously run plan for the selected module."
+                    : "No source runs/plans were found for the selected module."
+             }
+           />
+        </section>
+
+        <section className="panel card-pad optimization-form-block">
+          <div className="row between" style={{ marginBottom: 8 }}>
+            <h2 className="t-h2">Strategy family</h2>
+            <span className="t-label">Core defaults applied</span>
+          </div>
+          <div className="optimization-strategy-grid">
+            {STRATEGY_OPTIONS.map((strategy) => (
+                <button
+                  key={strategy.id}
+                  type="button"
+                  aria-label={strategy.label}
+                  className={`optimization-strategy-card ${selectedStrategy === strategy.id ? "optimization-strategy-card-active" : ""}`}
+                  onClick={() => setSelectedStrategy(strategy.id)}
+                >
+                <div className="row between">
+                  <span className="t-h2">{strategy.label}</span>
+                  {selectedStrategy === strategy.id ? <span className="optimization-strategy-badge">Selected</span> : null}
+                </div>
+                <div className="cap muted" style={{ marginTop: 6 }}>{strategy.description}</div>
+                <pre className="optimization-request-config-preview" aria-label={`${strategy.label} defaults`}>
+                  {JSON.stringify(strategy.requestConfigDefaults, null, 2)}
+                </pre>
+              </button>
+            ))}
+          </div>
+          <FieldHelp
+            text={`${selectedStrategyDef.label} objective: ${selectedStrategyDef.objective}. This scaffold currently submits offline execution with defaults and selected roles.`}
+          />
+        </section>
+
+        <section className="panel card-pad optimization-form-block optimization-grid-2">
+          <div className="col gap-2">
+            <h2 className="t-h2">Execution roles</h2>
+            <label className="col gap-1" htmlFor="optimization-exec-lm">
+              <span className="t-label">Execution LM profile</span>
+              <select
+                id="optimization-exec-lm"
+                className="bundles-input"
+                value={executionLmProfileId}
+                onChange={(event) => setExecutionLmProfileId(event.target.value)}
+              >
+                <option value="">Select an execution LM...</option>
+                {lmProfiles.map((profile) => (
+                  <option key={profile.id} value={profile.id}>{profile.name || profile.id}</option>
+                ))}
+              </select>
+            </label>
+            <FieldHelp text="Execution model does optimization work for each candidate and is always required." />
+          </div>
+
+          <div className="col gap-2">
+            <h2 className="t-h2">Helper role</h2>
+            <label className="col gap-1" htmlFor="optimization-helper-lm">
+              <span className="t-label">Helper LM profile (optional)</span>
+              <select
+                id="optimization-helper-lm"
+                className="bundles-input"
+                value={helperLmProfileId}
+                onChange={(event) => setHelperLmProfileId(event.target.value)}
+              >
+                <option value="">Use execution LM as fallback</option>
+                {lmProfiles.map((profile) => (
+                  <option key={`helper-${profile.id}`} value={profile.id}>{profile.name || profile.id}</option>
+                ))}
+              </select>
+            </label>
+            <FieldHelp
+              text={
+                selectedStrategy === "bootstrap_fewshot"
+                  ? "Acts as teacher_lm_profile_id when provided for BootstrapFewShot."
+                  : selectedStrategy === "miprov2"
+                  ? "Acts as prompt_model_lm_profile_id for MIPROv2 prompt proposals."
+                  : "Acts as reflection_lm_profile_id for GEPA and falls back to execution profile when empty."
+              }
+            />
+          </div>
+        </section>
+
+        <section className="panel card-pad optimization-form-block optimization-grid-2">
+          <div className="col gap-2">
+            <label className="col gap-1" htmlFor="optimization-dataset-select">
+              <span className="t-label">Training dataset (optional)</span>
+              <select
+                id="optimization-dataset-select"
+                className="bundles-input"
+                value={datasetId}
+                onChange={(event) => setDatasetId(event.target.value)}
+              >
+                <option value="">No training dataset</option>
+                {datasets.map((dataset) => (
+                  <option key={dataset.id} value={dataset.id}>
+                    {dataset.name || dataset.id} ({dataset.dataset_kind || "n/a"})
+                  </option>
+                ))}
+              </select>
+            </label>
+            <FieldHelp
+              text={
+                selectedStrategyDef.datasetKind
+                  ? `Recommended dataset kind for ${selectedStrategyDef.label}: ${selectedStrategyDef.datasetKind}.`
+                  : "No dataset kind requirement configured for selected strategy."
+              }
+            />
+          </div>
+
+          <div className="col gap-2">
+            <label className="col gap-1" htmlFor="optimization-validation-dataset-select">
+              <span className="t-label">Validation dataset (optional)</span>
+              <select
+                id="optimization-validation-dataset-select"
+                className="bundles-input"
+                value={validationDatasetId}
+                onChange={(event) => setValidationDatasetId(event.target.value)}
+              >
+                <option value="">No validation dataset</option>
+                {datasets.map((dataset) => (
+                  <option key={`val-${dataset.id}`} value={dataset.id}>
+                    {dataset.name || dataset.id} ({dataset.dataset_kind || "n/a"})
+                  </option>
+                ))}
+              </select>
+            </label>
+            <FieldHelp text="Used by backend as optional validation support where the strategy supports separate train/validation partitions." />
+          </div>
+        </section>
+        {datasetKindMismatch ? <ErrorState title="Dataset compatibility" description={`Training dataset kind ${selectedDataset?.dataset_kind || "unknown"} does not match ${selectedStrategyDef.label} expectation.`} /> : null}
+      </div>
+    </section>
+  );
+}
+
+function FieldHelp({ text }) {
+  return (
+    <div className="field-help field-help--optimization row gap-2" role="note">
+      <Icon name="info" size={13} className="field-help-icon" />
+      <span className="cap field-help-copy">{text}</span>
+    </div>
+  );
+}
+
+async function readApiError(response) {
+  try {
+    const payload = await response.json();
+    if (payload && typeof payload.error === "string" && payload.error.trim()) {
+      return payload.error;
+    }
+  } catch {
+    return "";
+  }
+  return "";
+}

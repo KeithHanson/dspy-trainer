@@ -446,6 +446,28 @@ async def get_eval_job(eval_job_id: str, request: Request):
     return result
 
 
+@app.get("/modules/{module_id}/eval-jobs")
+async def list_module_eval_jobs(request: Request, module_id: str, limit: int = 50, offset: int = 0):
+    services: AppServices = request.app.state.services
+    safe_limit = max(1, min(limit, 500))
+    safe_offset = max(0, offset)
+    result = await services.list_eval_jobs_for_module(module_import_id=module_id, limit=safe_limit, offset=safe_offset)
+    if result is None:
+        return JSONResponse(status_code=404, content={"error": "module not found"})
+    return result
+
+
+@app.get("/modules/{module_id}/agent-run-plans")
+async def list_module_agent_run_plans(request: Request, module_id: str, limit: int = 50, offset: int = 0):
+    services: AppServices = request.app.state.services
+    safe_limit = max(1, min(limit, 500))
+    safe_offset = max(0, offset)
+    result = await services.list_agent_run_plans_for_module(module_import_id=module_id, limit=safe_limit, offset=safe_offset)
+    if result is None:
+        return JSONResponse(status_code=404, content={"error": "module not found"})
+    return result
+
+
 @app.post("/eval/jobs/{eval_job_id}/cancel")
 async def cancel_eval_job(eval_job_id: str, request: Request):
     services: AppServices = request.app.state.services

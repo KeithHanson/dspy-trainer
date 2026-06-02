@@ -33,7 +33,7 @@ describe("liveDashboardProvider", () => {
     expect(overview.kpis[1].value).toBe("0.600");
     expect(overview.kpis[2].label).toBe("Pending evals");
     expect(overview.kpis[2].value).toBe("7");
-    expect(overview.kpis[4].label).toBe("Workers online");
+    expect(overview.kpis[4].label).toBe("Available workers");
     expect(overview.kpis[4].value).toBe("1/1");
     expect(overview.liveJob?.id).toBe("plan-1");
     expect(overview.liveJob?.bundleName).toBe("support-triage v3");

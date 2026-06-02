@@ -7,6 +7,7 @@ const PRIMARY_NAV = [
   { to: "/lm-profiles", label: "LM Profiles", icon: "settings" },
   { to: "/bundles", label: "Module Bundles", icon: "box" },
   { to: "/plans", label: "Evaluation Plans", icon: "layers" },
+  { to: "/optimization", label: "Optimization", icon: "search" },
   { to: "/runs", label: "Eval Jobs", icon: "activity" },
 ];
 
@@ -20,6 +21,7 @@ const BREADCRUMB_LABELS = {
   "/bundles": "Module Bundles",
   "/plans": "Evaluation Plans",
   "/lm-profiles": "LM Profiles",
+  "/optimization": "Optimization",
   "/runs": "Eval Jobs",
   "/team": "Team",
   "/settings": "Settings",

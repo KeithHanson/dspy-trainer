@@ -133,6 +133,25 @@ async def fake_delete_agent_run_plan(self, plan_id):
     return True
 
 
+async def fake_list_agent_run_plans_for_module(self, module_import_id, limit, offset):
+    if module_import_id not in MODULES:
+        return None
+
+    items = [
+        {
+            "id": plan["id"],
+            "status": plan["status"],
+            "plan_name": plan.get("plan_name") or f"plan-{plan['id']}",
+            "created_at": plan["created_at"],
+            "updated_at": plan["updated_at"],
+        }
+        for plan in PLANS.values()
+        if plan["module_import_id"] == module_import_id
+    ]
+    items.sort(key=lambda item: item["id"], reverse=True)
+    return items[offset : offset + limit]
+
+
 def _patch_services(monkeypatch):
     monkeypatch.setenv("DSPY_TRAINER_POSTGRES_DSN", "postgresql://postgres:postgres@localhost:5432/dspy_trainer")
     monkeypatch.setattr(main_mod.AppServices, "connect", fake_connect)
@@ -143,6 +162,7 @@ def _patch_services(monkeypatch):
     monkeypatch.setattr(main_mod.AppServices, "enqueue_agent_run_plan", fake_enqueue_agent_run_plan)
     monkeypatch.setattr(main_mod.AppServices, "list_agent_run_tasks", fake_list_agent_run_tasks)
     monkeypatch.setattr(main_mod.AppServices, "delete_agent_run_plan", fake_delete_agent_run_plan)
+    monkeypatch.setattr(main_mod.AppServices, "list_agent_run_plans_for_module", fake_list_agent_run_plans_for_module)
 
 
 def _reset_state():
@@ -239,3 +259,44 @@ def test_agent_run_plan_delete(monkeypatch):
 
         missing = client.get(f"/agent-run-plans/{plan_id}")
         assert missing.status_code == 404
+
+
+def test_module_agent_run_plans_list(monkeypatch):
+    _reset_state()
+    MODULES.add("mod-2")
+    _patch_services(monkeypatch)
+
+    with TestClient(main_mod.app) as client:
+        for module_id in ("mod-1", "mod-2"):
+            for index in range(2):
+                payload = {
+                    "project_id": "proj-1",
+                    "module_import_id": module_id,
+                    "scenario_id": f"scenario-{index}",
+                    "dataset_version": "v1",
+                    "bundle_path": "examples/module_bundles/simple_echo_agent",
+                    "eval_inputs": [
+                        {"input": {"question": "q"}, "label": {"expected": "a"}},
+                    ],
+                    "runs_per_question": 1,
+                    "max_workers": 1,
+                }
+                created = client.post("/agent-run-plans", json=payload)
+                assert created.status_code == 200
+
+        response = client.get("/modules/mod-1/agent-run-plans", params={"limit": 10, "offset": 0})
+        assert response.status_code == 200
+        plans = response.json()
+        assert len(plans) == 2
+        assert all(plan["id"].startswith("plan-") for plan in plans)
+        assert all(plan["plan_name"] for plan in plans)
+
+
+def test_module_agent_run_plans_list_missing_module_returns_404(monkeypatch):
+    _reset_state()
+    _patch_services(monkeypatch)
+
+    with TestClient(main_mod.app) as client:
+        response = client.get("/modules/missing/agent-run-plans")
+        assert response.status_code == 404
+        assert response.json()["error"] == "module not found"

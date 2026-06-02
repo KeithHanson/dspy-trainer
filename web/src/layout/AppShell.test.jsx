@@ -16,6 +16,19 @@ describe("AppShell", () => {
     expect(evalJobsLink).toHaveClass("shell-nav-item-active");
   });
 
+  it("highlights optimization nav item", () => {
+    render(
+      <MemoryRouter initialEntries={["/optimization"]}>
+        <AppShell>
+          <div>content</div>
+        </AppShell>
+      </MemoryRouter>,
+    );
+
+    const optimizationLink = screen.getByRole("link", { name: "Optimization" });
+    expect(optimizationLink).toHaveClass("shell-nav-item-active");
+  });
+
   it("renders breadcrumb trail for route", () => {
     render(
       <MemoryRouter initialEntries={["/plans"]}>
@@ -29,5 +42,19 @@ describe("AppShell", () => {
     expect(breadcrumbNav).toBeInTheDocument();
     expect(breadcrumbNav).toHaveTextContent("Default");
     expect(breadcrumbNav).toHaveTextContent("Evaluation Plans");
+  });
+
+  it("renders optimization breadcrumb trail", async () => {
+    render(
+      <MemoryRouter initialEntries={["/optimization"]}>
+        <AppShell>
+          <div>content</div>
+        </AppShell>
+      </MemoryRouter>,
+    );
+
+    const breadcrumbNav = screen.getByRole("navigation", { name: "Breadcrumb" });
+    expect(breadcrumbNav).toHaveTextContent("Default");
+    expect(breadcrumbNav).toHaveTextContent("Optimization");
   });
 });
