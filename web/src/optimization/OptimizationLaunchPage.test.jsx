@@ -5,7 +5,7 @@ import { vi } from "vitest";
 import { OptimizationLaunchPage } from "./OptimizationLaunchPage";
 
 describe("OptimizationLaunchPage", () => {
-  it("submits scaffolded optimization payload with strategy defaults", async () => {
+  it("submits scaffolded optimization payload with strategy defaults and run plan preview", async () => {
     const fetchMock = vi.fn((url, init) => {
       if (String(url).endsWith("/modules") && init?.method === "GET") {
         return Promise.resolve({
@@ -36,9 +36,31 @@ describe("OptimizationLaunchPage", () => {
         return Promise.resolve({
           ok: true,
           json: vi.fn().mockResolvedValue([
-            { id: "plan-123", plan_name: "Baseline run plan", status: "finished" },
-            { id: "plan-124", plan_name: "Retry run plan", status: "running" },
+            {
+              id: "plan-123",
+              plan_name: "Baseline run plan",
+              status: "finished",
+              created_at: "2026-01-01T00:00:00Z",
+            },
+            {
+              id: "plan-124",
+              plan_name: "Retry run plan",
+              status: "running",
+              created_at: "2026-01-01T00:00:00Z",
+            },
           ]),
+        });
+      }
+      if (String(url).endsWith("/agent-run-plans/plan-123/tasks?limit=500&offset=0") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue({
+            items: [
+              { id: "task-1", eval_pass: true },
+              { id: "task-2", eval_pass: true },
+              { id: "task-3", eval_pass: false },
+            ],
+          }),
         });
       }
       if (String(url).endsWith("/optimization/jobs") && init?.method === "POST") {
@@ -66,6 +88,15 @@ describe("OptimizationLaunchPage", () => {
     await userEvent.selectOptions(screen.getByLabelText("Helper LM profile (optional)"), "lm-help-2");
     await userEvent.selectOptions(screen.getByLabelText("Training dataset (optional)"), "ods-1");
     await userEvent.selectOptions(screen.getByLabelText("Source run plan (optional)"), "plan-123");
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringMatching(/\/agent-run-plans\/plan-123\/tasks\?limit=500&offset=0$/),
+      expect.objectContaining({ method: "GET" }),
+    ));
+
+    const expectedCountLabel = await screen.findByText("Expected records:");
+    expect(expectedCountLabel.closest("p")).toHaveTextContent("Expected records: 2");
+    expect(await screen.findByText("score_below_threshold: 1")).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "Launch optimization job" }));
 
@@ -120,7 +151,7 @@ describe("OptimizationLaunchPage", () => {
         return Promise.resolve({
           ok: true,
           json: vi.fn().mockResolvedValue([
-            { id: "plan-201", plan_name: "Run Plan One", status: "finished" },
+            { id: "plan-201", plan_name: "Run Plan One", status: "finished", created_at: "2026-01-01T00:00:00Z" },
           ]),
         });
       }
@@ -143,7 +174,7 @@ describe("OptimizationLaunchPage", () => {
 
     const sourceRunPlanSelect = await screen.findByLabelText("Source run plan (optional)");
     expect(sourceRunPlanSelect).toBeEnabled();
-    expect(await screen.findByRole("option", { name: "No matching source run plans for this module" })).toBeInTheDocument();
+    expect(await screen.findByRole("option", { name: "No matching run plans for this module" })).toBeInTheDocument();
 
     expect(sourceRunPlanSelect).toHaveValue("");
 
@@ -171,7 +202,7 @@ describe("OptimizationLaunchPage", () => {
           ok: true,
           json: vi.fn().mockResolvedValue({
             items: [
-              { id: "plan-777", plan_name: "Paginated run plan", status: "finished" },
+              { id: "plan-777", plan_name: "Paginated run plan", status: "finished", created_at: "2026-01-01T00:00:00Z" },
             ],
             limit: 100,
             offset: 0,
@@ -190,9 +221,9 @@ describe("OptimizationLaunchPage", () => {
       </MemoryRouter>,
     );
 
-    const sourceRunPlanSelect = await screen.findByLabelText("Source run plan (optional)");
-    expect(await screen.findByRole("option", { name: /Paginated run plan/ })).toBeInTheDocument();
-    expect(sourceRunPlanSelect).toHaveValue("");
+      const sourceRunPlanSelect = await screen.findByLabelText("Source run plan (optional)");
+      expect(await screen.findByRole("option", { name: /Paginated run plan/ })).toBeInTheDocument();
+      expect(sourceRunPlanSelect).toHaveValue("");
 
     vi.unstubAllGlobals();
   });

@@ -13,34 +13,40 @@ const STRATEGY_OPTIONS = [
     label: "BootstrapFewShot",
     objective: "optimize_demo_quality",
     datasetKind: "demo",
+    sourceType: "eval_passes",
     requestConfigDefaults: {
       max_bootstrapped_demos: 4,
       max_labeled_demos: 16,
     },
     description: "Bootstrap-style optimization from few-shot demos with a strong execution + fallback teacher model path.",
+    sourcePreviewHint: "Demo dataset is derived from eval examples that pass the score threshold.",
   },
   {
     id: "miprov2",
     label: "MIPROv2",
     objective: "optimize_demo_quality",
     datasetKind: "demo",
+    sourceType: "eval_passes",
     requestConfigDefaults: {
       budget: "medium",
       max_bootstrapped_demos: 4,
       max_labeled_demos: 16,
     },
     description: "Prompt synthesis and selection with separate execution and helper roles for richer candidate search.",
+    sourcePreviewHint: "Demo dataset is derived from eval examples that pass the configured score threshold.",
   },
   {
     id: "gepa",
     label: "GEPA",
     objective: "optimize_judge_feedback",
     datasetKind: "feedback",
+    sourceType: "eval_feedback",
     requestConfigDefaults: {
       budget: "medium",
       track_stats: true,
     },
     description: "Generation-anchored optimization that tunes from feedback-style datasets using a judge loop.",
+    sourcePreviewHint: "Feedback dataset is derived from eval outputs and includes both pass/fail signal for judge feedback.",
   },
 ];
 
@@ -78,6 +84,42 @@ function resolveBundlePath(moduleRow) {
   return moduleRow?.source_ref || moduleRow?.bundle_name || "uploaded-bundle.zip";
 }
 
+function formatRunPlanLabel(plan) {
+  if (!plan) {
+    return "";
+  }
+  const name = plan.plan_name || plan.id || "Run plan";
+  return `${name} (${plan.status || "unknown"}, ${formatDateTime(plan.created_at)})`;
+}
+
+function summarizeRunPlanTasks(tasks, sourceType) {
+  const taskRows = Array.isArray(tasks) ? tasks : [];
+  const passCount = taskRows.filter((task) => task?.eval_pass === true).length;
+  const failCount = taskRows.filter((task) => task?.eval_pass === false).length;
+  if (sourceType === "eval_feedback") {
+    return {
+      record_count: taskRows.length,
+      provenance_summary: {
+        included_records: taskRows.length,
+        excluded_records: 0,
+        pass_count: passCount,
+        fail_count: failCount,
+        excluded_reasons: {},
+      },
+      preview: true,
+    };
+  }
+  return {
+    record_count: passCount,
+    provenance_summary: {
+      included_records: passCount,
+      excluded_records: failCount,
+      excluded_reasons: failCount > 0 ? { score_below_threshold: failCount } : {},
+    },
+    preview: true,
+  };
+}
+
 export function OptimizationLaunchPage() {
   const apiBase = useMemo(() => (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, ""), []);
   const [modules, setModules] = useState([]);
@@ -91,10 +133,13 @@ export function OptimizationLaunchPage() {
   const [validationDatasetId, setValidationDatasetId] = useState("");
   const [sourceRunPlanId, setSourceRunPlanId] = useState("");
   const [sourceRunPlans, setSourceRunPlans] = useState([]);
+  const [isLoadingSourceRunPlans, setIsLoadingSourceRunPlans] = useState(false);
+  const [sourceDatasetPreview, setSourceDatasetPreview] = useState(null);
+  const [isLoadingSourcePreview, setIsLoadingSourcePreview] = useState(false);
+  const [sourcePreviewError, setSourcePreviewError] = useState("");
   const [isLoadingModules, setIsLoadingModules] = useState(false);
   const [isLoadingProfiles, setIsLoadingProfiles] = useState(false);
   const [isLoadingDatasets, setIsLoadingDatasets] = useState(false);
-  const [isLoadingSourceRunPlans, setIsLoadingSourceRunPlans] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [validationError, setValidationError] = useState("");
@@ -187,6 +232,8 @@ export function OptimizationLaunchPage() {
       if (!selectedModuleId) {
         setSourceRunPlans([]);
         setSourceRunPlanId("");
+        setSourceDatasetPreview(null);
+        setSourcePreviewError("");
         return;
       }
 
@@ -196,14 +243,18 @@ export function OptimizationLaunchPage() {
         if (!response.ok) {
           setSourceRunPlans([]);
           setSourceRunPlanId("");
+          setSourcePreviewError("");
           return;
         }
         const payload = await response.json();
-        const planRows = toItemList(payload);
-        setSourceRunPlans(planRows);
-        setSourceRunPlanId((currentId) => (planRows.some((runPlan) => runPlan?.id === currentId) ? currentId : ""));
+        const runPlans = toItemList(payload);
+        setSourceRunPlans(runPlans);
+        setSourceRunPlanId((currentId) => (runPlans.some((runPlan) => runPlan?.id === currentId) ? currentId : ""));
+        setSourcePreviewError("");
       } catch {
         setSourceRunPlans([]);
+        setSourceRunPlanId("");
+        setSourcePreviewError("");
       } finally {
         setIsLoadingSourceRunPlans(false);
       }
@@ -211,6 +262,37 @@ export function OptimizationLaunchPage() {
 
     loadSourceRunPlans();
   }, [apiBase, selectedModuleId]);
+
+  useEffect(() => {
+    const loadSourcePreview = async () => {
+      if (!selectedModuleId || !sourceRunPlanId || !selectedStrategyDef?.datasetKind || !selectedStrategyDef?.sourceType) {
+        setSourceDatasetPreview(null);
+        setSourcePreviewError("");
+        setIsLoadingSourcePreview(false);
+        return;
+      }
+
+      setIsLoadingSourcePreview(true);
+      setSourcePreviewError("");
+      try {
+        const response = await fetch(`${apiBase}/agent-run-plans/${sourceRunPlanId}/tasks?limit=500&offset=0`, { method: "GET" });
+        if (!response.ok) {
+          setSourcePreviewError("Could not load source run plan tasks.");
+          setSourceDatasetPreview(null);
+          return;
+        }
+        const payload = await response.json();
+        setSourceDatasetPreview(summarizeRunPlanTasks(toItemList(payload), selectedStrategyDef.sourceType));
+      } catch {
+        setSourcePreviewError("Could not load source run plan tasks.");
+        setSourceDatasetPreview(null);
+      } finally {
+        setIsLoadingSourcePreview(false);
+      }
+    };
+
+    loadSourcePreview();
+  }, [apiBase, selectedModuleId, sourceRunPlanId, selectedStrategyDef]);
 
   const submit = async () => {
     setValidationError("");
@@ -250,8 +332,8 @@ export function OptimizationLaunchPage() {
           },
           train_inputs: [],
           val_inputs: [],
-          num_threads: 1,
-          source_eval_job_id: sourceRunPlanId.trim() || null,
+            num_threads: 1,
+            source_eval_job_id: sourceRunPlanId.trim() || null,
         }),
       });
       if (!response.ok) {
@@ -319,10 +401,10 @@ export function OptimizationLaunchPage() {
 
           <FieldHelp text="The selected module is the source for optimization. Re-run its bundle upload if this is stale." />
 
-          <label className="col gap-1" htmlFor="optimization-source-run">
+          <label className="col gap-1" htmlFor="optimization-source-run-plan">
             <span className="t-label">Source run plan (optional)</span>
             <select
-              id="optimization-source-run"
+              id="optimization-source-run-plan"
               className="bundles-input"
               value={sourceRunPlanId}
               onChange={(event) => setSourceRunPlanId(event.target.value)}
@@ -330,29 +412,71 @@ export function OptimizationLaunchPage() {
             >
               <option value="">
                 {selectedModuleId
-                   ? isLoadingSourceRunPlans
-                     ? "Loading source run plans..."
-                     : sourceRunPlans.length
-                       ? "Select a source run plan..."
-                       : "No matching source run plans for this module"
-                   : "Select a validated module first"}
+                  ? isLoadingSourceRunPlans
+                    ? "Loading source run plans..."
+                    : sourceRunPlans.length
+                      ? "Select a run plan..."
+                      : "No matching run plans for this module"
+                  : "Select a validated module first"}
               </option>
-                {sourceRunPlans.map((plan) => (
-                  <option key={plan.id} value={plan.id}>
-                    {`${plan.plan_name || plan.id} (${plan.status || "unknown"}, ${formatDateTime(plan.created_at)})`}
-                  </option>
-                ))}
-              </select>
+              {sourceRunPlans.map((runPlan) => (
+                <option key={runPlan.id} value={runPlan.id}>
+                  {formatRunPlanLabel(runPlan)}
+                </option>
+              ))}
+            </select>
           </label>
           <FieldHelp
             text={
-                !selectedModuleId
-                  ? "Select a validated module to scope source runs/plans by module."
-                  : sourceRunPlans.length
-                    ? "Optional. Scope this optimization to one previously run plan for the selected module."
-                    : "No source runs/plans were found for the selected module."
-             }
-           />
+              !selectedModuleId
+                ? "Select a validated module to scope source run plans by module."
+                : sourceRunPlans.length
+                  ? "Optional. Scope dataset derivation to one run plan for the selected module."
+                  : "No source run plans were found for the selected module."
+            }
+          />
+
+          <div className="col gap-2" style={{ marginTop: 8 }}>
+            <h3 className="t-label">Source dataset preview</h3>
+            <div className="optimization-source-preview">
+              {!sourceRunPlanId ? <span className="muted">Select a source run plan to preview derived dataset stats.</span> : null}
+              {sourceRunPlanId && isLoadingSourcePreview ? <LoadingState label="Deriving source dataset preview..." /> : null}
+              {sourceRunPlanId && sourcePreviewError ? <ErrorState title="Could not load source preview" description={sourcePreviewError} /> : null}
+              {sourceRunPlanId && sourceDatasetPreview ? (
+                <div className="col gap-1">
+                  {selectedStrategyDef.sourceType === "eval_feedback" ? (
+                    <>
+                      <p>
+                        <strong>Total runs:</strong> {sourceDatasetPreview?.record_count || 0}
+                      </p>
+                      <p>
+                        <strong>Passing runs:</strong> {sourceDatasetPreview?.provenance_summary?.pass_count || 0}
+                        <span className="muted"> / Failing runs: {sourceDatasetPreview?.provenance_summary?.fail_count || 0}</span>
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <p>
+                        <strong>Expected records:</strong> {sourceDatasetPreview?.record_count || 0}
+                      </p>
+                      <p>
+                        <strong>Included:</strong> {sourceDatasetPreview?.provenance_summary?.included_records || 0}
+                        <span className="muted"> / Excluded: {sourceDatasetPreview?.provenance_summary?.excluded_records || 0}</span>
+                      </p>
+                    </>
+                  )}
+                  {Object.keys(sourceDatasetPreview?.provenance_summary?.excluded_reasons || {}).length ? (
+                    <ul className="optimization-preview-excluded-list">
+                      {Object.entries(sourceDatasetPreview.provenance_summary.excluded_reasons).map(([reason, count]) => (
+                        <li key={`${reason}-${count}`}>{`${reason}: ${count}`}</li>
+                      ))}
+                    </ul>
+                  ) : null}
+                  <p className="optimization-source-preview-note">{selectedStrategyDef.sourcePreviewHint}</p>
+                </div>
+              ) : null}
+            </div>
+          </div>
         </section>
 
         <section className="panel card-pad optimization-form-block">
@@ -381,7 +505,7 @@ export function OptimizationLaunchPage() {
             ))}
           </div>
           <FieldHelp
-            text={`${selectedStrategyDef.label} objective: ${selectedStrategyDef.objective}. This scaffold currently submits offline execution with defaults and selected roles.`}
+            text={`${selectedStrategyDef.label} objective: ${selectedStrategyDef.objective}. This scaffold currently submits offline execution with defaults and selected roles. ${selectedStrategyDef.sourcePreviewHint || ""}`}
           />
         </section>
 

@@ -460,6 +460,26 @@ button { font-family: inherit; }
 .optimization-success-id { font-family: var(--mono); }
 .optimization-success-copy { margin-top: 4px; color: var(--text-muted); }
 .optimization-success-copy .lnk { color: var(--accent); text-decoration: underline; }
+.optimization-source-preview {
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 8px;
+  background: var(--surface);
+  min-height: 112px;
+}
+.optimization-source-preview p {
+  margin: 0;
+}
+.optimization-source-preview-note {
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.optimization-preview-excluded-list {
+  margin: 4px 0 0 20px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
 .plans-validation-alert {
   margin-bottom: 10px;
   border: 1px solid color-mix(in oklch, var(--fail, #e0573f) 65%, transparent);
