@@ -1,6 +1,7 @@
 import asyncio
 import json
 import sys
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -105,6 +106,182 @@ class FakePool:
 
     def acquire(self):
         return _FakeAcquire(self.state)
+
+
+class _PersistentDbConn:
+    def __init__(self, state):
+        self.state = state
+
+    async def execute(self, query, *params):
+        normalized = " ".join(query.strip().lower().split())
+        if "insert into optimization_jobs" in normalized:
+            self.state["optimization_jobs"][params[0]] = {
+                "id": params[0],
+                "status": "queued",
+                "project_id": params[1],
+                "module_import_id": params[2],
+                "bundle_path": params[3],
+                "strategy": params[4],
+                "objective": params[5],
+                "dataset_id": params[6],
+                "validation_dataset_id": params[7],
+                "execution_lm_profile_id": params[8],
+                "helper_lm_profile_id": params[9],
+                "request_config": params[10],
+                "normalized_config": params[11],
+                "train_inputs": params[12],
+                "val_inputs": params[13],
+                "num_threads": params[14],
+                "source_eval_job_id": params[15],
+                "artifact_path": None,
+                "artifact_metadata": "{}",
+                "telemetry_summary": "{}",
+                "comparison_summary": "{}",
+                "failure_reason": None,
+                "run_started_at": None,
+                "finished_at": None,
+                "created_at": params[16],
+                "updated_at": params[17],
+            }
+            return "INSERT 1"
+
+        if "insert into optimization_datasets" in normalized:
+            self.state["optimization_datasets"][params[0]] = {
+                "id": params[0],
+                "project_id": params[1],
+                "module_import_id": params[2],
+                "name": params[3],
+                "dataset_kind": params[4],
+                "source_type": params[5],
+                "source_eval_job_ids": json.loads(params[6]),
+                "source_filters": json.loads(params[7]),
+                "records": json.loads(params[8]),
+                "record_count": params[9],
+                "input_keys": json.loads(params[10]),
+                "label_keys": json.loads(params[11]),
+                "optimizer_contract": params[12],
+                "provenance_summary": json.loads(params[13]),
+                "notes": params[14],
+                "created_at": params[15],
+                "updated_at": params[16],
+            }
+            return "INSERT 1"
+
+        if "update optimization_jobs set status='running'" in normalized:
+            job_id, started_at = params[0], params[1]
+            job = self.state["optimization_jobs"].get(str(job_id))
+            if job is not None:
+                job["status"] = "running"
+                job["run_started_at"] = started_at
+                job["updated_at"] = started_at
+            return "UPDATE 1"
+
+        if "update optimization_jobs set status='succeeded'" in normalized:
+            job_id, artifact_path, artifact_metadata, telemetry_summary, comparison_summary, finished_at = params[:6]
+            job = self.state["optimization_jobs"].get(str(job_id)) or self.state.get("job")
+            if isinstance(job, dict):
+                job["status"] = "succeeded"
+                job["artifact_path"] = artifact_path
+                job["artifact_metadata"] = artifact_metadata if isinstance(artifact_metadata, str) else json.dumps(artifact_metadata)
+                job["telemetry_summary"] = telemetry_summary if isinstance(telemetry_summary, str) else json.dumps(telemetry_summary)
+                job["comparison_summary"] = comparison_summary if isinstance(comparison_summary, str) else json.dumps(comparison_summary)
+                job["failure_reason"] = None
+                job["finished_at"] = finished_at
+                job["updated_at"] = finished_at
+            return "UPDATE 1"
+
+        if "update optimization_jobs set status='failed'" in normalized:
+            job_id, reason, finished_at = params[0], params[1], params[2]
+            job = self.state["optimization_jobs"].get(str(job_id)) or self.state.get("job")
+            if isinstance(job, dict):
+                job["status"] = "failed"
+                job["failure_reason"] = reason
+                job["finished_at"] = finished_at
+                job["updated_at"] = finished_at
+            return "UPDATE 1"
+
+        if "update optimization_jobs set status='canceled'" in normalized and "returning id" in normalized:
+            job_id = params[0]
+            job = self.state["optimization_jobs"].get(str(job_id))
+            if isinstance(job, dict) and job.get("status") in {"queued", "running"}:
+                job["status"] = "canceled"
+                job["updated_at"] = params[1]
+                return "UPDATE 1"
+            return "UPDATE 0"
+
+        return "UPDATE 0"
+
+    async def fetchrow(self, query, *params):
+        normalized = " ".join(query.strip().lower().split())
+
+        if "update optimization_jobs set status='canceled'" in normalized and "returning id" in normalized:
+            job_id = str(params[0])
+            job = self.state["optimization_jobs"].get(job_id)
+            if isinstance(job, dict) and job.get("status") in {"queued", "running"}:
+                job["status"] = "canceled"
+                job["updated_at"] = params[1]
+                return {"id": job_id}
+            return None
+
+        if "select id from optimization_jobs" in normalized:
+            job = self.state["optimization_jobs"].get(str(params[0]))
+            return dict(job) if isinstance(job, dict) else None
+
+        if "from optimization_jobs where id = $1" in normalized:
+            job = self.state["optimization_jobs"].get(str(params[0]))
+            if isinstance(job, dict):
+                return dict(job)
+            return None
+
+        if "from optimization_datasets where id = $1" in normalized:
+            dataset = self.state["optimization_datasets"].get(str(params[0]))
+            if isinstance(dataset, dict):
+                return dict(dataset)
+            return None
+
+        return None
+
+    async def fetch(self, query, *params):
+        normalized = " ".join(query.strip().lower().split())
+        if "select id from optimization_jobs" in normalized:
+            limit = int(params[0])
+            offset = int(params[1])
+            ids = sorted(
+                self.state["optimization_jobs"].keys(),
+                key=lambda job_id: self.state["optimization_jobs"][job_id]["created_at"],
+                reverse=True,
+            )
+            return [{"id": job_id} for job_id in ids[offset : offset + limit]]
+        return []
+
+    async def fetchval(self, query, *params):
+        normalized = " ".join(query.strip().lower().split())
+        if "select 1 from module_imports" in normalized:
+            return 1 if params[0] in self.state.get("module_imports", set()) else None
+        if "select 1 from lm_profiles" in normalized:
+            return 1 if params[0] in self.state.get("lm_profiles", set()) else None
+        if "select 1 from optimization_datasets where id = $1" in normalized:
+            return 1 if params[0] in self.state.get("optimization_datasets", {}) else None
+        return None
+
+
+class _PersistentDbAcquire:
+    def __init__(self, state):
+        self.conn = _PersistentDbConn(state)
+
+    async def __aenter__(self):
+        return self.conn
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _PersistentDbPool:
+    def __init__(self, state):
+        self.state = state
+
+    def acquire(self):
+        return _PersistentDbAcquire(self.state)
 
 
 def test_run_bundle_optimization_bootstrap_fewshot_saves_artifact_and_demo_summary(monkeypatch, tmp_path):
@@ -336,3 +513,115 @@ def test_run_optimization_job_gepa_calls_bundle_optimization(monkeypatch):
     assert result["artifact_path"].endswith("program.json")
     assert result["telemetry_summary"]["strategy"] == "gepa"
     assert result["telemetry_summary"]["strategy_details"]["optimizer_class"] == "GEPA"
+
+
+def test_optimization_job_json_fields_persist_through_service_db_roundtrip(monkeypatch):
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+    fixed_now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    state = {
+        "module_imports": {"mod-1"},
+        "optimization_jobs": {},
+        "optimization_datasets": {
+            "ods-1": {
+                "id": "ods-1",
+                "project_id": "proj-1",
+                "module_import_id": "mod-1",
+                "name": "Passes",
+                "dataset_kind": "demo",
+                "source_type": "eval_passes",
+                "source_eval_job_ids": ["job-1"],
+                "source_filters": {"score_threshold": 0.8},
+                "records": [
+                    {
+                        "input": {"question": "France capital?"},
+                        "label": {"expected": "Paris"},
+                        "prediction": {"answer": "Paris"},
+                    }
+                ],
+                "record_count": 1,
+                "input_keys": ["question"],
+                "label_keys": ["expected"],
+                "optimizer_contract": "dspy_example_v1",
+                "provenance_summary": {"included_records": 1},
+                "notes": None,
+                "created_at": fixed_now,
+                "updated_at": fixed_now,
+            }
+        },
+        "lm_profiles": set(),
+    }
+    setattr(services, "postgres_pool", _PersistentDbPool(state))
+
+    created = asyncio.run(
+        services.create_optimization_job(
+            project_id="proj-1",
+            module_import_id="mod-1",
+            bundle_path=str(FIXTURES / "valid_bundle"),
+            strategy="gepa",
+            objective="optimize_judge_feedback",
+            dataset_id="ods-1",
+            validation_dataset_id=None,
+            execution_lm_profile_id=None,
+            helper_lm_profile_id=None,
+            request_config={"auto": "light", "track_stats": True},
+            normalized_config={"dspy_config": {"auto": "light", "track_stats": True}},
+            train_inputs=[],
+            val_inputs=[],
+            num_threads=1,
+            source_eval_job_id=None,
+        )
+    )
+    assert created is not None
+
+    stored_before_run = state["optimization_jobs"][created["id"]]
+    assert isinstance(stored_before_run["request_config"], str)
+    assert isinstance(stored_before_run["normalized_config"], str)
+
+    def fake_run_bundle_optimization(**kwargs):
+        assert kwargs["strategy"] == "gepa"
+        assert kwargs["train_records"][0]["label"] == {"expected": "Paris"}
+        return {
+            "artifact_path": f"/tmp/dspy-trainer/optimization_artifacts/{created['id']}/program.json",
+            "artifact_metadata": {
+                "artifact_type": "dspy_program_state",
+                "artifact_dir": f"/tmp/dspy-trainer/optimization_artifacts/{created['id']}",
+                "program_state_path": f"/tmp/dspy-trainer/optimization_artifacts/{created['id']}/program.json",
+            },
+            "telemetry_summary": {
+                "strategy": "gepa",
+                "strategy_details": {"optimizer_class": "GEPA", "candidate_count": 3},
+            },
+            "comparison_summary": {
+                "baseline_score_pct": 50.0,
+                "optimized_score_pct": 100.0,
+                "score_delta_pct": 50.0,
+                "baseline_item_count": 1,
+                "optimized_item_count": 1,
+            },
+        }
+
+    monkeypatch.setattr("app.executor.module_runner.run_bundle_optimization", fake_run_bundle_optimization)
+
+    run_result = asyncio.run(services.run_optimization_job(created["id"]))
+    assert run_result is not None
+    assert run_result["status"] == "succeeded"
+
+    stored_after_run = state["optimization_jobs"][created["id"]]
+    assert isinstance(stored_after_run["artifact_metadata"], str)
+    assert isinstance(stored_after_run["telemetry_summary"], str)
+    assert isinstance(stored_after_run["comparison_summary"], str)
+
+    fetched = asyncio.run(services.get_optimization_job(created["id"]))
+    assert fetched is not None
+    assert fetched["artifact_metadata"] == json.loads(stored_after_run["artifact_metadata"])
+    assert fetched["telemetry_summary"] == json.loads(stored_after_run["telemetry_summary"])
+    assert fetched["comparison_summary"] == json.loads(stored_after_run["comparison_summary"])
+
+    listed = asyncio.run(services.list_optimization_jobs(limit=50, offset=0))
+    assert len(listed) == 1
+    persisted = listed[0]
+    assert persisted["id"] == created["id"]
+    assert persisted["artifact_path"] == run_result["artifact_path"]
+    assert persisted["artifact_metadata"] == run_result["artifact_metadata"]
+    assert persisted["telemetry_summary"] == run_result["telemetry_summary"]
+    assert persisted["comparison_summary"] == run_result["comparison_summary"]

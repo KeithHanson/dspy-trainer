@@ -491,11 +491,12 @@ async def create_optimization_job(request: Request, payload: OptimizationJobCrea
         )
     except ValueError as exc:
         return JSONResponse(status_code=400, content={"error": str(exc)})
+    storage_strategy = str(normalized_config.get("strategy", payload.strategy)).strip() or payload.strategy.strip() or "bootstrap_fewshot"
     result = await services.create_optimization_job(
         project_id=payload.project_id,
         module_import_id=payload.module_import_id,
         bundle_path=payload.bundle_path,
-        strategy=payload.strategy,
+        strategy=storage_strategy,
         objective=payload.objective,
         dataset_id=payload.dataset_id,
         validation_dataset_id=payload.validation_dataset_id,

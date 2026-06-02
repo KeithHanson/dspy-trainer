@@ -198,6 +198,26 @@ async def fake_run_optimization_job(self, optimization_job_id):
         return job
     job["status"] = "succeeded"
     job["artifact_path"] = f"optimization://{optimization_job_id}/score-100.0"
+    job["artifact_metadata"] = {
+        "artifact_type": "dspy_program_state",
+        "artifact_dir": f"/tmp/dspy-trainer/optimization_artifacts/{optimization_job_id}",
+        "program_state_path": f"/tmp/dspy-trainer/optimization_artifacts/{optimization_job_id}/program.json",
+        "predictor_count": 1,
+        "selected_demo_count": 1,
+    }
+    job["telemetry_summary"] = {
+        "strategy": "gepa",
+        "strategy_details": {"optimizer_class": "GEPA", "candidate_count": 3},
+        "selected_demos": [{"predictor": "predict", "demo_count": 1, "demos": []}],
+        "dataset_summary": {"requested_record_count": 3, "usable_record_count": 1},
+    }
+    job["comparison_summary"] = {
+        "baseline_score_pct": 50.0,
+        "optimized_score_pct": 100.0,
+        "score_delta_pct": 50.0,
+        "baseline_item_count": 1,
+        "optimized_item_count": 1,
+    }
     job["run_started_at"] = "2026-01-01T00:01:00+00:00"
     job["finished_at"] = "2026-01-01T00:02:00+00:00"
     return job
@@ -313,14 +333,29 @@ def test_optimization_job_create_get_run_cancel(monkeypatch):
 
         ran = client.post(f"/optimization/jobs/{job_id}/run")
         assert ran.status_code == 200
-        assert ran.json()["status"] == "succeeded"
-        assert ran.json()["artifact_path"]
-        assert ran.json()["run_started_at"]
-        assert ran.json()["finished_at"]
+        ran_result = ran.json()
+        assert ran_result["status"] == "succeeded"
+        assert ran_result["artifact_path"]
+        assert ran_result["artifact_metadata"]["artifact_type"] == "dspy_program_state"
+        assert ran_result["telemetry_summary"]["strategy"] == "gepa"
+        assert ran_result["comparison_summary"]["score_delta_pct"] == 50.0
+        assert ran_result["run_started_at"] == "2026-01-01T00:01:00+00:00"
+        assert ran_result["finished_at"] == "2026-01-01T00:02:00+00:00"
 
         listed = client.get("/optimization/jobs?limit=50&offset=0")
         assert listed.status_code == 200
         assert len(listed.json()) == 1
+        persisted = listed.json()[0]
+        assert persisted["artifact_path"] == ran_result["artifact_path"]
+        assert persisted["artifact_metadata"]["artifact_type"] == "dspy_program_state"
+        assert persisted["telemetry_summary"]["strategy"] == "gepa"
+        assert persisted["telemetry_summary"]["strategy_details"]["optimizer_class"] == "GEPA"
+        assert persisted["telemetry_summary"]["strategy_details"]["candidate_count"] == 3
+        assert persisted["comparison_summary"]["baseline_score_pct"] == 50.0
+        assert persisted["comparison_summary"]["optimized_score_pct"] == 100.0
+        assert persisted["comparison_summary"]["score_delta_pct"] == 50.0
+        assert persisted["run_started_at"] == "2026-01-01T00:01:00+00:00"
+        assert persisted["finished_at"] == "2026-01-01T00:02:00+00:00"
 
         canceled = client.post(f"/optimization/jobs/{job_id}/cancel")
         assert canceled.status_code == 200

@@ -1447,6 +1447,10 @@ class AppServices:
             )
         if row is None:
             return None
+        request_config = self._json_dict(row["request_config"])
+        normalized_config = self._json_dict(row["normalized_config"])
+        train_inputs = self._json_list(row["train_inputs"])
+        val_inputs = self._json_list(row["val_inputs"])
         return {
             "id": row["id"],
             "status": row["status"],
@@ -1459,16 +1463,16 @@ class AppServices:
             "validation_dataset_id": row["validation_dataset_id"],
             "execution_lm_profile_id": row["execution_lm_profile_id"],
             "helper_lm_profile_id": row["helper_lm_profile_id"],
-            "request_config": row["request_config"],
-            "normalized_config": row["normalized_config"],
-            "train_inputs": row["train_inputs"],
-            "val_inputs": row["val_inputs"],
+            "request_config": request_config,
+            "normalized_config": normalized_config,
+            "train_inputs": train_inputs,
+            "val_inputs": val_inputs,
             "num_threads": row["num_threads"],
             "source_eval_job_id": row["source_eval_job_id"],
             "artifact_path": row["artifact_path"],
-            "artifact_metadata": row["artifact_metadata"],
-            "telemetry_summary": row["telemetry_summary"],
-            "comparison_summary": row["comparison_summary"],
+            "artifact_metadata": self._json_dict(row["artifact_metadata"]),
+            "telemetry_summary": self._json_dict(row["telemetry_summary"]),
+            "comparison_summary": self._json_dict(row["comparison_summary"]),
             "failure_reason": row["failure_reason"],
             "run_started_at": row["run_started_at"].isoformat() if row["run_started_at"] is not None else None,
             "finished_at": row["finished_at"].isoformat() if row["finished_at"] is not None else None,
