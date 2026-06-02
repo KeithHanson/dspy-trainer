@@ -158,3 +158,30 @@ def test_build_lm_profile_alias_uses_default_proxy_when_not_provided(monkeypatch
     assert captured["model"] == "openai/lm-profile:profile-456"
     assert captured["api_key"] == "sk-virtual-456"
     assert captured["api_base"] == "http://litellm-proxy:4000"
+
+
+def test_build_lm_profile_uses_azure_responses_compat_class_by_default(monkeypatch):
+    captured = {}
+
+    class CaptureLM:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    def fake_load_class(class_path):
+        captured["class_path"] = class_path
+        return CaptureLM
+
+    monkeypatch.setattr(module_runner, "_load_class", fake_load_class)
+
+    module_runner._build_lm_from_profile(
+        {
+            "id": "profile-789",
+            "model": "azure/codex-5.3-eval-deployment-1",
+            "api_base": "https://example.cognitiveservices.azure.com",
+            "virtual_key": "sk-virtual-789",
+            "model_type": "responses",
+            "default_params": {},
+        }
+    )
+
+    assert captured["class_path"] == module_runner.AZURE_RESPONSES_COMPAT_CLASS_PATH

@@ -18,6 +18,7 @@ import dspy
 
 
 DEFAULT_PROXY_API_BASE = "http://litellm-proxy:4000"
+AZURE_RESPONSES_COMPAT_CLASS_PATH = "app.lm.AzureResponsesCompatLM"
 
 
 class _TeeWriter:
@@ -139,13 +140,16 @@ def _load_class(class_path: str) -> type[Any]:
 
 def _build_lm_from_profile(lm_profile: dict[str, Any]) -> Any:
     class_path = str(lm_profile.get("lm_class_path") or "dspy.LM").strip()
+    model_name = str(lm_profile.get("model") or "").strip()
+    model_type = str(lm_profile.get("model_type") or "responses").strip() or "responses"
+    if class_path == "dspy.LM" and model_type == "responses" and model_name.lower().startswith("azure/"):
+        class_path = AZURE_RESPONSES_COMPAT_CLASS_PATH
     lm_cls = _load_class(class_path)
     default_params = lm_profile.get("default_params")
     params = default_params if isinstance(default_params, dict) else {}
 
     profile_id = str(lm_profile.get("id") or "").strip()
     virtual_key = str(lm_profile.get("virtual_key") or "").strip()
-    model_name = str(lm_profile.get("model") or "").strip()
     api_base = str(lm_profile.get("api_base") or "").strip()
     if profile_id and virtual_key:
         model_name = f"openai/lm-profile:{profile_id}"
@@ -155,7 +159,7 @@ def _build_lm_from_profile(lm_profile: dict[str, Any]) -> Any:
         "model": model_name,
         "api_base": api_base,
         "api_key": virtual_key,
-        "model_type": str(lm_profile.get("model_type") or "responses").strip() or "responses",
+        "model_type": model_type,
     }
     kwargs: dict[str, Any] = {**base_kwargs, **params}
     kwargs = {key: value for key, value in kwargs.items() if value not in (None, "")}
@@ -212,7 +216,13 @@ def _evaluate_program(
     eval_inputs: list[dict[str, Any]],
     pass_threshold: float,
     lm: Any,
+    phase_name: str = "evaluation",
+    log_event: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
+    def _log(message: str) -> None:
+        if log_event is not None:
+            log_event(message)
+
     original_program_lm = None
     had_program_lm_binding = False
 
@@ -226,15 +236,22 @@ def _evaluate_program(
 
     devset = [_build_eval_example(item) for item in eval_inputs]
 
+    _log(f"phase={phase_name}:start")
     predictions: list[Any] = []
     try:
-        for example in devset:
+        for idx, example in enumerate(devset):
             inputs = example.inputs().toDict()
-            if lm is not None:
-                with dspy.context(lm=lm):
+            _log(f"phase={phase_name}:program_call_start:item={idx}")
+            try:
+                if lm is not None:
+                    with dspy.context(lm=lm):
+                        prediction = program(**inputs)
+                else:
                     prediction = program(**inputs)
-            else:
-                prediction = program(**inputs)
+            except Exception as exc:
+                _log(f"phase={phase_name}:program_call_failed:item={idx}:error={exc}")
+                raise
+            _log(f"phase={phase_name}:program_call_done:item={idx}")
             predictions.append(prediction)
     finally:
         if had_program_lm_binding:
@@ -246,10 +263,16 @@ def _evaluate_program(
 
     normalized = []
     for idx, (example, prediction) in enumerate(zip(devset, predictions)):
-        judge_result = _normalize_judge_result(
-            _run_judge_metric_without_autolog(raw_metric_fn, example, prediction, lm),
-            idx,
-        )
+        _log(f"phase={phase_name}:judge_call_start:item={idx}")
+        try:
+            judge_result = _normalize_judge_result(
+                _run_judge_metric_without_autolog(raw_metric_fn, example, prediction, lm),
+                idx,
+            )
+        except Exception as exc:
+            _log(f"phase={phase_name}:judge_call_failed:item={idx}:error={exc}")
+            raise
+        _log(f"phase={phase_name}:judge_call_done:item={idx}:score={judge_result['score']}")
         normalized.append(
             {
                 "item_index": idx,
@@ -265,6 +288,7 @@ def _evaluate_program(
         )
 
     avg_score = sum(item["score"] for item in normalized) / float(len(normalized)) if normalized else 0.0
+    _log(f"phase={phase_name}:done:score_pct={avg_score * 100.0}")
     return {
         "score_pct": avg_score * 100.0,
         "items": normalized,
@@ -692,8 +716,24 @@ def run_bundle_optimization(
         if optimized_eval_lm is not None:
             _disable_lm_cache(optimized_eval_lm)
 
-        baseline_report = _evaluate_program(baseline_program, raw_metric_fn, evaluation_inputs, pass_threshold, baseline_eval_lm)
-        optimized_report = _evaluate_program(compiled_program, raw_metric_fn, evaluation_inputs, pass_threshold, optimized_eval_lm)
+        baseline_report = _evaluate_program(
+            baseline_program,
+            raw_metric_fn,
+            evaluation_inputs,
+            pass_threshold,
+            baseline_eval_lm,
+            phase_name="baseline_eval",
+            log_event=_log,
+        )
+        optimized_report = _evaluate_program(
+            compiled_program,
+            raw_metric_fn,
+            evaluation_inputs,
+            pass_threshold,
+            optimized_eval_lm,
+            phase_name="optimized_eval",
+            log_event=_log,
+        )
         _log(f"baseline_score_pct={baseline_report['score_pct']}")
         _log(f"optimized_score_pct={optimized_report['score_pct']}")
 
