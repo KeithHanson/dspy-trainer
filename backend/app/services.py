@@ -1596,6 +1596,10 @@ class AppServices:
         except Exception as exc:
             emit("status=failed")
             emit(f"error={exc}")
+            emit("traceback_begin")
+            for line in traceback.format_exc().splitlines():
+                emit(line)
+            emit("traceback_end")
             now3 = datetime.now(timezone.utc)
             async with self.postgres_pool.acquire() as conn:
                 await conn.execute(

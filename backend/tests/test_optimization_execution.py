@@ -600,6 +600,54 @@ def test_run_optimization_job_derives_records_from_source_run_plan(monkeypatch):
     assert "derived dataset raw line" in result["execution_log"]
 
 
+def test_run_optimization_job_persists_traceback_on_failure(monkeypatch):
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+    state = {
+        "job": {
+            "id": "opt-fail",
+            "status": "queued",
+            "bundle_path": str(FIXTURES / "valid_bundle"),
+            "strategy": "bootstrap_fewshot",
+            "dataset_id": None,
+            "validation_dataset_id": None,
+            "execution_lm_profile_id": None,
+            "helper_lm_profile_id": None,
+            "normalized_config": {"dspy_config": {}},
+            "train_inputs": [
+                {"input": {"question": "France capital?"}, "label": {"expected": "Paris"}, "prediction": {"answer": "Paris"}}
+            ],
+            "val_inputs": [],
+            "num_threads": 1,
+            "artifact_path": None,
+            "artifact_metadata": {},
+            "telemetry_summary": {},
+            "comparison_summary": {},
+            "failure_reason": None,
+            "run_started_at": None,
+            "finished_at": None,
+        }
+    }
+    setattr(services, "postgres_pool", FakePool(state))
+
+    async def fake_get_optimization_job(job_id):
+        assert job_id == "opt-fail"
+        return dict(state["job"])
+
+    def fake_run_bundle_optimization(**kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(services, "get_optimization_job", fake_get_optimization_job)
+    monkeypatch.setattr("app.executor.module_runner.run_bundle_optimization", fake_run_bundle_optimization)
+
+    result = asyncio.run(services.run_optimization_job("opt-fail"))
+
+    assert result is not None
+    assert result["status"] == "failed"
+    assert "traceback_begin" in result["execution_log"]
+    assert "RuntimeError: boom" in result["execution_log"]
+    assert "traceback_end" in result["execution_log"]
+
+
 def test_optimization_job_json_fields_persist_through_service_db_roundtrip(monkeypatch):
     services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
     fixed_now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
