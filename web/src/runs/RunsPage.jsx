@@ -12,7 +12,7 @@ export function RunsPage() {
   const planId = searchParams.get("plan") || "";
   const apiBase = useMemo(() => (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, ""), []);
   const [plans, setPlans] = useState([]);
-  const [workers, setWorkers] = useState([]);
+  const [workersData, setWorkersData] = useState({ items: [], total_workers: 0, reported_workers: 0, available_workers: 0, busy_workers: 0 });
   const [runPlan, setRunPlan] = useState(null);
   const [tasks, setTasks] = useState([]);
   const [selectedTask, setSelectedTask] = useState(null);
@@ -76,10 +76,12 @@ export function RunsPage() {
           throw new Error(`Could not load workers (${workersResp.status})`);
         }
         const workersPayload = await workersResp.json();
-        setWorkers(Array.isArray(workersPayload) ? workersPayload : []);
+        const normalized = normalizeWorkersPayload(workersPayload);
+        setWorkersData(normalized);
         setWorkersError("");
       } catch (err) {
         setWorkersError(err instanceof Error ? err.message : "Could not load workers");
+        setWorkersData({ items: [], total_workers: 0, reported_workers: 0, available_workers: 0, busy_workers: 0 });
       }
     };
     loadWorkers();
@@ -213,7 +215,7 @@ export function RunsPage() {
             <EmptyState title="No runs yet" description="Run a plan from Evaluation Plans to see runs here." />
           ) : null}
 
-          <WorkersSection workers={workers} workersError={workersError} />
+          <WorkersSection workersData={workersData} workersError={workersError} />
         </div>
       </section>
     );
@@ -326,7 +328,7 @@ export function RunsPage() {
           </>
         ) : null}
 
-        <WorkersSection workers={workers} workersError={workersError} />
+        <WorkersSection workersData={workersData} workersError={workersError} />
 
         {selectedTask ? (
           <div className="runs-drawer-backdrop" onClick={() => setSelectedTask(null)}>
@@ -402,25 +404,82 @@ export function RunsPage() {
   );
 }
 
-function WorkersSection({ workers, workersError }) {
+function WorkersSection({ workersData, workersError }) {
+  const workers = Array.isArray(workersData?.items) ? workersData.items : [];
+  const totalWorkers = Number(workersData?.total_workers || 0);
+  const availableWorkers = Number(workersData?.available_workers || 0);
+  const busyWorkers = Number(workersData?.busy_workers || 0);
+  const missingWorkers = Math.max(0, totalWorkers - Number(workersData?.reported_workers || workers.length));
+
   return (
     <section className="panel card-pad runs-workers-section">
-      <h3 className="t-h2" style={{ marginBottom: 10 }}>Workers</h3>
+      <div className="row between" style={{ gap: 12, marginBottom: 10, alignItems: "flex-start" }}>
+        <div>
+          <h3 className="t-h2" style={{ marginBottom: 6 }}>Workers</h3>
+          <p className="muted t-sm">
+            {availableWorkers} available of {totalWorkers || workers.length} total
+            {busyWorkers ? ` · ${busyWorkers} busy` : ""}
+            {missingWorkers ? ` · ${missingWorkers} not reporting` : ""}
+          </p>
+        </div>
+      </div>
       {workersError ? <p className="cap" style={{ marginBottom: 6 }}>Worker refresh issue: {workersError}</p> : null}
       {!workers.length ? (
         <div className="dashboard-zero">No workers reported yet.</div>
       ) : (
-        <div className="runs-workers-inline">
+        <div className="runs-workers-grid">
           {workers.map((worker) => (
-            <span key={worker.worker_id} className="runs-workers-inline-item">
-              <span className="mono cap">{worker.worker_id}</span>
-              <span className="cap">{worker.status}{worker.task_id ? ` · ${shortId(worker.task_id)}` : ""}{worker.last_seen ? ` · seen ${formatTimeAgo(worker.last_seen)}` : ""}</span>
-            </span>
+            <article key={worker.worker_id} className="runs-worker-card">
+              <div className="row between" style={{ gap: 10, alignItems: "center" }}>
+                <div className="col gap-1" style={{ minWidth: 0 }}>
+                  <div className="mono cap" style={{ overflowWrap: "anywhere" }}>{worker.worker_id}</div>
+                  <div className="muted t-xs">Last seen {worker.last_seen ? formatTimeAgo(worker.last_seen) : "unknown"}</div>
+                </div>
+                <StatusPill status={worker.status} />
+              </div>
+              <dl className="runs-worker-meta">
+                <div>
+                  <dt>Task</dt>
+                  <dd className="mono">{worker.task_id ? shortId(worker.task_id) : "Idle"}</dd>
+                </div>
+                <div>
+                  <dt>State</dt>
+                  <dd>{describeWorkerState(worker.status, worker.task_id)}</dd>
+                </div>
+              </dl>
+            </article>
           ))}
         </div>
       )}
     </section>
   );
+}
+
+function normalizeWorkersPayload(payload) {
+  if (Array.isArray(payload)) {
+    const availableWorkers = payload.filter((worker) => worker?.status === "listening").length;
+    return {
+      items: payload,
+      total_workers: payload.length,
+      reported_workers: payload.length,
+      available_workers: availableWorkers,
+      busy_workers: Math.max(0, payload.length - availableWorkers),
+    };
+  }
+  const items = Array.isArray(payload?.items) ? payload.items : [];
+  return {
+    items,
+    total_workers: Number(payload?.total_workers || items.length),
+    reported_workers: Number(payload?.reported_workers || items.length),
+    available_workers: Number(payload?.available_workers || 0),
+    busy_workers: Number(payload?.busy_workers || 0),
+  };
+}
+
+function describeWorkerState(status, taskId) {
+  if (status === "listening") return "Ready for the next task";
+  if (status === "running") return taskId ? "Actively processing work" : "Busy";
+  return "Heartbeat reported";
 }
 
 function CopyButton({ value }) {

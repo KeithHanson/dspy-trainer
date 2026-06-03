@@ -724,16 +724,36 @@ button { font-family: inherit; }
   gap: 12px;
 }
 .runs-workers-section { margin-top: 14px; }
-.runs-workers-inline {
+.runs-workers-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+.runs-worker-card {
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-md);
+  background: color-mix(in oklch, var(--panel-2) 74%, transparent);
+  padding: 12px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  min-width: 150px;
+  gap: 10px;
 }
-.runs-workers-inline-item {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
+.runs-worker-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+.runs-worker-meta dt {
+  margin: 0 0 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+.runs-worker-meta dd {
+  margin: 0;
+  font-size: 13px;
 }
 .runs-drawer-backdrop {
   position: fixed;

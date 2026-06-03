@@ -18,9 +18,13 @@ describe("RunsPage", () => {
       if (String(url).endsWith("/workers") && init?.method === "GET") {
         return Promise.resolve({
           ok: true,
-          json: vi.fn().mockResolvedValue([
-            { worker_id: "worker-a", status: "listening", task_id: null },
-          ]),
+          json: vi.fn().mockResolvedValue({
+            items: [{ worker_id: "worker-a", status: "listening", task_id: null, last_seen: "2026-01-01T00:00:00+00:00" }],
+            total_workers: 8,
+            reported_workers: 1,
+            available_workers: 1,
+            busy_workers: 0,
+          }),
         });
       }
       if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
@@ -73,7 +77,13 @@ describe("RunsPage", () => {
       if (String(url).endsWith("/workers") && init?.method === "GET") {
         return Promise.resolve({
           ok: true,
-          json: vi.fn().mockResolvedValue([{ worker_id: "worker-a", status: "listening", task_id: null }]),
+          json: vi.fn().mockResolvedValue({
+            items: [{ worker_id: "worker-a", status: "listening", task_id: null, last_seen: "2026-01-01T00:00:00+00:00" }],
+            total_workers: 8,
+            reported_workers: 1,
+            available_workers: 1,
+            busy_workers: 0,
+          }),
         });
       }
       if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
@@ -112,7 +122,7 @@ it("deletes a run from list", async () => {
       if (String(url).endsWith("/workers") && init?.method === "GET") {
         return Promise.resolve({
           ok: true,
-          json: vi.fn().mockResolvedValue([]),
+          json: vi.fn().mockResolvedValue({ items: [], total_workers: 8, reported_workers: 0, available_workers: 0, busy_workers: 0 }),
         });
       }
       if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
@@ -154,7 +164,13 @@ it("deletes a run from list", async () => {
       if (String(url).endsWith("/workers") && init?.method === "GET") {
         return Promise.resolve({
           ok: true,
-          json: vi.fn().mockResolvedValue([{ worker_id: "worker-z", status: "listening", task_id: null }]),
+          json: vi.fn().mockResolvedValue({
+            items: [{ worker_id: "worker-z", status: "listening", task_id: null, last_seen: "2026-01-01T00:00:00+00:00" }],
+            total_workers: 8,
+            reported_workers: 1,
+            available_workers: 1,
+            busy_workers: 0,
+          }),
         });
       }
       if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {

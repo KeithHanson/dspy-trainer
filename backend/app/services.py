@@ -387,9 +387,15 @@ class AppServices:
             litellm=litellm_ok,
         )
 
-    async def list_workers(self) -> list[dict[str, Any]]:
+    async def list_workers(self) -> dict[str, Any]:
         if self.redis is None:
-            return []
+            return {
+                "items": [],
+                "total_workers": max(0, int(self.settings.total_workers)),
+                "reported_workers": 0,
+                "available_workers": 0,
+                "busy_workers": 0,
+            }
         prefix = f"{self.settings.worker_registry_prefix}:"
         keys = await self.redis.keys(f"{prefix}*")
         workers: list[dict[str, Any]] = []
@@ -411,7 +417,16 @@ class AppServices:
                 }
             )
         workers.sort(key=lambda item: item["worker_id"])
-        return workers
+        available_workers = sum(1 for item in workers if item["status"] == "listening")
+        reported_workers = len(workers)
+        total_workers = max(reported_workers, max(0, int(self.settings.total_workers)))
+        return {
+            "items": workers,
+            "total_workers": total_workers,
+            "reported_workers": reported_workers,
+            "available_workers": available_workers,
+            "busy_workers": max(0, reported_workers - available_workers),
+        }
 
     async def init_db(self) -> None:
         if self.postgres_pool is None:

@@ -2,6 +2,16 @@ function toArray(value) {
   return Array.isArray(value) ? value : [];
 }
 
+function normalizeWorkersPayload(value) {
+  if (Array.isArray(value)) {
+    return { items: value, total_workers: value.length };
+  }
+  return {
+    items: Array.isArray(value?.items) ? value.items : [],
+    total_workers: Number(value?.total_workers || 0),
+  };
+}
+
 function formatTimeAgo(value) {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) {
@@ -56,7 +66,8 @@ function buildEvalBreakdown(row, moduleNameById) {
 export function mapDashboardOverview({ plans, modules, workers }) {
   const planRows = toArray(plans);
   const moduleRows = toArray(modules);
-  const workerRows = toArray(workers);
+  const workerPayload = normalizeWorkersPayload(workers);
+  const workerRows = toArray(workerPayload.items);
   const moduleNameById = new Map(
     moduleRows.map((item) => {
       const version = item.bundle_version ? ` v${item.bundle_version}` : "";
@@ -78,7 +89,7 @@ export function mapDashboardOverview({ plans, modules, workers }) {
   const validatedBundles = moduleRows.filter((item) => item.validation_status === "passed").length;
   const failedBundles = moduleRows.filter((item) => item.validation_status === "failed");
   const availableWorkers = workerRows.filter((worker) => worker.status === "listening").length;
-  const totalWorkers = workerRows.filter((worker) => worker.status === "listening" || worker.status === "running").length;
+  const totalWorkers = Math.max(Number(workerPayload.total_workers || 0), workerRows.length);
 
   const mostRecent = planRows[0];
   const recentLabel = mostRecent?.created_at ? `last run ${formatTimeAgo(mostRecent.created_at)}` : "no runs yet";
