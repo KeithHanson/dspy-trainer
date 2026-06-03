@@ -1,0 +1,9 @@
+- Entry point/router: `web/src/App.jsx` gates the app behind Auth0 and routes to dashboard, bundles, plans, runs, optimization, and LM profile screens.
+- UI architecture is page-centric. Most data fetching is done directly inside page components with `fetch`, `useEffect`, `useState`, and light `useMemo` for stable API base URLs; there is no central API client abstraction yet.
+- Primary workflows are implemented end-to-end in pages: `bundles/BundlesPage.jsx`, `plans/PlansPage.jsx`, `runs/RunsPage.jsx`, `optimization/OptimizationLaunchPage.jsx`, `optimization/OptimizationJobsPage.jsx`, `lmProfiles/LmProfilesPage.jsx`.
+- Bundles UX teaches the contract inline: upload zip -> create module import -> `validate-upload` -> show checklist/diagnostics -> CTA into plan creation.
+- Plans UX persists reusable evaluation plans, requires a validated module bundle + LM profile, and can immediately create/enqueue an agent run plan.
+- Runs UX has two modes: list all runs, or monitor one run with polling every 2s for plan/task updates and worker presence; links to MLflow parent run when available.
+- Optimization UX is scaffolded but functional: choose validated module, optional source run plan, strategy family (`bootstrap_fewshot`, `miprov2`, `gepa`), execution/helper LM profiles, optional datasets, then POST optimization job.
+- Auth config comes from `web/.env.local.sample` (`VITE_AUTH0_*`, `VITE_API_BASE_URL`); backend API defaults to `http://localhost:8000` when env missing.
+- Tests are colocated with major pages (`*.test.jsx`) and cover auth/app routing plus bundles/plans/runs/dashboard/optimization/LM profile flows.

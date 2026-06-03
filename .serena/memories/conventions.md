@@ -1,0 +1,9 @@
+- Backend favors a single broad `AppServices` orchestration class over many narrowly scoped services. Search there first before adding new abstractions.
+- FastAPI route handlers in `backend/app/main.py` are thin request/response wrappers around `AppServices` methods plus request model validation.
+- Backend payloads lean on plain dict/list JSON structures for eval inputs, labels, predictions, request configs, diagnostics, and dataset records.
+- Bundle validation is AST/metadata based, not import-execution based; keep bundle contract changes synchronized with UI guidance in `web/src/bundles/BundlesPage.jsx` and validator logic.
+- Frontend conventions: function components only, page-local state, direct `fetch` calls, minimal shared state. Stable API base URLs are commonly memoized with `useMemo(() => (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, ""), [])`.
+- Frontend UX is scaffold-heavy but operational: empty/loading/error states are shared primitives reused across pages.
+- Route/page naming mirrors product nouns directly (`BundlesPage`, `PlansPage`, `RunsPage`, `OptimizationLaunchPage`, `LmProfilesPage`). Follow that style for new screens.
+- Tests are expected for new functionality; backend coverage is route/service heavy, frontend coverage is page-flow oriented.
+- Auth is mandatory in the web shell; unauthenticated users are redirected to the Auth0-backed auth screen.

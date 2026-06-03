@@ -378,4 +378,158 @@ describe("OptimizationJobsPage", () => {
 
     vi.unstubAllGlobals();
   });
+
+  it("cancels an optimization job from the list", async () => {
+    const fetchMock = vi.fn((url, init) => {
+      if (String(url).includes("/optimization/jobs?limit=50&offset=0") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([
+            {
+              id: "opt-job-cancel",
+              strategy: "bootstrap_fewshot",
+              objective: "optimize_demo_quality",
+              status: "running",
+              module_import_id: "mod-1",
+              comparison_summary: {},
+              run_started_at: "2026-01-01T00:01:00+00:00",
+            },
+          ]),
+        });
+      }
+      if (String(url).endsWith("/optimization/jobs/opt-job-cancel/cancel") && init?.method === "POST") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue({
+            id: "opt-job-cancel",
+            strategy: "bootstrap_fewshot",
+            objective: "optimize_demo_quality",
+            status: "canceled",
+            module_import_id: "mod-1",
+            comparison_summary: {},
+            run_started_at: "2026-01-01T00:01:00+00:00",
+          }),
+        });
+      }
+      if (String(url).endsWith("/modules") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "mod-1", bundle_name: "Echo" }]) });
+      }
+      if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("confirm", vi.fn(() => true));
+
+    render(
+      <MemoryRouter initialEntries={["/optimization/jobs"]}>
+        <OptimizationJobsPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("opt-job-ca")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("canceled")).toBeInTheDocument();
+    });
+
+    expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("cancels an optimization job from the detail page", async () => {
+    const fetchMock = vi.fn((url, init) => {
+      if (String(url).endsWith("/optimization/jobs/opt-job-live") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue({
+            id: "opt-job-live",
+            status: "running",
+            module_import_id: "mod-1",
+            strategy: "bootstrap_fewshot",
+            objective: "optimize_demo_quality",
+            execution_lm_profile_id: "lm-1",
+            helper_lm_profile_id: null,
+            dataset_id: null,
+            validation_dataset_id: null,
+            source_run_plan_id: "plan-111",
+            created_at: "2026-01-01T00:00:00+00:00",
+            run_started_at: "2026-01-01T00:01:00+00:00",
+            finished_at: null,
+            artifact_path: null,
+            artifact_metadata: {},
+            comparison_summary: {},
+            telemetry_summary: {},
+            request_config: {},
+            normalized_config: {},
+            execution_log: "job=opt-job-live\nstatus=running",
+            failure_reason: null,
+          }),
+        });
+      }
+      if (String(url).endsWith("/optimization/jobs/opt-job-live/cancel") && init?.method === "POST") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue({
+            id: "opt-job-live",
+            status: "canceled",
+            module_import_id: "mod-1",
+            strategy: "bootstrap_fewshot",
+            objective: "optimize_demo_quality",
+            execution_lm_profile_id: "lm-1",
+            helper_lm_profile_id: null,
+            dataset_id: null,
+            validation_dataset_id: null,
+            source_run_plan_id: "plan-111",
+            created_at: "2026-01-01T00:00:00+00:00",
+            run_started_at: "2026-01-01T00:01:00+00:00",
+            finished_at: null,
+            artifact_path: null,
+            artifact_metadata: {},
+            comparison_summary: {},
+            telemetry_summary: {},
+            request_config: {},
+            normalized_config: {},
+            execution_log: "job=opt-job-live\nstatus=running\nstatus=canceled",
+            failure_reason: null,
+          }),
+        });
+      }
+      if (String(url).endsWith("/modules") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "mod-1", bundle_name: "Echo" }]) });
+      }
+      if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "lm-1", name: "Execution Profile" }]) });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("confirm", vi.fn(() => true));
+
+    render(
+      <MemoryRouter initialEntries={["/optimization/jobs?job=opt-job-live"]}>
+        <OptimizationJobsPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("Optimization Job Detail")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Cancel job" })).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Cancel job" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("canceled")).toBeInTheDocument();
+    });
+
+    expect(screen.queryByRole("button", { name: "Cancel job" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Live run output refreshes automatically.")).not.toBeInTheDocument();
+
+    vi.unstubAllGlobals();
+  });
 });

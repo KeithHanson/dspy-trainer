@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import Settings
 from app.executor import module_runner
-from app.services import AppServices
+from app.services import AppServices, OptimizationJobCanceled
 
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "module_bundles"
@@ -88,6 +88,10 @@ class _FakeConn:
             self.state["job"]["finished_at"] = params[6].isoformat()
         elif "set status='failed'" in query:
             self.state["job"]["status"] = "failed"
+            self.state["job"]["failure_reason"] = params[1]
+            self.state["job"]["execution_log"] = params[2]
+        elif "set status='canceled'" in query:
+            self.state["job"]["status"] = "canceled"
             self.state["job"]["failure_reason"] = params[1]
             self.state["job"]["execution_log"] = params[2]
         return "UPDATE 1"
@@ -202,6 +206,17 @@ class _PersistentDbConn:
             job = self.state["optimization_jobs"].get(str(job_id)) or self.state.get("job")
             if isinstance(job, dict):
                 job["status"] = "failed"
+                job["failure_reason"] = reason
+                job["execution_log"] = execution_log
+                job["finished_at"] = finished_at
+                job["updated_at"] = finished_at
+            return "UPDATE 1"
+
+        if "update optimization_jobs set status='canceled', failure_reason=$2" in normalized:
+            job_id, reason, execution_log, finished_at = params[0], params[1], params[2], params[3]
+            job = self.state["optimization_jobs"].get(str(job_id)) or self.state.get("job")
+            if isinstance(job, dict):
+                job["status"] = "canceled"
                 job["failure_reason"] = reason
                 job["execution_log"] = execution_log
                 job["finished_at"] = finished_at
@@ -722,6 +737,57 @@ def test_run_optimization_job_flushes_live_log_updates(monkeypatch):
     assert result["status"] == "succeeded"
     assert any("live-line-1" in batch for batch in appended_batches)
     assert any("live-line-2" in batch for batch in appended_batches)
+
+
+def test_run_optimization_job_marks_canceled_when_subprocess_is_terminated(monkeypatch):
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+    state = {
+        "job": {
+            "id": "opt-cancel",
+            "status": "running",
+            "bundle_path": str(FIXTURES / "valid_bundle"),
+            "strategy": "bootstrap_fewshot",
+            "dataset_id": None,
+            "validation_dataset_id": None,
+            "execution_lm_profile_id": None,
+            "helper_lm_profile_id": None,
+            "normalized_config": {"dspy_config": {}},
+            "train_inputs": [
+                {"input": {"question": "France capital?"}, "label": {"expected": "Paris"}, "prediction": {"answer": "Paris"}}
+            ],
+            "val_inputs": [],
+            "num_threads": 1,
+            "artifact_path": None,
+            "artifact_metadata": {},
+            "telemetry_summary": {},
+            "comparison_summary": {},
+            "failure_reason": None,
+            "run_started_at": None,
+            "finished_at": None,
+        }
+    }
+    setattr(services, "postgres_pool", FakePool(state))
+
+    async def fake_get_optimization_job(job_id):
+        assert job_id == "opt-cancel"
+        return dict(state["job"])
+
+    async def fake_run_optimization_in_subprocess(*args, **kwargs):
+        raise OptimizationJobCanceled("optimization job canceled by operator")
+
+    async def fake_append_optimization_process_log(job_id, additions):
+        return None
+
+    monkeypatch.setattr(services, "get_optimization_job", fake_get_optimization_job)
+    monkeypatch.setattr(services, "_run_optimization_in_subprocess", fake_run_optimization_in_subprocess)
+    monkeypatch.setattr(services, "append_optimization_process_log", fake_append_optimization_process_log)
+
+    result = asyncio.run(services.run_optimization_job("opt-cancel"))
+
+    assert result is not None
+    assert result["status"] == "canceled"
+    assert "status=canceled" in result["execution_log"]
+    assert result["failure_reason"] == "optimization job canceled by operator"
 
 
 def test_optimization_job_json_fields_persist_through_service_db_roundtrip(monkeypatch):

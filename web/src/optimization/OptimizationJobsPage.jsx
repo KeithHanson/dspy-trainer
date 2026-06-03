@@ -17,6 +17,7 @@ export function OptimizationJobsPage() {
   const [job, setJob] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isRefreshingJob, setIsRefreshingJob] = useState(false);
+  const [cancelingJobId, setCancelingJobId] = useState("");
   const [deletingJobId, setDeletingJobId] = useState("");
   const [error, setError] = useState("");
   const [moduleNames, setModuleNames] = useState({});
@@ -138,6 +139,30 @@ export function OptimizationJobsPage() {
     }
   };
 
+  const cancelJob = async (targetId) => {
+    const confirmed = window.confirm("Cancel this optimization job?");
+    if (!confirmed) {
+      return;
+    }
+    setCancelingJobId(targetId);
+    setError("");
+    try {
+      const response = await fetch(`${apiBase}/optimization/jobs/${encodeURIComponent(targetId)}/cancel`, { method: "POST" });
+      if (!response.ok) {
+        throw new Error(`Could not cancel optimization job (${response.status})`);
+      }
+      const payload = await response.json();
+      setJobs((current) => current.map((item) => (item.id === targetId ? payload : item)));
+      if (jobId === targetId) {
+        setJob(payload);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not cancel optimization job");
+    } finally {
+      setCancelingJobId("");
+    }
+  };
+
   useEffect(() => {
     if (!jobId) {
       setJob(null);
@@ -205,9 +230,22 @@ export function OptimizationJobsPage() {
                           <td className={`mono ${toneForDelta(delta)}`}>{formatDelta(delta)}</td>
                           <td className="mono">{startedAt}</td>
                           <td>
+                            {canCancelJob(item?.status) ? (
+                              <Button
+                                size="sm"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  cancelJob(item.id);
+                                }}
+                                disabled={cancelingJobId === item.id}
+                              >
+                                {cancelingJobId === item.id ? "Canceling..." : "Cancel"}
+                              </Button>
+                            ) : null}
                             <Button
                               size="sm"
                               variant="danger"
+                              className={canCancelJob(item?.status) ? "optimization-job-action" : ""}
                               onClick={(event) => {
                                 event.stopPropagation();
                                 deleteJob(item.id);
@@ -254,6 +292,11 @@ export function OptimizationJobsPage() {
           <div className="row gap-2">
             <Button onClick={() => navigate("/optimization/jobs")}>All optimization jobs</Button>
             <Button onClick={() => navigate("/optimization")}>Back to launch</Button>
+            {detailJobId && canCancelJob(job?.status) ? (
+              <Button onClick={() => cancelJob(detailJobId)} disabled={cancelingJobId === detailJobId}>
+                {cancelingJobId === detailJobId ? "Canceling..." : "Cancel job"}
+              </Button>
+            ) : null}
             {detailJobId ? (
               <Button variant="danger" onClick={() => deleteJob(detailJobId)} disabled={deletingJobId === detailJobId}>
                 {deletingJobId === detailJobId ? "Deleting..." : "Delete job"}
@@ -441,4 +484,8 @@ function toneForDelta(value) {
     return "runs-kpi-fail";
   }
   return "runs-kpi-warn";
+}
+
+function canCancelJob(status) {
+  return status === "queued" || status === "running";
 }

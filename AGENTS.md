@@ -4,11 +4,37 @@ This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get sta
 
 ## Critical Folders and Files
 
+This section MUST remain up to date after you complete a task. 
+
 - `AGENTS.md`: Operator and agent workflow rules for this repository.
 - `.beads/`: Local beads issue database, hooks, and interaction history.
 - `README.md`: Project overview and high-level goals.
 - `.env.sample`: Source of truth for required environment variables.
 - `docs/NAIVE_PLAN.md`: Product and architecture planning baseline.
+
+## Using Serena tools and Exploring the code base
+
+Serena is an extremely helpful suite of tools for working with code. 
+
+It provides several other tools that should aid you when getting up to speed on the codebase or when completing a feature.
+
+Start out by running the tool initial_instructions and onboarding. 
+
+### Serena Memories
+
+Use the list_memories, write_memory, rename_memory, delete_memory, read_memory, edit_memory tools to help yourself later. 
+
+Good memories are things like high level overviews of code paths, documentation relevant to your tasks from within the dspy/ submodule or within our docs/ folder.
+
+You are encouraged to use memories liberally to keep track of critical information.
+
+### Serena LSP tools for navigating code
+
+The find_implementations, find_symbol, find_declaration, find_referencing_symbols, get_symbols_overview, rename_symbol, replace_symbol_body, safe_delete_symbol tools are FAR better to use than grep to find things. 
+
+If you must execute a raw search for something, utilize the search_for_pattern and find_file tools.
+
+You will RARELY need grep when you use Serena's tools.
 
 ## RTK
 
@@ -214,6 +240,7 @@ bd close bd-42 --reason "Completed" --json
 4. **Completion gate before calling work done**
    - Before marking a bead done, run required tests for new code.
    - Run the full project test suite and confirm all tests pass.
+   - If a feature changed code that runs in Docker containers, restart the affected containers before handing off so the operator can validate the live behavior immediately.
 
 5. **Handle blockers with a new bead**
    - If a major blocker appears, create a dedicated blocker bead immediately.

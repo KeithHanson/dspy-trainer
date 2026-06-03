@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import logging
+import multiprocessing
 from pathlib import Path
 from queue import Empty, Queue
 import random
@@ -22,6 +23,47 @@ from app.config import Settings
 
 
 logger = logging.getLogger(__name__)
+
+
+class OptimizationJobCanceled(RuntimeError):
+    pass
+
+
+def _run_bundle_optimization_subprocess(
+    payload: dict[str, Any],
+    result_queue: Any,
+    log_queue: Any,
+) -> None:
+    from app.executor.module_runner import run_bundle_optimization
+
+    def emit(message: str) -> None:
+        if message:
+            log_queue.put(message)
+
+    try:
+        result = run_bundle_optimization(
+            bundle_path=str(payload["bundle_path"]),
+            strategy=str(payload["strategy"]),
+            train_records=list(payload.get("train_records") or []),
+            val_inputs=list(payload.get("val_inputs") or []),
+            artifact_dir=str(payload["artifact_dir"]),
+            num_threads=int(payload.get("num_threads") or 1),
+            execution_lm_profile=payload.get("execution_lm_profile"),
+            helper_lm_profile=payload.get("helper_lm_profile"),
+            dspy_config=dict(payload.get("dspy_config") or {}),
+            log_event=emit,
+        )
+        result_queue.put({"ok": True, "result": result})
+    except BaseException as exc:
+        result_queue.put(
+            {
+                "ok": False,
+                "error": str(exc),
+                "traceback": traceback.format_exc(),
+            }
+        )
+    finally:
+        log_queue.put(None)
 
 
 def _random_eval_name() -> str:
@@ -127,6 +169,117 @@ class AppServices:
             lines.extend(segment for segment in existing_log.splitlines() if segment)
         lines.extend(segment for segment in additions if isinstance(segment, str) and segment)
         return "\n".join(lines)
+
+    @staticmethod
+    def _terminate_optimization_subprocess(process: Any) -> None:
+        if not process.is_alive():
+            return
+        process.terminate()
+        process.join(timeout=1)
+        if process.is_alive() and hasattr(process, "kill"):
+            process.kill()
+            process.join(timeout=1)
+
+    async def _run_optimization_in_subprocess(
+        self,
+        optimization_job_id: str,
+        *,
+        bundle_path: str,
+        strategy: str,
+        train_records: list[dict[str, Any]],
+        val_inputs: list[dict[str, Any]],
+        artifact_dir: str,
+        num_threads: int,
+        execution_lm_profile: dict[str, Any] | None,
+        helper_lm_profile: dict[str, Any] | None,
+        dspy_config: dict[str, Any],
+        emit: Any,
+    ) -> dict[str, Any]:
+        from app.executor.module_runner import run_bundle_optimization
+
+        if self.redis is None:
+            return await asyncio.to_thread(
+                run_bundle_optimization,
+                bundle_path=bundle_path,
+                strategy=strategy,
+                train_records=train_records,
+                val_inputs=val_inputs,
+                artifact_dir=artifact_dir,
+                num_threads=num_threads,
+                execution_lm_profile=execution_lm_profile,
+                helper_lm_profile=helper_lm_profile,
+                dspy_config=dspy_config,
+                log_event=emit,
+            )
+
+        ctx = multiprocessing.get_context("spawn")
+        result_queue = ctx.Queue()
+        log_queue = ctx.Queue()
+        process = ctx.Process(
+            target=_run_bundle_optimization_subprocess,
+            args=(
+                {
+                    "bundle_path": bundle_path,
+                    "strategy": strategy,
+                    "train_records": train_records,
+                    "val_inputs": val_inputs,
+                    "artifact_dir": artifact_dir,
+                    "num_threads": num_threads,
+                    "execution_lm_profile": execution_lm_profile,
+                    "helper_lm_profile": helper_lm_profile,
+                    "dspy_config": dspy_config,
+                },
+                result_queue,
+                log_queue,
+            ),
+        )
+        process.start()
+        emit(f"optimizer_pid={process.pid}")
+
+        try:
+            while True:
+                while True:
+                    try:
+                        log_message = log_queue.get_nowait()
+                    except Empty:
+                        break
+                    if log_message is None:
+                        continue
+                    emit(str(log_message))
+
+                try:
+                    payload = result_queue.get_nowait()
+                except Empty:
+                    payload = None
+
+                current_job = await self.get_optimization_job(optimization_job_id)
+                if current_job is not None and current_job.get("status") == "canceled":
+                    emit("status=cancel_requested")
+                    self._terminate_optimization_subprocess(process)
+                    raise OptimizationJobCanceled("optimization job canceled by operator")
+
+                if payload is not None:
+                    process.join(timeout=1)
+                    if payload.get("ok"):
+                        result = payload.get("result")
+                        if isinstance(result, dict):
+                            return result
+                        raise RuntimeError("optimization subprocess returned an invalid result payload")
+                    error_message = str(payload.get("error") or "optimization subprocess failed")
+                    child_traceback = str(payload.get("traceback") or "").strip()
+                    if child_traceback:
+                        raise RuntimeError(f"{error_message}\nchild_traceback:\n{child_traceback}")
+                    raise RuntimeError(error_message)
+
+                if not process.is_alive():
+                    process.join(timeout=1)
+                    raise RuntimeError("optimization subprocess exited without returning a result")
+
+                await asyncio.sleep(0.2)
+        finally:
+            self._terminate_optimization_subprocess(process)
+            result_queue.close()
+            log_queue.close()
 
     async def append_optimization_process_log(self, optimization_job_id: str, additions: list[str]) -> None:
         if self.postgres_pool is None:
@@ -1437,6 +1590,13 @@ class AppServices:
             )
         if row is None:
             return await self.get_optimization_job(optimization_job_id)
+        await self.append_optimization_process_log(
+            optimization_job_id,
+            [
+                f"cancel_requested_at={now.isoformat()}",
+                "status=cancel_requested",
+            ],
+        )
         return await self.get_optimization_job(optimization_job_id)
 
     async def run_optimization_job(self, optimization_job_id: str) -> dict[str, Any] | None:
@@ -1490,8 +1650,6 @@ class AppServices:
             strategy = _normalize_optimization_strategy(str(job.get("strategy") or "bootstrap_fewshot"))
             emit(f"normalized_strategy={strategy}")
             if strategy in {"bootstrap_fewshot", "miprov2", "gepa"}:
-                from app.executor.module_runner import run_bundle_optimization
-
                 train_records: list[dict[str, Any]] = []
                 if job.get("dataset_id"):
                     dataset = await self.get_optimization_dataset(str(job["dataset_id"]))
@@ -1554,8 +1712,8 @@ class AppServices:
 
                 artifact_root = Path("/tmp/dspy-trainer/optimization_artifacts") / optimization_job_id
                 emit(f"artifact_dir={artifact_root}")
-                optimization_result = await asyncio.to_thread(
-                    run_bundle_optimization,
+                optimization_result = await self._run_optimization_in_subprocess(
+                    optimization_job_id,
                     bundle_path=str(job["bundle_path"]),
                     strategy=str(job["strategy"]),
                     train_records=train_records,
@@ -1565,7 +1723,7 @@ class AppServices:
                     execution_lm_profile=execution_lm_profile,
                     helper_lm_profile=helper_lm_profile,
                     dspy_config=self._json_dict(job.get("normalized_config")).get("dspy_config", {}),
-                    log_event=emit,
+                    emit=emit,
                 )
             else:
                 from app.executor.module_runner import run_bundle_eval
@@ -1622,6 +1780,20 @@ class AppServices:
                     json.dumps(optimization_result.get("telemetry_summary") or {}),
                     json.dumps(optimization_result.get("comparison_summary") or {}),
                     now2,
+                )
+        except OptimizationJobCanceled as exc:
+            emit("status=canceled")
+            emit(f"error={exc}")
+            flush_stop.set()
+            await flush_task
+            now3 = datetime.now(timezone.utc)
+            async with self.postgres_pool.acquire() as conn:
+                await conn.execute(
+                    "update optimization_jobs set status='canceled', failure_reason=$2, execution_log=$3, finished_at=$4, updated_at=$4 where id=$1",
+                    optimization_job_id,
+                    str(exc),
+                    "\n".join(log_lines),
+                    now3,
                 )
         except Exception as exc:
             emit("status=failed")
