@@ -237,7 +237,7 @@ async def fake_enqueue_optimization_job(self, optimization_job_id):
     ENQUEUED_JOB_IDS.append(optimization_job_id)
 
 
-async def fake_materialize_optimized_bundle(self, optimization_job_id):
+async def fake_materialize_optimized_bundle(self, optimization_job_id, bundle_name=None, bundle_version=None):
     job = JOBS.get(optimization_job_id)
     if job is None or job.get("status") != "succeeded":
         return None
@@ -246,8 +246,8 @@ async def fake_materialize_optimized_bundle(self, optimization_job_id):
         "status": "validated",
         "source": "optimization",
         "source_ref": "/tmp/dspy-trainer/bundles/mod-opt-1",
-        "bundle_name": f"Echo-optimized-{optimization_job_id}",
-        "bundle_version": "0.1.0",
+        "bundle_name": bundle_name or f"Echo-optimized-{optimization_job_id}",
+        "bundle_version": bundle_version or "0.1.0",
         "validation_status": "passed",
         "smoke_status": "pending",
         "diagnostics": [],
@@ -398,9 +398,10 @@ def test_optimization_job_create_get_run_cancel(monkeypatch):
         assert canceled.status_code == 200
         assert canceled.json()["status"] == "succeeded"
 
-        materialized = client.post(f"/optimization/jobs/{job_id}/materialize-bundle")
+        materialized = client.post(f"/optimization/jobs/{job_id}/materialize-bundle", json={"bundle_name": "Echo-optimized-opt-1", "bundle_version": "2.0.0"})
         assert materialized.status_code == 200
         assert materialized.json()["bundle_name"] == f"Echo-optimized-{job_id}"
+        assert materialized.json()["bundle_version"] == "2.0.0"
         assert materialized.json()["validation_status"] == "passed"
 
         deleted = client.delete(f"/optimization/jobs/{job_id}")
@@ -504,7 +505,7 @@ def test_optimization_job_not_found_paths(monkeypatch):
         assert client.delete("/optimization/jobs/missing").status_code == 404
         assert client.post("/optimization/jobs/missing/run").status_code == 404
         assert client.post("/optimization/jobs/missing/cancel").status_code == 404
-        assert client.post("/optimization/jobs/missing/materialize-bundle").status_code == 404
+        assert client.post("/optimization/jobs/missing/materialize-bundle", json={"bundle_name": "x"}).status_code == 404
 
 
 def test_materialize_bundle_rejects_non_succeeded_job(monkeypatch):
@@ -516,6 +517,6 @@ def test_materialize_bundle_rejects_non_succeeded_job(monkeypatch):
         "artifact_path": None,
     }
     with TestClient(main_mod.app) as client:
-        response = client.post("/optimization/jobs/opt-canceled/materialize-bundle")
+        response = client.post("/optimization/jobs/opt-canceled/materialize-bundle", json={"bundle_name": "x"})
         assert response.status_code == 409
         assert response.json()["error"] == "only succeeded optimization jobs can create optimized bundles"

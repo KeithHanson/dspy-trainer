@@ -131,6 +131,11 @@ class OptimizationDatasetDeriveRequest(BaseModel):
     persist: bool = False
 
 
+class MaterializeOptimizedBundleRequest(BaseModel):
+    bundle_name: str | None = None
+    bundle_version: str | None = None
+
+
 class AgentRunPlanCreateRequest(BaseModel):
     project_id: str
     module_import_id: str
@@ -480,7 +485,11 @@ async def cancel_optimization_job(optimization_job_id: str, request: Request):
 
 
 @app.post("/optimization/jobs/{optimization_job_id}/materialize-bundle")
-async def materialize_optimized_bundle(optimization_job_id: str, request: Request):
+async def materialize_optimized_bundle(
+    optimization_job_id: str,
+    request: Request,
+    payload: MaterializeOptimizedBundleRequest,
+):
     services: AppServices = request.app.state.services
     job = await services.get_optimization_job(optimization_job_id)
     if job is None:
@@ -489,7 +498,11 @@ async def materialize_optimized_bundle(optimization_job_id: str, request: Reques
         return JSONResponse(status_code=409, content={"error": "only succeeded optimization jobs can create optimized bundles"})
     if not str(job.get("artifact_path") or "").strip():
         return JSONResponse(status_code=409, content={"error": "optimization job has no saved artifact to materialize"})
-    result = await services.materialize_optimized_bundle(optimization_job_id)
+    result = await services.materialize_optimized_bundle(
+        optimization_job_id,
+        bundle_name=payload.bundle_name,
+        bundle_version=payload.bundle_version,
+    )
     if result is None:
         return JSONResponse(status_code=400, content={"error": "optimized bundle could not be materialized"})
     return result

@@ -1096,13 +1096,15 @@ def test_materialize_optimized_bundle_creates_new_bundle(tmp_path, monkeypatch):
     monkeypatch.setattr(services, "set_module_bundle_metadata", fake_set_module_bundle_metadata)
     monkeypatch.setattr(services, "set_validation_status", fake_set_validation_status)
 
-    result = asyncio.run(services.materialize_optimized_bundle("opt-123"))
+    result = asyncio.run(services.materialize_optimized_bundle("opt-123", bundle_name="custom-bundle", bundle_version="2.0.0"))
 
     assert result is not None
-    assert result["bundle_name"] == "echo-bundle-optimized-opt-123"
+    assert result["bundle_name"] == "custom-bundle"
     materialized_root = Path(result["source_ref"])
     assert materialized_root.joinpath("program.json").exists()
     bundle_toml = materialized_root.joinpath("bundle.toml").read_text(encoding="utf-8")
+    assert 'name = "custom-bundle"' in bundle_toml
+    assert 'version = "2.0.0"' in bundle_toml
     assert 'optimized_program_state = "program.json"' in bundle_toml
     assert 'source_optimization_job_id = "opt-123"' in bundle_toml
     assert validation_calls == [("mod-opt-1", "passed")]

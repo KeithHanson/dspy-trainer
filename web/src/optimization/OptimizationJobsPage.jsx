@@ -22,7 +22,10 @@ export function OptimizationJobsPage() {
   const [deletingJobId, setDeletingJobId] = useState("");
   const [error, setError] = useState("");
   const [materializedBundle, setMaterializedBundle] = useState(null);
+  const [bundleModalJob, setBundleModalJob] = useState(null);
+  const [bundleForm, setBundleForm] = useState({ name: "", version: "" });
   const [moduleNames, setModuleNames] = useState({});
+  const [moduleVersions, setModuleVersions] = useState({});
   const [profileNames, setProfileNames] = useState({});
 
   useEffect(() => {
@@ -34,14 +37,18 @@ export function OptimizationJobsPage() {
         }
         const payload = await response.json();
         const next = {};
+        const versions = {};
         (Array.isArray(payload) ? payload : []).forEach((item) => {
           if (item?.id) {
             next[item.id] = item.bundle_name || item.source_ref || item.id;
+            versions[item.id] = item.bundle_version || "";
           }
         });
         setModuleNames(next);
+        setModuleVersions(versions);
       } catch {
         setModuleNames({});
+        setModuleVersions({});
       }
     };
 
@@ -165,12 +172,16 @@ export function OptimizationJobsPage() {
     }
   };
 
-  const materializeBundle = async (targetId) => {
+  const materializeBundle = async (targetId, bundleName, bundleVersion) => {
     setMaterializingJobId(targetId);
     setError("");
     setMaterializedBundle(null);
     try {
-      const response = await fetch(`${apiBase}/optimization/jobs/${encodeURIComponent(targetId)}/materialize-bundle`, { method: "POST" });
+      const response = await fetch(`${apiBase}/optimization/jobs/${encodeURIComponent(targetId)}/materialize-bundle`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bundle_name: bundleName, bundle_version: bundleVersion }),
+      });
       if (!response.ok) {
         const detail = await readApiError(response);
         throw new Error(detail || `Could not create optimized bundle (${response.status})`);
@@ -182,6 +193,28 @@ export function OptimizationJobsPage() {
     } finally {
       setMaterializingJobId("");
     }
+  };
+
+  const openMaterializeModal = (targetId) => {
+    const currentJob = jobId === targetId ? job : jobs.find((item) => item.id === targetId);
+    const suggestedName = buildOptimizedBundleDefaultName(currentJob, moduleNames);
+    const suggestedVersion = String((currentJob?.module_import_id && moduleVersions?.[currentJob.module_import_id]) || "0.1.0");
+    setBundleModalJob(currentJob);
+    setBundleForm({ name: suggestedName, version: suggestedVersion });
+  };
+
+  const submitMaterializeModal = async () => {
+    if (!bundleModalJob?.id) {
+      return;
+    }
+    const nextName = bundleForm.name.trim();
+    const nextVersion = bundleForm.version.trim();
+    if (!nextName || !nextVersion) {
+      setError("Bundle name and version are required.");
+      return;
+    }
+    await materializeBundle(bundleModalJob.id, nextName, nextVersion);
+    setBundleModalJob(null);
   };
 
   useEffect(() => {
@@ -307,7 +340,7 @@ export function OptimizationJobsPage() {
           </div>
           <div className="row gap-2 optimization-detail-actions">
             {detailJobId && job?.status === "succeeded" ? (
-              <Button onClick={() => materializeBundle(detailJobId)} disabled={materializingJobId === detailJobId}>
+              <Button onClick={() => openMaterializeModal(detailJobId)} disabled={materializingJobId === detailJobId}>
                 {materializingJobId === detailJobId ? "Creating bundle..." : "Create optimized bundle"}
               </Button>
             ) : null}
@@ -331,6 +364,32 @@ export function OptimizationJobsPage() {
             <div className="optimization-success-title">Optimized bundle created</div>
             <div className="optimization-success-copy">
               <Link className="lnk" to="/bundles">{materializedBundle.bundle_name || materializedBundle.id}</Link>
+            </div>
+          </div>
+        ) : null}
+        {bundleModalJob ? (
+          <div className="bundles-modal-backdrop" onClick={() => setBundleModalJob(null)}>
+            <div className="bundles-modal panel card-pad" role="dialog" aria-modal="true" aria-label="Create optimized bundle" onClick={(event) => event.stopPropagation()}>
+              <div className="row between" style={{ marginBottom: 10 }}>
+                <h3 className="t-h2">Create optimized bundle</h3>
+                <Button variant="ghost" size="sm" onClick={() => setBundleModalJob(null)}>Close</Button>
+              </div>
+              <div className="col gap-2">
+                <label className="col gap-1" htmlFor="optimized-bundle-name">
+                  <span className="t-label">Bundle name</span>
+                  <input id="optimized-bundle-name" aria-label="Bundle name" className="bundles-input" value={bundleForm.name} onChange={(event) => setBundleForm((prev) => ({ ...prev, name: event.target.value }))} />
+                </label>
+                <label className="col gap-1" htmlFor="optimized-bundle-version">
+                  <span className="t-label">Version</span>
+                  <input id="optimized-bundle-version" aria-label="Version" className="bundles-input" value={bundleForm.version} onChange={(event) => setBundleForm((prev) => ({ ...prev, version: event.target.value }))} />
+                </label>
+              </div>
+              <div className="row gap-2" style={{ marginTop: 12, justifyContent: "flex-end" }}>
+                <Button onClick={() => setBundleModalJob(null)}>Cancel</Button>
+                <Button variant="primary" onClick={submitMaterializeModal} disabled={materializingJobId === bundleModalJob.id}>
+                  {materializingJobId === bundleModalJob.id ? "Creating bundle..." : "Create bundle"}
+                </Button>
+              </div>
             </div>
           </div>
         ) : null}
@@ -503,4 +562,11 @@ async function readApiError(response) {
     return "";
   }
   return "";
+}
+
+function buildOptimizedBundleDefaultName(job, moduleNames) {
+  const moduleName = String((job?.module_import_id && moduleNames?.[job.module_import_id]) || job?.module_import_id || "module");
+  const optimizationJobId = String(job?.id || "optimized");
+  const shortJobId = optimizationJobId.split("-")[0] || optimizationJobId;
+  return `${moduleName}-optimized-${shortJobId}`;
 }

@@ -28,7 +28,7 @@ describe("OptimizationJobsPage", () => {
         });
       }
       if (String(url).endsWith("/modules") && init?.method === "GET") {
-        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "mod-1", bundle_name: "Echo" }]) });
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "mod-1", bundle_name: "Echo", bundle_version: "0.3.0" }]) });
       }
       if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
@@ -100,7 +100,7 @@ describe("OptimizationJobsPage", () => {
         });
       }
       if (String(url).endsWith("/modules") && init?.method === "GET") {
-        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "mod-1", bundle_name: "Echo" }]) });
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "mod-1", bundle_name: "Echo", bundle_version: "0.3.0" }]) });
       }
       if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
         return Promise.resolve({
@@ -221,7 +221,7 @@ describe("OptimizationJobsPage", () => {
         });
       }
       if (String(url).endsWith("/modules") && init?.method === "GET") {
-        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "mod-1", bundle_name: "Echo" }]) });
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "mod-1", bundle_name: "Echo", bundle_version: "0.3.0" }]) });
       }
       if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
         return Promise.resolve({
@@ -302,7 +302,7 @@ describe("OptimizationJobsPage", () => {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue(payload) });
       }
       if (String(url).endsWith("/modules") && init?.method === "GET") {
-        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "mod-1", bundle_name: "Echo" }]) });
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "mod-1", bundle_name: "Echo", bundle_version: "0.3.0" }]) });
       }
       if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "lm-1", name: "Execution Profile" }]) });
@@ -350,7 +350,7 @@ describe("OptimizationJobsPage", () => {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ id: "opt-job-delete", deleted: true }) });
       }
       if (String(url).endsWith("/modules") && init?.method === "GET") {
-        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "mod-1", bundle_name: "Echo" }]) });
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "mod-1", bundle_name: "Echo", bundle_version: "0.3.0" }]) });
       }
       if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
@@ -411,7 +411,7 @@ describe("OptimizationJobsPage", () => {
         });
       }
       if (String(url).endsWith("/modules") && init?.method === "GET") {
-        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "mod-1", bundle_name: "Echo" }]) });
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "mod-1", bundle_name: "Echo", bundle_version: "0.3.0" }]) });
       }
       if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
@@ -500,7 +500,7 @@ describe("OptimizationJobsPage", () => {
         });
       }
       if (String(url).endsWith("/modules") && init?.method === "GET") {
-        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "mod-1", bundle_name: "Echo" }]) });
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "mod-1", bundle_name: "Echo", bundle_version: "0.3.0" }]) });
       }
       if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "lm-1", name: "Execution Profile" }]) });
@@ -563,6 +563,7 @@ describe("OptimizationJobsPage", () => {
         });
       }
       if (String(url).endsWith("/optimization/jobs/opt-job-001/materialize-bundle") && init?.method === "POST") {
+        expect(JSON.parse(init.body)).toEqual({ bundle_name: "Echo-optimized-opt-job", bundle_version: "2.0.0" });
         return Promise.resolve({
           ok: true,
           json: vi.fn().mockResolvedValue({
@@ -572,7 +573,7 @@ describe("OptimizationJobsPage", () => {
         });
       }
       if (String(url).endsWith("/modules") && init?.method === "GET") {
-        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "mod-1", bundle_name: "Echo" }]) });
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "mod-1", bundle_name: "Echo", bundle_version: "0.3.0" }]) });
       }
       if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "lm-1", name: "Execution Profile" }]) });
@@ -581,7 +582,6 @@ describe("OptimizationJobsPage", () => {
     });
 
     vi.stubGlobal("fetch", fetchMock);
-
     render(
       <MemoryRouter initialEntries={["/optimization/jobs?job=opt-job-001"]}>
         <OptimizationJobsPage />
@@ -591,6 +591,11 @@ describe("OptimizationJobsPage", () => {
     expect(await screen.findByRole("button", { name: "Create optimized bundle" })).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "Create optimized bundle" }));
+    await userEvent.clear(screen.getByLabelText("Bundle name"));
+    await userEvent.type(screen.getByLabelText("Bundle name"), "Echo-optimized-opt-job");
+    await userEvent.clear(screen.getByLabelText("Version"));
+    await userEvent.type(screen.getByLabelText("Version"), "2.0.0");
+    await userEvent.click(screen.getByRole("button", { name: "Create bundle" }));
 
     await waitFor(() => {
       expect(screen.getByText("Optimized bundle created")).toBeInTheDocument();
@@ -638,7 +643,7 @@ describe("OptimizationJobsPage", () => {
         });
       }
       if (String(url).endsWith("/modules") && init?.method === "GET") {
-        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "mod-1", bundle_name: "Echo" }]) });
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "mod-1", bundle_name: "Echo", bundle_version: "0.3.0" }]) });
       }
       if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "lm-1", name: "Execution Profile" }]) });
@@ -647,7 +652,6 @@ describe("OptimizationJobsPage", () => {
     });
 
     vi.stubGlobal("fetch", fetchMock);
-
     render(
       <MemoryRouter initialEntries={["/optimization/jobs?job=opt-job-001"]}>
         <OptimizationJobsPage />
@@ -655,8 +659,66 @@ describe("OptimizationJobsPage", () => {
     );
 
     await userEvent.click(await screen.findByRole("button", { name: "Create optimized bundle" }));
+    await userEvent.click(screen.getByRole("button", { name: "Create bundle" }));
 
     expect(await screen.findByText("only succeeded optimization jobs can create optimized bundles")).toBeInTheDocument();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("does not materialize bundle when prompt is canceled", async () => {
+    const fetchMock = vi.fn((url, init) => {
+      if (String(url).endsWith("/optimization/jobs/opt-job-001") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue({
+            id: "opt-job-001",
+            status: "succeeded",
+            module_import_id: "mod-1",
+            strategy: "gepa",
+            objective: "optimize_judge_feedback",
+            execution_lm_profile_id: "lm-1",
+            helper_lm_profile_id: null,
+            dataset_id: "ods-1",
+            validation_dataset_id: null,
+            source_run_plan_id: "plan-111",
+            created_at: "2026-01-01T00:00:00+00:00",
+            run_started_at: "2026-01-01T00:01:00+00:00",
+            finished_at: "2026-01-01T00:05:00+00:00",
+            artifact_path: "programs/opt-job-001/program.json",
+            artifact_metadata: { artifact_type: "dspy_program_state" },
+            comparison_summary: { baseline_score_pct: 50, optimized_score_pct: 100, score_delta_pct: 50 },
+            telemetry_summary: {},
+            request_config: {},
+            normalized_config: {},
+            execution_log: "job=opt-job-001\nstatus=succeeded",
+            failure_reason: null,
+          }),
+        });
+      }
+      if (String(url).endsWith("/modules") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "mod-1", bundle_name: "Echo", bundle_version: "0.3.0" }]) });
+      }
+      if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "lm-1", name: "Execution Profile" }]) });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+    render(
+      <MemoryRouter initialEntries={["/optimization/jobs?job=opt-job-001"]}>
+        <OptimizationJobsPage />
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(await screen.findByRole("button", { name: "Create optimized bundle" }));
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      expect.stringContaining("/materialize-bundle"),
+      expect.anything(),
+    );
 
     vi.unstubAllGlobals();
   });

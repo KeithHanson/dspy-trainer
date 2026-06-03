@@ -876,7 +876,13 @@ class AppServices:
         suffix = "" if not content.endswith("\n") else ""
         return f"{content}{suffix}\n{line}\n" if content else f"{line}\n"
 
-    async def materialize_optimized_bundle(self, optimization_job_id: str) -> dict[str, Any] | None:
+    async def materialize_optimized_bundle(
+        self,
+        optimization_job_id: str,
+        *,
+        bundle_name: str | None = None,
+        bundle_version: str | None = None,
+    ) -> dict[str, Any] | None:
         job = await self.get_optimization_job(optimization_job_id)
         if job is None or str(job.get("status")) != "succeeded":
             return None
@@ -899,7 +905,10 @@ class AppServices:
             return None
 
         base_bundle_name = str(source_module.get("bundle_name") or source_root.name or "module-bundle").strip() or "module-bundle"
-        optimized_bundle_name = f"{base_bundle_name}-optimized-{optimization_job_id}"
+        base_bundle_version = str(source_module.get("bundle_version") or "").strip() or "0.1.0"
+        default_optimized_bundle_name = f"{base_bundle_name}-optimized-{optimization_job_id}"
+        optimized_bundle_name = str(bundle_name or "").strip() or default_optimized_bundle_name
+        optimized_bundle_version = str(bundle_version or "").strip() or base_bundle_version
         created = await self.create_module_import("optimization", optimization_job_id, None)
         new_module_id = str(created["id"])
 
@@ -916,6 +925,7 @@ class AppServices:
         bundle_toml_path = target_dir / "bundle.toml"
         bundle_toml = bundle_toml_path.read_text(encoding="utf-8")
         bundle_toml = self._upsert_toml_string_key(bundle_toml, "name", optimized_bundle_name)
+        bundle_toml = self._upsert_toml_string_key(bundle_toml, "version", optimized_bundle_version)
         bundle_toml = self._upsert_toml_string_key(bundle_toml, "optimized_program_state", artifact_target_name)
         bundle_toml = self._upsert_toml_string_key(bundle_toml, "source_optimization_job_id", optimization_job_id)
         bundle_toml_path.write_text(bundle_toml, encoding="utf-8")
@@ -925,7 +935,7 @@ class AppServices:
         await self.set_module_bundle_metadata(
             new_module_id,
             report.metadata.get("name") if isinstance(report.metadata.get("name"), str) else optimized_bundle_name,
-            report.metadata.get("version") if isinstance(report.metadata.get("version"), str) else None,
+            report.metadata.get("version") if isinstance(report.metadata.get("version"), str) else optimized_bundle_version,
         )
         status = "passed" if report.passed else "failed"
         await self.set_validation_status(new_module_id, status, report.diagnostics)
