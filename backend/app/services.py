@@ -51,6 +51,7 @@ def _run_bundle_optimization_subprocess(
             execution_lm_profile=payload.get("execution_lm_profile"),
             helper_lm_profile=payload.get("helper_lm_profile"),
             dspy_config=dict(payload.get("dspy_config") or {}),
+            baseline_summary=dict(payload.get("baseline_summary") or {}) or None,
             log_event=emit,
         )
         result_queue.put({"ok": True, "result": result})
@@ -193,6 +194,7 @@ class AppServices:
         execution_lm_profile: dict[str, Any] | None,
         helper_lm_profile: dict[str, Any] | None,
         dspy_config: dict[str, Any],
+        baseline_summary: dict[str, Any] | None,
         emit: Any,
     ) -> dict[str, Any]:
         from app.executor.module_runner import run_bundle_optimization
@@ -209,6 +211,7 @@ class AppServices:
                 execution_lm_profile=execution_lm_profile,
                 helper_lm_profile=helper_lm_profile,
                 dspy_config=dspy_config,
+                baseline_summary=baseline_summary,
                 log_event=emit,
             )
 
@@ -228,6 +231,7 @@ class AppServices:
                     "execution_lm_profile": execution_lm_profile,
                     "helper_lm_profile": helper_lm_profile,
                     "dspy_config": dspy_config,
+                    "baseline_summary": baseline_summary,
                 },
                 result_queue,
                 log_queue,
@@ -280,6 +284,32 @@ class AppServices:
             self._terminate_optimization_subprocess(process)
             result_queue.close()
             log_queue.close()
+
+    @staticmethod
+    def _build_source_run_plan_baseline(tasks: list[dict[str, Any]]) -> dict[str, Any] | None:
+        scored = [task for task in tasks if isinstance(task, dict) and task.get("score") is not None]
+        if not scored:
+            return None
+        score_values = [float(task["score"]) for task in scored]
+        return {
+            "score_pct": (sum(score_values) / len(score_values)) * 100.0,
+            "item_count": len(scored),
+        }
+
+    async def _get_source_run_plan_baseline(
+        self,
+        *,
+        project_id: str,
+        module_import_id: str,
+        source_run_plan_id: str,
+    ) -> dict[str, Any] | None:
+        plan = await self.get_agent_run_plan(source_run_plan_id)
+        if plan is None:
+            return None
+        if str(plan.get("project_id")) != project_id or str(plan.get("module_import_id")) != module_import_id:
+            return None
+        source_run_tasks = await self._list_all_agent_run_tasks(source_run_plan_id)
+        return self._build_source_run_plan_baseline(source_run_tasks)
 
     async def append_optimization_process_log(self, optimization_job_id: str, additions: list[str]) -> None:
         if self.postgres_pool is None:
@@ -1104,6 +1134,29 @@ class AppServices:
             raise RuntimeError("database not initialized")
         now = datetime.now(timezone.utc)
         job_id = str(uuid4())
+        comparison_summary: dict[str, Any] = {}
+        creation_log_additions: list[str] = []
+        if source_run_plan_id is not None:
+            baseline_summary = await self._get_source_run_plan_baseline(
+                project_id=project_id,
+                module_import_id=module_import_id,
+                source_run_plan_id=source_run_plan_id,
+            )
+            if baseline_summary is not None:
+                comparison_summary = {
+                    "baseline_score_pct": baseline_summary["score_pct"],
+                    "optimized_score_pct": None,
+                    "score_delta_pct": None,
+                    "baseline_item_count": baseline_summary["item_count"],
+                    "optimized_item_count": None,
+                }
+                creation_log_additions.extend(
+                    [
+                        f"baseline_source_run_plan_id={source_run_plan_id}",
+                        f"baseline_score_pct={baseline_summary['score_pct']}",
+                        f"baseline_item_count={baseline_summary['item_count']}",
+                    ]
+                )
         initial_log = self._merge_process_log(
             None,
             [
@@ -1112,6 +1165,7 @@ class AppServices:
                 f"objective={objective.strip() or 'optimize_demo_quality'}",
                 f"created_at={now.isoformat()}",
                 "status=created",
+                *creation_log_additions,
             ],
         )
         async with self.postgres_pool.acquire() as conn:
@@ -1151,8 +1205,8 @@ class AppServices:
                 )
                 values (
                   $1, 'queued', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb,
-                  $13::jsonb, $14::jsonb, $15, $16, $17, null, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
-                  null, null, null, $18, $19
+                  $13::jsonb, $14::jsonb, $15, $16, $17, null, '{}'::jsonb, '{}'::jsonb, $18::jsonb,
+                  null, null, null, $19, $20
                 )
                 """,
                 job_id,
@@ -1172,6 +1226,7 @@ class AppServices:
                 max(1, num_threads),
                 source_run_plan_id,
                 initial_log,
+                json.dumps(comparison_summary),
                 now,
                 now,
             )
@@ -1696,6 +1751,18 @@ class AppServices:
                     emit(f"validation_dataset_id={job['validation_dataset_id']}")
                 emit(f"validation_input_count={len(validation_inputs)}")
 
+                baseline_summary = None
+                if job.get("source_run_plan_id"):
+                    baseline_summary = await self._get_source_run_plan_baseline(
+                        project_id=str(job["project_id"]),
+                        module_import_id=str(job["module_import_id"]),
+                        source_run_plan_id=str(job["source_run_plan_id"]),
+                    )
+                    if baseline_summary is not None:
+                        emit(f"baseline_source_run_plan_id={job['source_run_plan_id']}")
+                        emit(f"baseline_score_pct={baseline_summary['score_pct']}")
+                        emit(f"baseline_item_count={baseline_summary['item_count']}")
+
                 execution_lm_profile = None
                 if job.get("execution_lm_profile_id"):
                     execution_lm_profile = await self.get_lm_profile(str(job["execution_lm_profile_id"]))
@@ -1723,6 +1790,7 @@ class AppServices:
                     execution_lm_profile=execution_lm_profile,
                     helper_lm_profile=helper_lm_profile,
                     dspy_config=self._json_dict(job.get("normalized_config")).get("dspy_config", {}),
+                    baseline_summary=baseline_summary,
                     emit=emit,
                 )
             else:

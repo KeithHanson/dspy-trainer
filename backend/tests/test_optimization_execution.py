@@ -145,12 +145,12 @@ class _PersistentDbConn:
                 "artifact_path": None,
                 "artifact_metadata": "{}",
                 "telemetry_summary": "{}",
-                "comparison_summary": "{}",
+                "comparison_summary": params[17],
                 "failure_reason": None,
                 "run_started_at": None,
                 "finished_at": None,
-                "created_at": params[17],
-                "updated_at": params[18],
+                "created_at": params[18],
+                "updated_at": params[19],
             }
             return "INSERT 1"
 
@@ -262,6 +262,12 @@ class _PersistentDbConn:
                 return dict(dataset)
             return None
 
+        if "from agent_run_plans" in normalized and "where id = $1" in normalized:
+            plan = self.state.get("agent_run_plans", {}).get(str(params[0]))
+            if isinstance(plan, dict):
+                return dict(plan)
+            return None
+
         return None
 
     async def fetch(self, query, *params):
@@ -275,6 +281,12 @@ class _PersistentDbConn:
                 reverse=True,
             )
             return [{"id": job_id} for job_id in ids[offset : offset + limit]]
+        if "from agent_run_tasks" in normalized and "where plan_id = $1" in normalized:
+            plan_id = str(params[0])
+            task_rows = list(self.state.get("agent_run_tasks", {}).get(plan_id, []))
+            limit = int(params[1])
+            offset = int(params[2])
+            return task_rows[offset : offset + limit]
         return []
 
     async def fetchval(self, query, *params):
@@ -285,6 +297,10 @@ class _PersistentDbConn:
             return 1 if params[0] in self.state.get("lm_profiles", set()) else None
         if "select 1 from optimization_datasets where id = $1" in normalized:
             return 1 if params[0] in self.state.get("optimization_datasets", {}) else None
+        if "select 1 from agent_run_plans where id = $1" in normalized:
+            return 1 if params[0] in self.state.get("agent_run_plans", {}) else None
+        if "select count(*) from agent_run_tasks where plan_id = $1" in normalized:
+            return len(self.state.get("agent_run_tasks", {}).get(str(params[0]), []))
         return None
 
 
@@ -602,6 +618,7 @@ def test_run_optimization_job_derives_records_from_source_run_plan(monkeypatch):
     def fake_run_bundle_optimization(**kwargs):
         assert kwargs["train_records"][0]["label"] == {"expected": "Paris"}
         assert kwargs["train_records"][0]["prediction"] == {"answer": "Paris"}
+        assert kwargs["baseline_summary"] == {"score_pct": 90.0, "item_count": 2}
         kwargs["log_event"]("derived dataset raw line")
         return {
             "artifact_path": "/tmp/dspy-trainer/optimization_artifacts/opt-derive/program.json",
@@ -612,6 +629,14 @@ def test_run_optimization_job_derives_records_from_source_run_plan(monkeypatch):
 
     monkeypatch.setattr(services, "get_optimization_job", fake_get_optimization_job)
     monkeypatch.setattr(services, "derive_optimization_dataset", fake_derive_optimization_dataset)
+    async def fake_get_source_run_plan_baseline(**kwargs):
+        assert kwargs == {
+            "project_id": "proj-1",
+            "module_import_id": "mod-1",
+            "source_run_plan_id": "plan-1",
+        }
+        return {"score_pct": 90.0, "item_count": 2}
+    monkeypatch.setattr(services, "_get_source_run_plan_baseline", fake_get_source_run_plan_baseline)
     async def fake_append_optimization_process_log(job_id, additions):
         return None
     monkeypatch.setattr(services, "append_optimization_process_log", fake_append_optimization_process_log)
@@ -622,6 +647,7 @@ def test_run_optimization_job_derives_records_from_source_run_plan(monkeypatch):
     assert result is not None
     assert result["status"] == "succeeded"
     assert "derived_source_run_plan_id=plan-1" in result["execution_log"]
+    assert "baseline_source_run_plan_id=plan-1" in result["execution_log"]
     assert "derived dataset raw line" in result["execution_log"]
 
 
@@ -823,6 +849,70 @@ def test_optimization_job_json_fields_persist_through_service_db_roundtrip(monke
                 "updated_at": fixed_now,
             }
         },
+        "agent_run_plans": {
+            "plan-1": {
+                "id": "plan-1",
+                "status": "succeeded",
+                "project_id": "proj-1",
+                "module_import_id": "mod-1",
+                "scenario_id": "scn-1",
+                "dataset_version": "v1",
+                "plan_name": "Baseline plan",
+                "lm_profile_id": None,
+                "bundle_path": str(FIXTURES / "valid_bundle"),
+                "eval_inputs": [],
+                "mlflow_experiment_id": None,
+                "mlflow_parent_run_id": None,
+                "runs_per_question": 1,
+                "max_workers": 1,
+                "total_tasks": 2,
+                "completed_tasks": 2,
+                "failed_tasks": 0,
+                "failure_reason": None,
+                "created_at": fixed_now,
+                "updated_at": fixed_now,
+            }
+        },
+        "agent_run_tasks": {
+            "plan-1": [
+                {
+                    "id": "task-1",
+                    "plan_id": "plan-1",
+                    "status": "succeeded",
+                    "question_index": 0,
+                    "attempt_index": 0,
+                    "input_payload": {"question": "France capital?"},
+                    "label_payload": {"expected": "Paris"},
+                    "prediction_payload": {"answer": "Paris"},
+                    "score": 0.5,
+                    "eval_pass": False,
+                    "rationale": "partial",
+                    "error": None,
+                    "worker_log": "",
+                    "worker_id": "worker-1",
+                    "created_at": fixed_now,
+                    "updated_at": fixed_now,
+                },
+                {
+                    "id": "task-2",
+                    "plan_id": "plan-1",
+                    "status": "succeeded",
+                    "question_index": 1,
+                    "attempt_index": 0,
+                    "input_payload": {"question": "Spain capital?"},
+                    "label_payload": {"expected": "Madrid"},
+                    "prediction_payload": {"answer": "Madrid"},
+                    "score": 1.0,
+                    "eval_pass": True,
+                    "rationale": "exact_match",
+                    "error": None,
+                    "worker_log": "",
+                    "worker_id": "worker-1",
+                    "created_at": fixed_now,
+                    "updated_at": fixed_now,
+                },
+            ]
+        },
         "lm_profiles": set(),
     }
     setattr(services, "postgres_pool", _PersistentDbPool(state))
@@ -843,14 +933,23 @@ def test_optimization_job_json_fields_persist_through_service_db_roundtrip(monke
             train_inputs=[],
             val_inputs=[],
             num_threads=1,
-            source_run_plan_id=None,
+            source_run_plan_id="plan-1",
         )
     )
     assert created is not None
+    assert created["comparison_summary"] == {
+        "baseline_score_pct": 75.0,
+        "optimized_score_pct": None,
+        "score_delta_pct": None,
+        "baseline_item_count": 2,
+        "optimized_item_count": None,
+    }
 
     stored_before_run = state["optimization_jobs"][created["id"]]
     assert isinstance(stored_before_run["request_config"], str)
     assert isinstance(stored_before_run["normalized_config"], str)
+    assert json.loads(stored_before_run["comparison_summary"])["baseline_score_pct"] == 75.0
+    assert "baseline_source_run_plan_id=plan-1" in stored_before_run["execution_log"]
 
     def fake_run_bundle_optimization(**kwargs):
         assert kwargs["strategy"] == "gepa"

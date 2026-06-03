@@ -7,7 +7,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.executor import module_runner
-from app.executor.module_runner import run_bundle_eval
+from app.executor.module_runner import run_bundle_eval, run_bundle_optimization
 
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "module_bundles"
@@ -185,3 +185,36 @@ def test_build_lm_profile_uses_azure_responses_compat_class_by_default(monkeypat
     )
 
     assert captured["class_path"] == module_runner.AZURE_RESPONSES_COMPAT_CLASS_PATH
+
+
+def test_run_bundle_optimization_reuses_source_baseline(monkeypatch, tmp_path):
+    phases: list[str] = []
+
+    def fake_evaluate_program(program, raw_metric_fn, eval_inputs, pass_threshold, lm, phase_name="eval", log_event=None):
+        del program, raw_metric_fn, eval_inputs, pass_threshold, lm, log_event
+        phases.append(phase_name)
+        return {"score_pct": 100.0, "items": [{}]}
+
+    monkeypatch.setattr(module_runner, "_evaluate_program", fake_evaluate_program)
+
+    result = run_bundle_optimization(
+        bundle_path=str(FIXTURES / "valid_bundle"),
+        strategy="bootstrap_fewshot",
+        train_records=[
+            {
+                "input": {"question": "France capital?"},
+                "label": {"expected": "Paris"},
+                "prediction": {"answer": "Paris"},
+            }
+        ],
+        val_inputs=[],
+        artifact_dir=str(tmp_path / "artifacts"),
+        num_threads=1,
+        baseline_summary={"score_pct": 50.0, "item_count": 3},
+    )
+
+    assert phases == ["optimized_eval"]
+    assert result["comparison_summary"]["baseline_score_pct"] == 50.0
+    assert result["comparison_summary"]["baseline_item_count"] == 3
+    assert result["comparison_summary"]["optimized_score_pct"] == 100.0
+    assert result["comparison_summary"]["score_delta_pct"] == 50.0

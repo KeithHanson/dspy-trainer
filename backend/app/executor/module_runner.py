@@ -586,6 +586,7 @@ def run_bundle_optimization(
     execution_lm_profile: dict[str, Any] | None = None,
     helper_lm_profile: dict[str, Any] | None = None,
     dspy_config: dict[str, Any] | None = None,
+    baseline_summary: dict[str, Any] | None = None,
     log_event: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     def _log(message: str) -> None:
@@ -606,13 +607,14 @@ def run_bundle_optimization(
         return None
 
     student_program = module_mod.build_program()
-    baseline_program = module_mod.build_program()
+    baseline_program = module_mod.build_program() if baseline_summary is None else None
 
     execution_lm = _build_execution_lm()
     if execution_lm is not None:
         _disable_lm_cache(execution_lm)
         student_program.set_lm(execution_lm)
-        baseline_program.set_lm(execution_lm)
+        if baseline_program is not None:
+            baseline_program.set_lm(execution_lm)
 
     helper_lm = None
     if helper_lm_profile is not None:
@@ -764,22 +766,29 @@ def run_bundle_optimization(
         else:
             raise RuntimeError(f"unsupported optimization strategy: {strategy}")
 
-        baseline_eval_lm = _build_execution_lm()
-        if baseline_eval_lm is not None:
-            _disable_lm_cache(baseline_eval_lm)
         optimized_eval_lm = _build_execution_lm()
         if optimized_eval_lm is not None:
             _disable_lm_cache(optimized_eval_lm)
 
-        baseline_report = _evaluate_program(
-            baseline_program,
-            raw_metric_fn,
-            evaluation_inputs,
-            pass_threshold,
-            baseline_eval_lm,
-            phase_name="baseline_eval",
-            log_event=_log,
-        )
+        if baseline_summary is None:
+            baseline_eval_lm = _build_execution_lm()
+            if baseline_eval_lm is not None:
+                _disable_lm_cache(baseline_eval_lm)
+            baseline_report = _evaluate_program(
+                baseline_program,
+                raw_metric_fn,
+                evaluation_inputs,
+                pass_threshold,
+                baseline_eval_lm,
+                phase_name="baseline_eval",
+                log_event=_log,
+            )
+        else:
+            baseline_report = {
+                "score_pct": float(baseline_summary.get("score_pct") or 0.0),
+                "items": [{}] * max(0, int(baseline_summary.get("item_count") or 0)),
+            }
+            _log("baseline_eval=reused_source_run_plan")
         optimized_report = _evaluate_program(
             compiled_program,
             raw_metric_fn,
