@@ -18,12 +18,8 @@ export function OptimizationJobsPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [isRefreshingJob, setIsRefreshingJob] = useState(false);
   const [cancelingJobId, setCancelingJobId] = useState("");
-  const [materializingJobId, setMaterializingJobId] = useState("");
   const [deletingJobId, setDeletingJobId] = useState("");
   const [error, setError] = useState("");
-  const [materializedBundle, setMaterializedBundle] = useState(null);
-  const [bundleModalJob, setBundleModalJob] = useState(null);
-  const [bundleForm, setBundleForm] = useState({ name: "", version: "" });
   const [moduleNames, setModuleNames] = useState({});
   const [moduleVersions, setModuleVersions] = useState({});
   const [profileNames, setProfileNames] = useState({});
@@ -172,51 +168,6 @@ export function OptimizationJobsPage() {
     }
   };
 
-  const materializeBundle = async (targetId, bundleName, bundleVersion) => {
-    setMaterializingJobId(targetId);
-    setError("");
-    setMaterializedBundle(null);
-    try {
-      const response = await fetch(`${apiBase}/optimization/jobs/${encodeURIComponent(targetId)}/materialize-bundle`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ bundle_name: bundleName, bundle_version: bundleVersion }),
-      });
-      if (!response.ok) {
-        const detail = await readApiError(response);
-        throw new Error(detail || `Could not create optimized bundle (${response.status})`);
-      }
-      const payload = await response.json();
-      setMaterializedBundle(payload);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not create optimized bundle");
-    } finally {
-      setMaterializingJobId("");
-    }
-  };
-
-  const openMaterializeModal = (targetId) => {
-    const currentJob = jobId === targetId ? job : jobs.find((item) => item.id === targetId);
-    const suggestedName = buildOptimizedBundleDefaultName(currentJob, moduleNames);
-    const suggestedVersion = String((currentJob?.module_import_id && moduleVersions?.[currentJob.module_import_id]) || "0.1.0");
-    setBundleModalJob(currentJob);
-    setBundleForm({ name: suggestedName, version: suggestedVersion });
-  };
-
-  const submitMaterializeModal = async () => {
-    if (!bundleModalJob?.id) {
-      return;
-    }
-    const nextName = bundleForm.name.trim();
-    const nextVersion = bundleForm.version.trim();
-    if (!nextName || !nextVersion) {
-      setError("Bundle name and version are required.");
-      return;
-    }
-    await materializeBundle(bundleModalJob.id, nextName, nextVersion);
-    setBundleModalJob(null);
-  };
-
   useEffect(() => {
     if (!jobId) {
       setJob(null);
@@ -329,6 +280,7 @@ export function OptimizationJobsPage() {
 
   const executionLm = job?.execution_lm_profile_id ? (profileNames[job.execution_lm_profile_id] || job.execution_lm_profile_id) : "-";
   const helperLm = job?.helper_lm_profile_id ? (profileNames[job.helper_lm_profile_id] || job.helper_lm_profile_id) : "-";
+  const generatedBundleName = job?.generated_module_import_id ? (moduleNames[job.generated_module_import_id] || job.generated_module_import_id) : "-";
 
   return (
     <section className="page">
@@ -339,11 +291,6 @@ export function OptimizationJobsPage() {
             <p className="muted t-sm mono">{detailJobId || "-"}</p>
           </div>
           <div className="row gap-2 optimization-detail-actions">
-            {detailJobId && job?.status === "succeeded" ? (
-              <Button variant="primary" onClick={() => openMaterializeModal(detailJobId)} disabled={materializingJobId === detailJobId}>
-                {materializingJobId === detailJobId ? "Creating bundle..." : "Create bundle"}
-              </Button>
-            ) : null}
             {detailJobId && canCancelJob(job?.status) ? (
               <Button onClick={() => cancelJob(detailJobId)} disabled={cancelingJobId === detailJobId}>
                 {cancelingJobId === detailJobId ? "Canceling..." : "Cancel job"}
@@ -359,40 +306,6 @@ export function OptimizationJobsPage() {
 
         {isLoading ? <LoadingState label="Loading optimization job..." /> : null}
         {error ? <ErrorState title="Could not load optimization job" description={error} /> : null}
-        {materializedBundle ? (
-          <div className="optimization-success" role="status" aria-live="polite">
-            <div className="optimization-success-title">Optimized bundle created</div>
-            <div className="optimization-success-copy">
-              <Link className="lnk" to="/bundles">{materializedBundle.bundle_name || materializedBundle.id}</Link>
-            </div>
-          </div>
-        ) : null}
-        {bundleModalJob ? (
-          <div className="bundles-modal-backdrop" onClick={() => setBundleModalJob(null)}>
-            <div className="bundles-modal panel card-pad" role="dialog" aria-modal="true" aria-label="Create optimized bundle" onClick={(event) => event.stopPropagation()}>
-              <div className="row between" style={{ marginBottom: 10 }}>
-                <h3 className="t-h2">Create optimized bundle</h3>
-                <Button variant="ghost" size="sm" onClick={() => setBundleModalJob(null)}>Close</Button>
-              </div>
-              <div className="col gap-2">
-                <label className="col gap-1" htmlFor="optimized-bundle-name">
-                  <span className="t-label">Bundle name</span>
-                  <input id="optimized-bundle-name" aria-label="Bundle name" className="bundles-input" value={bundleForm.name} onChange={(event) => setBundleForm((prev) => ({ ...prev, name: event.target.value }))} />
-                </label>
-                <label className="col gap-1" htmlFor="optimized-bundle-version">
-                  <span className="t-label">Version</span>
-                  <input id="optimized-bundle-version" aria-label="Version" className="bundles-input" value={bundleForm.version} onChange={(event) => setBundleForm((prev) => ({ ...prev, version: event.target.value }))} />
-                </label>
-              </div>
-              <div className="row gap-2" style={{ marginTop: 12, justifyContent: "flex-end" }}>
-                <Button onClick={() => setBundleModalJob(null)}>Cancel</Button>
-                <Button variant="primary" onClick={submitMaterializeModal} disabled={materializingJobId === bundleModalJob.id}>
-                  {materializingJobId === bundleModalJob.id ? "Creating bundle..." : "Create bundle"}
-                </Button>
-              </div>
-            </div>
-          </div>
-        ) : null}
 
         {job ? (
           <div className="optimization-detail-layout col">
@@ -440,6 +353,40 @@ export function OptimizationJobsPage() {
                       </Link>
                     ) : (
                       <strong className="optimization-config-value">-</strong>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div className="panel card-pad optimization-detail-panel">
+                <h3 className="t-h2">Generated outputs</h3>
+                <div className="optimization-config-grid">
+                  <div className="optimization-config-card">
+                    <span className="t-label">Generated bundle</span>
+                    {job.generated_module_import_id ? (
+                      <Link className="lnk optimization-config-link" to="/bundles">{generatedBundleName}</Link>
+                    ) : (
+                      <strong className="optimization-config-value">Pending</strong>
+                    )}
+                  </div>
+                  <div className="optimization-config-card">
+                    <span className="t-label">Evaluation plan</span>
+                    {job.optimized_evaluation_plan_id ? (
+                      <Link className="lnk optimization-config-link" to={`/plans?new=1&id=${encodeURIComponent(job.optimized_evaluation_plan_id)}`}>
+                        {job.optimized_evaluation_plan_id}
+                      </Link>
+                    ) : (
+                      <strong className="optimization-config-value">Pending</strong>
+                    )}
+                  </div>
+                  <div className="optimization-config-card">
+                    <span className="t-label">Optimized eval run</span>
+                    {job.optimized_eval_run_plan_id ? (
+                      <Link className="lnk optimization-config-link" to={`/runs?plan=${encodeURIComponent(job.optimized_eval_run_plan_id)}`}>
+                        {job.optimized_eval_run_plan_id}
+                      </Link>
+                    ) : (
+                      <strong className="optimization-config-value">Pending</strong>
                     )}
                   </div>
                 </div>
@@ -583,23 +530,4 @@ function getDeltaComparisonClass(deltaValue) {
 
 function canCancelJob(status) {
   return status === "queued" || status === "running";
-}
-
-async function readApiError(response) {
-  try {
-    const payload = await response.json();
-    if (payload && typeof payload.error === "string" && payload.error.trim()) {
-      return payload.error;
-    }
-  } catch {
-    return "";
-  }
-  return "";
-}
-
-function buildOptimizedBundleDefaultName(job, moduleNames) {
-  const moduleName = String((job?.module_import_id && moduleNames?.[job.module_import_id]) || job?.module_import_id || "module");
-  const optimizationJobId = String(job?.id || "optimized");
-  const shortJobId = optimizationJobId.split("-")[0] || optimizationJobId;
-  return `${moduleName}-optimized-${shortJobId}`;
 }

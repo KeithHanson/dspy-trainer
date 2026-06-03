@@ -501,6 +501,9 @@ class AppServices:
                   val_inputs jsonb not null default '[]'::jsonb,
                   num_threads int not null default 1,
                   source_run_plan_id text,
+                  generated_module_import_id text references module_imports(id) on delete set null,
+                  optimized_evaluation_plan_id text references evaluation_plans(id) on delete set null,
+                  optimized_eval_run_plan_id text references agent_run_plans(id) on delete set null,
                   execution_log text,
                   artifact_path text,
                   artifact_metadata jsonb not null default '{}'::jsonb,
@@ -521,6 +524,9 @@ class AppServices:
             await conn.execute("alter table optimization_jobs add column if not exists execution_lm_profile_id text;")
             await conn.execute("alter table optimization_jobs add column if not exists helper_lm_profile_id text;")
             await conn.execute("alter table optimization_jobs add column if not exists source_run_plan_id text;")
+            await conn.execute("alter table optimization_jobs add column if not exists generated_module_import_id text references module_imports(id) on delete set null;")
+            await conn.execute("alter table optimization_jobs add column if not exists optimized_evaluation_plan_id text references evaluation_plans(id) on delete set null;")
+            await conn.execute("alter table optimization_jobs add column if not exists optimized_eval_run_plan_id text references agent_run_plans(id) on delete set null;")
             await conn.execute("alter table optimization_jobs add column if not exists execution_log text;")
             await conn.execute("alter table optimization_jobs add column if not exists request_config jsonb not null default '{}'::jsonb;")
             await conn.execute("alter table optimization_jobs add column if not exists normalized_config jsonb not null default '{}'::jsonb;")
@@ -876,15 +882,15 @@ class AppServices:
         suffix = "" if not content.endswith("\n") else ""
         return f"{content}{suffix}\n{line}\n" if content else f"{line}\n"
 
-    async def materialize_optimized_bundle(
+    async def _materialize_optimized_bundle_from_job(
         self,
-        optimization_job_id: str,
+        job: dict[str, Any],
         *,
         bundle_name: str | None = None,
         bundle_version: str | None = None,
     ) -> dict[str, Any] | None:
-        job = await self.get_optimization_job(optimization_job_id)
-        if job is None or str(job.get("status")) != "succeeded":
+        optimization_job_id = str(job.get("id") or "").strip()
+        if not optimization_job_id:
             return None
         module_id = str(job.get("module_import_id") or "").strip()
         source_module = await self.get_module(module_id)
@@ -940,6 +946,22 @@ class AppServices:
         status = "passed" if report.passed else "failed"
         await self.set_validation_status(new_module_id, status, report.diagnostics)
         return await self.get_module(new_module_id)
+
+    async def materialize_optimized_bundle(
+        self,
+        optimization_job_id: str,
+        *,
+        bundle_name: str | None = None,
+        bundle_version: str | None = None,
+    ) -> dict[str, Any] | None:
+        job = await self.get_optimization_job(optimization_job_id)
+        if job is None or str(job.get("status")) != "succeeded":
+            return None
+        return await self._materialize_optimized_bundle_from_job(
+            job,
+            bundle_name=bundle_name,
+            bundle_version=bundle_version,
+        )
 
     async def _mlflow_request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         if self.http_client is None:
@@ -1283,13 +1305,13 @@ class AppServices:
                 insert into optimization_jobs (
                   id, status, project_id, module_import_id, bundle_path, strategy, objective, dataset_id,
                   validation_dataset_id, execution_lm_profile_id, helper_lm_profile_id, request_config,
-                  normalized_config, train_inputs, val_inputs, num_threads, source_run_plan_id, execution_log, artifact_path,
+                  normalized_config, train_inputs, val_inputs, num_threads, source_run_plan_id, generated_module_import_id, execution_log, artifact_path,
                   artifact_metadata, telemetry_summary, comparison_summary, failure_reason, run_started_at,
                   finished_at, created_at, updated_at
                 )
                 values (
                   $1, 'queued', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb,
-                  $13::jsonb, $14::jsonb, $15, $16, $17, null, '{}'::jsonb, '{}'::jsonb, $18::jsonb,
+                  $13::jsonb, $14::jsonb, $15, $16, null, $17, null, '{}'::jsonb, '{}'::jsonb, $18::jsonb,
                   null, null, null, $19, $20
                 )
                 """,
@@ -1341,7 +1363,7 @@ class AppServices:
                 """
                 select id, status, project_id, module_import_id, bundle_path, strategy, objective, dataset_id,
                        validation_dataset_id, execution_lm_profile_id, helper_lm_profile_id, request_config,
-                       normalized_config, train_inputs, val_inputs, num_threads, source_run_plan_id, execution_log,
+                       normalized_config, train_inputs, val_inputs, num_threads, source_run_plan_id, generated_module_import_id, optimized_evaluation_plan_id, optimized_eval_run_plan_id, execution_log,
                        artifact_path, artifact_metadata, telemetry_summary, comparison_summary,
                        failure_reason, run_started_at, finished_at, created_at, updated_at
                 from optimization_jobs where id = $1
@@ -1372,6 +1394,9 @@ class AppServices:
             "val_inputs": val_inputs,
             "num_threads": row["num_threads"],
             "source_run_plan_id": row["source_run_plan_id"],
+            "generated_module_import_id": row["generated_module_import_id"] if "generated_module_import_id" in row else None,
+            "optimized_evaluation_plan_id": row["optimized_evaluation_plan_id"] if "optimized_evaluation_plan_id" in row else None,
+            "optimized_eval_run_plan_id": row["optimized_eval_run_plan_id"] if "optimized_eval_run_plan_id" in row else None,
             "execution_log": row["execution_log"],
             "artifact_path": row["artifact_path"],
             "artifact_metadata": self._json_dict(row["artifact_metadata"]),
@@ -1403,6 +1428,68 @@ class AppServices:
             if job is not None:
                 jobs.append(job)
         return jobs
+
+    async def _create_followup_eval_plan_and_run(
+        self,
+        *,
+        source_run_plan_id: str,
+        module_import_id: str,
+        bundle_path: str,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        source_plan = await self.get_agent_run_plan(source_run_plan_id)
+        if source_plan is None:
+            return None, None
+        eval_plan_name = f"{str(source_plan.get('plan_name') or 'RunPlan').strip() or 'RunPlan'} (optimized)"
+        evaluation_plan = await self.create_evaluation_plan(
+            project_id=str(source_plan["project_id"]),
+            scenario_id=str(source_plan["scenario_id"]),
+            dataset_version=str(source_plan["dataset_version"]),
+            name=eval_plan_name,
+            runs_per_question=max(1, int(source_plan.get("runs_per_question") or 1)),
+            max_workers=max(1, int(source_plan.get("max_workers") or 1)),
+            module_import_id=module_import_id,
+            lm_profile_id=source_plan.get("lm_profile_id"),
+            eval_inputs=self._json_list(source_plan.get("eval_inputs")),
+        )
+        run_plan = await self.create_agent_run_plan(
+            project_id=str(source_plan["project_id"]),
+            module_import_id=module_import_id,
+            scenario_id=str(source_plan["scenario_id"]),
+            dataset_version=str(source_plan["dataset_version"]),
+            bundle_path=bundle_path,
+            eval_inputs=[],
+            evaluation_plan_id=str(evaluation_plan["id"]),
+            lm_profile_id=source_plan.get("lm_profile_id"),
+            runs_per_question=max(1, int(source_plan.get("runs_per_question") or 1)),
+            max_workers=max(1, int(source_plan.get("max_workers") or 1)),
+        )
+        return evaluation_plan, run_plan
+
+    async def _await_agent_run_plan_completion(self, plan_id: str, timeout_s: float = 600.0) -> dict[str, Any] | None:
+        deadline = asyncio.get_running_loop().time() + timeout_s
+        while asyncio.get_running_loop().time() < deadline:
+            plan = await self.get_agent_run_plan(plan_id)
+            if plan is None:
+                return None
+            if plan.get("status") in {"succeeded", "failed"}:
+                return plan
+            await asyncio.sleep(1.0)
+        raise RuntimeError("timed out waiting for follow-up eval run to complete")
+
+    async def _get_agent_run_plan_score_summary(self, plan_id: str) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            plan_exists = await conn.fetchval("select 1 from agent_run_plans where id = $1", plan_id)
+            if plan_exists is None:
+                return None
+            average_score = await conn.fetchval("select avg(score) from agent_run_tasks where plan_id = $1 and score is not null", plan_id)
+            item_count = await conn.fetchval("select count(*) from agent_run_tasks where plan_id = $1 and score is not null", plan_id)
+        average_score_pct = float(average_score) * 100.0 if average_score is not None else None
+        return {
+            "average_score_pct": average_score_pct,
+            "item_count": int(item_count or 0),
+        }
 
     async def delete_optimization_job(self, optimization_job_id: str) -> bool:
         if self.postgres_pool is None:
@@ -1905,8 +1992,60 @@ class AppServices:
                     },
                 }
 
+            materialized_bundle = await self._materialize_optimized_bundle_from_job(
+                {
+                    **job,
+                    "id": optimization_job_id,
+                    "artifact_path": optimization_result["artifact_path"],
+                }
+            )
+            if materialized_bundle is None:
+                raise RuntimeError("optimized bundle could not be materialized")
+            generated_module_import_id = str(materialized_bundle.get("id") or "").strip() or None
+            if generated_module_import_id is None:
+                raise RuntimeError("materialized optimized bundle returned no module id")
+
+            optimized_evaluation_plan_id = None
+            optimized_eval_run_plan_id = None
+            if job.get("source_run_plan_id"):
+                generated_module = await self.get_module(generated_module_import_id)
+                generated_bundle_path = str(generated_module.get("source_ref") or "").strip() if generated_module else ""
+                if not generated_bundle_path:
+                    raise RuntimeError("generated optimized bundle has no runnable source path")
+                followup_eval_plan, followup_run_plan = await self._create_followup_eval_plan_and_run(
+                    source_run_plan_id=str(job["source_run_plan_id"]),
+                    module_import_id=generated_module_import_id,
+                    bundle_path=generated_bundle_path,
+                )
+                if followup_eval_plan is None or followup_run_plan is None:
+                    raise RuntimeError("failed to create follow-up eval plan and run")
+                optimized_evaluation_plan_id = str(followup_eval_plan["id"])
+                optimized_eval_run_plan_id = str(followup_run_plan["id"])
+                emit(f"optimized_evaluation_plan_id={optimized_evaluation_plan_id}")
+                emit(f"optimized_eval_run_plan_id={optimized_eval_run_plan_id}")
+                enqueued_plan = await self.enqueue_agent_run_plan(optimized_eval_run_plan_id)
+                if enqueued_plan is None:
+                    raise RuntimeError("failed to enqueue follow-up eval run plan")
+                completed_plan = await self._await_agent_run_plan_completion(optimized_eval_run_plan_id)
+                if completed_plan is None or completed_plan.get("status") != "succeeded":
+                    raise RuntimeError("follow-up eval run failed")
+                followup_summary = await self._get_agent_run_plan_score_summary(optimized_eval_run_plan_id)
+                if followup_summary and followup_summary.get("average_score_pct") is not None:
+                    optimization_result["comparison_summary"] = {
+                        **(optimization_result.get("comparison_summary") or {}),
+                        "optimized_score_pct": float(followup_summary["average_score_pct"]),
+                        "optimized_item_count": int(followup_summary.get("item_count") or 0),
+                    }
+                    baseline_score_pct = optimization_result["comparison_summary"].get("baseline_score_pct")
+                    optimized_score_pct = optimization_result["comparison_summary"].get("optimized_score_pct")
+                    if isinstance(baseline_score_pct, (int, float)) and isinstance(optimized_score_pct, (int, float)):
+                        optimization_result["comparison_summary"]["score_delta_pct"] = float(optimized_score_pct) - float(baseline_score_pct)
+
             emit("status=succeeded")
             emit(f"artifact_path={optimization_result['artifact_path']}")
+            emit(f"generated_module_import_id={generated_module_import_id}")
+            if optimized_eval_run_plan_id:
+                emit(f"optimized_eval_score_pct={optimization_result['comparison_summary'].get('optimized_score_pct')}")
             flush_stop.set()
             await flush_task
             now2 = datetime.now(timezone.utc)
@@ -1920,9 +2059,12 @@ class AppServices:
                         artifact_metadata=$4::jsonb,
                         telemetry_summary=$5::jsonb,
                         comparison_summary=$6::jsonb,
+                        generated_module_import_id=$7,
+                        optimized_evaluation_plan_id=$8,
+                        optimized_eval_run_plan_id=$9,
                         failure_reason=null,
-                        finished_at=$7,
-                        updated_at=$7
+                        finished_at=$10,
+                        updated_at=$10
                     where id=$1
                     """,
                     optimization_job_id,
@@ -1931,6 +2073,9 @@ class AppServices:
                     json.dumps(optimization_result.get("artifact_metadata") or {}),
                     json.dumps(optimization_result.get("telemetry_summary") or {}),
                     json.dumps(optimization_result.get("comparison_summary") or {}),
+                    generated_module_import_id,
+                    optimized_evaluation_plan_id,
+                    optimized_eval_run_plan_id,
                     now2,
                 )
         except OptimizationJobCanceled as exc:

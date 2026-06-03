@@ -68,7 +68,10 @@ describe("OptimizationJobsPage", () => {
             helper_lm_profile_id: null,
             dataset_id: "ods-1",
             validation_dataset_id: null,
-    source_run_plan_id: "plan-111",
+            source_run_plan_id: "plan-111",
+            generated_module_import_id: "mod-2",
+            optimized_evaluation_plan_id: "eval-plan-1",
+            optimized_eval_run_plan_id: "run-plan-1",
             created_at: "2026-01-01T00:00:00+00:00",
             run_started_at: "2026-01-01T00:01:00+00:00",
             finished_at: "2026-01-01T00:05:00+00:00",
@@ -100,7 +103,7 @@ describe("OptimizationJobsPage", () => {
         });
       }
       if (String(url).endsWith("/modules") && init?.method === "GET") {
-        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "mod-1", bundle_name: "Echo", bundle_version: "0.3.0" }]) });
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "mod-1", bundle_name: "Echo", bundle_version: "0.3.0" }, { id: "mod-2", bundle_name: "Echo optimized", bundle_version: "0.4.0" }]) });
       }
       if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
         return Promise.resolve({
@@ -131,6 +134,10 @@ describe("OptimizationJobsPage", () => {
     expect(await screen.findByText("100.0%")).toBeInTheDocument();
     expect(await screen.findByText("Delta")).toBeInTheDocument();
     expect(await screen.findByText("+50.0%")).toBeInTheDocument();
+    expect(await screen.findByText("Generated outputs")).toBeInTheDocument();
+    expect(await screen.findByText("Echo optimized")).toBeInTheDocument();
+    expect(await screen.findByText("eval-plan-1")).toBeInTheDocument();
+    expect(await screen.findByText("run-plan-1")).toBeInTheDocument();
     expect(await screen.findByText("Process log")).toBeInTheDocument();
     expect(await screen.findByText(/job=opt-job-001/i)).toBeInTheDocument();
 
@@ -537,14 +544,14 @@ describe("OptimizationJobsPage", () => {
     vi.unstubAllGlobals();
   });
 
-  it("materializes an optimized bundle from succeeded job detail", async () => {
+  it("shows pending generated outputs while optimization is still running", async () => {
     const fetchMock = vi.fn((url, init) => {
       if (String(url).endsWith("/optimization/jobs/opt-job-001") && init?.method === "GET") {
         return Promise.resolve({
           ok: true,
           json: vi.fn().mockResolvedValue({
             id: "opt-job-001",
-            status: "succeeded",
+            status: "running",
             module_import_id: "mod-1",
             strategy: "gepa",
             objective: "optimize_judge_feedback",
@@ -553,140 +560,9 @@ describe("OptimizationJobsPage", () => {
             dataset_id: "ods-1",
             validation_dataset_id: null,
             source_run_plan_id: "plan-111",
-            created_at: "2026-01-01T00:00:00+00:00",
-            run_started_at: "2026-01-01T00:01:00+00:00",
-            finished_at: "2026-01-01T00:05:00+00:00",
-            artifact_path: "programs/opt-job-001/program.json",
-            artifact_metadata: { artifact_type: "dspy_program_state" },
-            comparison_summary: { baseline_score_pct: 50, optimized_score_pct: 100, score_delta_pct: 50 },
-            telemetry_summary: {},
-            request_config: {},
-            normalized_config: {},
-            execution_log: "job=opt-job-001\nstatus=succeeded",
-            failure_reason: null,
-          }),
-        });
-      }
-      if (String(url).endsWith("/optimization/jobs/opt-job-001/materialize-bundle") && init?.method === "POST") {
-        expect(JSON.parse(init.body)).toEqual({ bundle_name: "Echo-optimized-opt-job", bundle_version: "2.0.0" });
-        return Promise.resolve({
-          ok: true,
-          json: vi.fn().mockResolvedValue({
-            id: "mod-opt-1",
-            bundle_name: "Echo-optimized-opt-job-001",
-          }),
-        });
-      }
-      if (String(url).endsWith("/modules") && init?.method === "GET") {
-        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "mod-1", bundle_name: "Echo", bundle_version: "0.3.0" }]) });
-      }
-      if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
-        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "lm-1", name: "Execution Profile" }]) });
-      }
-      return Promise.reject(new Error(`Unexpected URL ${url}`));
-    });
-
-    vi.stubGlobal("fetch", fetchMock);
-    render(
-      <MemoryRouter initialEntries={["/optimization/jobs?job=opt-job-001"]}>
-        <OptimizationJobsPage />
-      </MemoryRouter>,
-    );
-
-    expect(await screen.findByRole("button", { name: "Create optimized bundle" })).toBeInTheDocument();
-
-    await userEvent.click(screen.getByRole("button", { name: "Create optimized bundle" }));
-    await userEvent.clear(screen.getByLabelText("Bundle name"));
-    await userEvent.type(screen.getByLabelText("Bundle name"), "Echo-optimized-opt-job");
-    await userEvent.clear(screen.getByLabelText("Version"));
-    await userEvent.type(screen.getByLabelText("Version"), "2.0.0");
-    await userEvent.click(screen.getByRole("button", { name: "Create bundle" }));
-
-    await waitFor(() => {
-      expect(screen.getByText("Optimized bundle created")).toBeInTheDocument();
-    });
-    expect(screen.getByText("Echo-optimized-opt-job-001")).toBeInTheDocument();
-
-    vi.unstubAllGlobals();
-  });
-
-  it("shows backend materialize error detail", async () => {
-    const fetchMock = vi.fn((url, init) => {
-      if (String(url).endsWith("/optimization/jobs/opt-job-001") && init?.method === "GET") {
-        return Promise.resolve({
-          ok: true,
-          json: vi.fn().mockResolvedValue({
-            id: "opt-job-001",
-            status: "succeeded",
-            module_import_id: "mod-1",
-            strategy: "gepa",
-            objective: "optimize_judge_feedback",
-            execution_lm_profile_id: "lm-1",
-            helper_lm_profile_id: null,
-            dataset_id: "ods-1",
-            validation_dataset_id: null,
-            source_run_plan_id: "plan-111",
-            created_at: "2026-01-01T00:00:00+00:00",
-            run_started_at: "2026-01-01T00:01:00+00:00",
-            finished_at: "2026-01-01T00:05:00+00:00",
-            artifact_path: "programs/opt-job-001/program.json",
-            artifact_metadata: { artifact_type: "dspy_program_state" },
-            comparison_summary: { baseline_score_pct: 50, optimized_score_pct: 100, score_delta_pct: 50 },
-            telemetry_summary: {},
-            request_config: {},
-            normalized_config: {},
-            execution_log: "job=opt-job-001\nstatus=succeeded",
-            failure_reason: null,
-          }),
-        });
-      }
-      if (String(url).endsWith("/optimization/jobs/opt-job-001/materialize-bundle") && init?.method === "POST") {
-        return Promise.resolve({
-          ok: false,
-          status: 409,
-          json: vi.fn().mockResolvedValue({ error: "only succeeded optimization jobs can create optimized bundles" }),
-        });
-      }
-      if (String(url).endsWith("/modules") && init?.method === "GET") {
-        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "mod-1", bundle_name: "Echo", bundle_version: "0.3.0" }]) });
-      }
-      if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
-        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "lm-1", name: "Execution Profile" }]) });
-      }
-      return Promise.reject(new Error(`Unexpected URL ${url}`));
-    });
-
-    vi.stubGlobal("fetch", fetchMock);
-    render(
-      <MemoryRouter initialEntries={["/optimization/jobs?job=opt-job-001"]}>
-        <OptimizationJobsPage />
-      </MemoryRouter>,
-    );
-
-    await userEvent.click(await screen.findByRole("button", { name: "Create optimized bundle" }));
-    await userEvent.click(screen.getByRole("button", { name: "Create bundle" }));
-
-    expect(await screen.findByText("only succeeded optimization jobs can create optimized bundles")).toBeInTheDocument();
-
-    vi.unstubAllGlobals();
-  });
-
-  it("does not materialize bundle when prompt is canceled", async () => {
-    const fetchMock = vi.fn((url, init) => {
-      if (String(url).endsWith("/optimization/jobs/opt-job-001") && init?.method === "GET") {
-        return Promise.resolve({
-          ok: true,
-          json: vi.fn().mockResolvedValue({
-            id: "opt-job-001",
-            status: "succeeded",
-            module_import_id: "mod-1",
-            strategy: "gepa",
-            objective: "optimize_judge_feedback",
-            execution_lm_profile_id: "lm-1",
-            helper_lm_profile_id: null,
-            dataset_id: "ods-1",
-            validation_dataset_id: null,
-            source_run_plan_id: "plan-111",
+            generated_module_import_id: null,
+            optimized_evaluation_plan_id: null,
+            optimized_eval_run_plan_id: null,
             created_at: "2026-01-01T00:00:00+00:00",
             run_started_at: "2026-01-01T00:01:00+00:00",
             finished_at: "2026-01-01T00:05:00+00:00",
@@ -717,13 +593,9 @@ describe("OptimizationJobsPage", () => {
       </MemoryRouter>,
     );
 
-    await userEvent.click(await screen.findByRole("button", { name: "Create optimized bundle" }));
-    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
-
-    expect(fetchMock).not.toHaveBeenCalledWith(
-      expect.stringContaining("/materialize-bundle"),
-      expect.anything(),
-    );
+    expect(await screen.findByText("Generated outputs")).toBeInTheDocument();
+    const pendingValues = screen.getAllByText("Pending");
+    expect(pendingValues.length).toBeGreaterThanOrEqual(3);
 
     vi.unstubAllGlobals();
   });
