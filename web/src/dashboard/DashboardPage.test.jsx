@@ -66,7 +66,7 @@ describe("DashboardPage", () => {
           ...baseOverview,
           workerSummary: { availableWorkers: 1, totalWorkers: 8, busyWorkers: 1, missingWorkers: 6 },
           workerTable: [
-            { workerId: "worker-2", status: "running", taskId: "task-204", lastSeenLabel: "just now", stateLabel: "Actively processing work" },
+            { workerId: "worker-2", taskId: "task-204", stateLabel: "processing" },
           ],
         })} />
       </MemoryRouter>,
@@ -74,7 +74,7 @@ describe("DashboardPage", () => {
 
     expect(await screen.findByText("Workers")).toBeInTheDocument();
     expect(await screen.findByText("worker-2")).toBeInTheDocument();
-    expect(await screen.findByText("Actively processing work")).toBeInTheDocument();
+    expect(await screen.findByText("processing")).toBeInTheDocument();
   });
 
   it("calls row handler when recent job row is clicked", async () => {

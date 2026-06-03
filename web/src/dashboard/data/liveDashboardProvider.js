@@ -43,9 +43,9 @@ function formatScore(value) {
 }
 
 function describeWorkerState(status, taskId) {
-  if (status === "listening") return "Ready for the next task";
-  if (status === "running") return taskId ? "Actively processing work" : "Busy";
-  return "Heartbeat reported";
+  if (status === "listening") return "ready";
+  if (status === "running") return "processing";
+  return taskId ? "processing" : "ready";
 }
 
 function buildEvalBreakdown(row, moduleNameById) {
@@ -123,9 +123,7 @@ export function mapDashboardOverview({ plans, modules, workers }) {
   const spotlightJob = buildEvalBreakdown(liveJobRow || mostRecent, moduleNameById);
   const workerTable = workerRows.map((worker) => ({
     workerId: String(worker.worker_id || "unknown"),
-    status: String(worker.status || "unknown"),
     taskId: worker.task_id ? String(worker.task_id) : null,
-    lastSeenLabel: worker.last_seen ? formatTimeAgo(worker.last_seen) : "unknown",
     stateLabel: describeWorkerState(worker.status, worker.task_id),
   }));
 

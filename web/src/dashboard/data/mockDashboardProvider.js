@@ -24,8 +24,8 @@ export const mockDashboardProvider = {
       ],
       workerSummary: { availableWorkers: 5, totalWorkers: 8, busyWorkers: 3, missingWorkers: 0 },
       workerTable: [
-        { workerId: "worker-1", status: "listening", taskId: null, lastSeenLabel: "just now", stateLabel: "Ready for the next task" },
-        { workerId: "worker-2", status: "running", taskId: "task-204", lastSeenLabel: "just now", stateLabel: "Actively processing work" },
+        { workerId: "worker-1", taskId: null, stateLabel: "ready" },
+        { workerId: "worker-2", taskId: "task-204", stateLabel: "processing" },
       ],
       quickStart: [
         { id: "upload", title: "Upload your module", detail: "module.py + metric.py zipped", to: "/bundles?upload=1" },

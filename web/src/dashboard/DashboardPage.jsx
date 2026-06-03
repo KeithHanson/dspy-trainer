@@ -184,9 +184,7 @@ export function DashboardPage({ adapter, onOpenRun, user }) {
                   <thead>
                     <tr>
                       <th>Worker</th>
-                      <th>Status</th>
                       <th>Task</th>
-                      <th>Last seen</th>
                       <th>State</th>
                     </tr>
                   </thead>
@@ -194,9 +192,7 @@ export function DashboardPage({ adapter, onOpenRun, user }) {
                     {data.workerTable.map((worker) => (
                       <tr key={worker.workerId}>
                         <td className="mono">{worker.workerId}</td>
-                        <td>{statusLabel(worker.status)}</td>
                         <td className="mono">{worker.taskId ? shortId(worker.taskId) : "Idle"}</td>
-                        <td>{worker.lastSeenLabel}</td>
                         <td>{worker.stateLabel}</td>
                       </tr>
                     ))}
