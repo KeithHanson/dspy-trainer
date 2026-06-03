@@ -340,8 +340,8 @@ export function OptimizationJobsPage() {
           </div>
           <div className="row gap-2 optimization-detail-actions">
             {detailJobId && job?.status === "succeeded" ? (
-              <Button onClick={() => openMaterializeModal(detailJobId)} disabled={materializingJobId === detailJobId}>
-                {materializingJobId === detailJobId ? "Creating bundle..." : "Create optimized bundle"}
+              <Button variant="primary" onClick={() => openMaterializeModal(detailJobId)} disabled={materializingJobId === detailJobId}>
+                {materializingJobId === detailJobId ? "Creating bundle..." : "Create bundle"}
               </Button>
             ) : null}
             {detailJobId && canCancelJob(job?.status) ? (
@@ -458,7 +458,15 @@ export function OptimizationJobsPage() {
 }
 
 function StatusPill({ status }) {
-  return <span className="plans-status">{status || "unknown"}</span>;
+  const normalized = String(status || "").toLowerCase();
+  const toneClass = normalized === "succeeded"
+    ? "runs-status-pill-pass"
+    : normalized === "failed"
+      ? "runs-status-pill-fail"
+      : normalized === "running"
+        ? "runs-status-pill-run"
+        : "runs-status-pill-neutral";
+  return <span className={`plans-status ${toneClass}`}>{status || "unknown"}</span>;
 }
 
 function Kpi({ label, value, valueClassName = "" }) {

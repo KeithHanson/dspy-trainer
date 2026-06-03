@@ -2680,6 +2680,7 @@ class AppServices:
                 "mlflow_parent_run_id": row["mlflow_parent_run_id"],
                 "runs_per_question": row["runs_per_question"],
                 "max_workers": row["max_workers"],
+                "score_pass_threshold": _load_score_threshold(str(row["bundle_path"] or "")),
                 "running_tasks": int((row["running_tasks"] if "running_tasks" in row else 0) or 0),
                 "average_score": float(row["average_score"]) if row["average_score"] is not None else None,
                 "eval_pass_count": int(row["eval_pass_count"] or 0),

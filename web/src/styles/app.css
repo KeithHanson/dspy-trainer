@@ -319,6 +319,24 @@ button { font-family: inherit; }
   letter-spacing: 0.05em;
   color: var(--text-faint);
 }
+.runs-status-pill-pass {
+  background: rgba(94, 255, 176, 0.16);
+  border-color: rgba(94, 255, 176, 0.35);
+  color: #8ff4be;
+}
+.runs-status-pill-fail {
+  background: rgba(255, 120, 120, 0.16);
+  border-color: rgba(255, 120, 120, 0.35);
+  color: #ffb1b1;
+}
+.runs-status-pill-run {
+  background: rgba(110, 155, 255, 0.16);
+  border-color: rgba(110, 155, 255, 0.35);
+  color: #b7c8ff;
+}
+.runs-status-pill-neutral {
+  background: transparent;
+}
 .plans-name-link {
   all: unset;
   cursor: pointer;

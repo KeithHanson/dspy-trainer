@@ -187,7 +187,7 @@ export function RunsPage() {
                         <td><StatusPill status={plan.status} /></td>
                         <td className="mono">{plan.completed_tasks ?? 0}/{plan.total_tasks ?? 0}</td>
                         <td className="mono">{plan.failed_tasks ?? 0}/{plan.total_tasks ?? 0}</td>
-                        <td className="mono">{typeof plan.average_score === "number" ? plan.average_score.toFixed(3) : "-"}</td>
+                        <td className={`mono ${toneForAverageScore(plan.average_score, plan.score_pass_threshold)}`}>{typeof plan.average_score === "number" ? plan.average_score.toFixed(3) : "-"}</td>
                         <td className="cap">{formatTimeAgo(plan.created_at)}</td>
                         <td><Icon name="chevR" size={14} className="faint" /></td>
                         <td>
@@ -460,7 +460,15 @@ function taskCounts(tasks) {
 }
 
 function StatusPill({ status }) {
-  return <span className="plans-status">{status}</span>;
+  const normalized = String(status || "").toLowerCase();
+  const toneClass = normalized === "succeeded"
+    ? "runs-status-pill-pass"
+    : normalized === "failed"
+      ? "runs-status-pill-fail"
+      : normalized === "running"
+        ? "runs-status-pill-run"
+        : "runs-status-pill-neutral";
+  return <span className={`plans-status ${toneClass}`}>{status}</span>;
 }
 
 function StatusDot({ status }) {
@@ -475,6 +483,13 @@ function Kpi({ label, value, tone }) {
       <div className={`runs-kpi-value ${tone ? `runs-kpi-${tone}` : ""}`}>{value}</div>
     </div>
   );
+}
+
+function toneForAverageScore(value, threshold) {
+  if (!Number.isFinite(Number(value)) || !Number.isFinite(Number(threshold))) {
+    return "";
+  }
+  return Number(value) >= Number(threshold) ? "runs-kpi-pass" : "runs-kpi-fail";
 }
 
 function shortId(value) {

@@ -366,11 +366,10 @@ function SavedBundlesPanel({ modulesUrl }) {
         <div className="panel card-pad bundles-validation-result">
           <div className="row between" style={{ marginBottom: 8 }}>
             <h4 className="t-h2">Bundle detail</h4>
-            <span className="t-label">{selectedBundle.validation_status}</span>
           </div>
           <p className="cap" style={{ marginBottom: 8 }}>ID: <span className="faint">{selectedBundle.id}</span></p>
           <div className="bundles-check-report" style={{ marginBottom: 12 }}>
-            <div className="t-label" style={{ marginBottom: 8 }}>Validation checklist</div>
+            <div className="t-h2" style={{ marginBottom: 8 }}>Validation checklist</div>
             <ul className="bundles-check-results">
               {buildValidationChecks(selectedBundle).map((check) => (
                 <li key={`${selectedBundle.id}-${check.id}`} className="bundles-check-item">
@@ -382,8 +381,9 @@ function SavedBundlesPanel({ modulesUrl }) {
           </div>
 
           <div className="bundles-check-detail-list" style={{ marginBottom: 12 }}>
-            <div className="t-label" style={{ marginBottom: 8 }}>Bundle files</div>
+            <div className="t-h2" style={{ marginBottom: 8 }}>Bundle files</div>
             <p className="cap" style={{ marginBottom: 8 }}>Source file preview from the validation view.</p>
+            <hr className="hr" style={{ marginBottom: 10 }} />
             <div className="row gap-2" style={{ marginBottom: 10 }}>
               {Object.keys(bundleFiles).length ? Object.keys(bundleFiles).map((fileName) => (
                 <Button key={`${selectedBundle.id}-${fileName}`} size="sm" variant={activeFileName === fileName ? "primary" : "ghost"} onClick={() => setActiveFileName(fileName)}>
@@ -404,9 +404,7 @@ function SavedBundlesPanel({ modulesUrl }) {
                 <li key={`${selectedBundle.id}-${diag.code}-${idx}`}>{diag.code}: {diag.message}</li>
               ))}
             </ul>
-          ) : (
-            <EmptyState title="No diagnostics" description="This bundle passed without warnings." />
-          )}
+          ) : null}
         </div>
       ) : null}
     </div>
