@@ -2,6 +2,7 @@ import asyncio
 import json
 import sys
 from datetime import datetime, timezone
+import time
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -437,9 +438,12 @@ def test_run_optimization_job_persists_artifact_and_summaries(monkeypatch):
 
     monkeypatch.setattr(services, "get_optimization_job", fake_get_optimization_job)
     monkeypatch.setattr(services, "get_optimization_dataset", fake_get_optimization_dataset)
+    async def fake_append_optimization_process_log(job_id, additions):
+        return None
     async def fake_get_lm_profile(lm_profile_id):
         return None
 
+    monkeypatch.setattr(services, "append_optimization_process_log", fake_append_optimization_process_log)
     monkeypatch.setattr(services, "get_lm_profile", fake_get_lm_profile)
     monkeypatch.setattr("app.executor.module_runner.run_bundle_optimization", fake_run_bundle_optimization)
 
@@ -511,10 +515,13 @@ def test_run_optimization_job_gepa_calls_bundle_optimization(monkeypatch):
 
     monkeypatch.setattr(services, "get_optimization_job", fake_get_optimization_job)
     monkeypatch.setattr(services, "get_optimization_dataset", fake_get_optimization_dataset)
+    async def fake_append_optimization_process_log(job_id, additions):
+        return None
 
     async def fake_get_lm_profile(lm_profile_id):
         return None
 
+    monkeypatch.setattr(services, "append_optimization_process_log", fake_append_optimization_process_log)
     monkeypatch.setattr(services, "get_lm_profile", fake_get_lm_profile)
     monkeypatch.setattr("app.executor.module_runner.run_bundle_optimization", fake_run_bundle_optimization)
 
@@ -590,6 +597,9 @@ def test_run_optimization_job_derives_records_from_source_run_plan(monkeypatch):
 
     monkeypatch.setattr(services, "get_optimization_job", fake_get_optimization_job)
     monkeypatch.setattr(services, "derive_optimization_dataset", fake_derive_optimization_dataset)
+    async def fake_append_optimization_process_log(job_id, additions):
+        return None
+    monkeypatch.setattr(services, "append_optimization_process_log", fake_append_optimization_process_log)
     monkeypatch.setattr("app.executor.module_runner.run_bundle_optimization", fake_run_bundle_optimization)
 
     result = asyncio.run(services.run_optimization_job("opt-derive"))
@@ -637,6 +647,9 @@ def test_run_optimization_job_persists_traceback_on_failure(monkeypatch):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(services, "get_optimization_job", fake_get_optimization_job)
+    async def fake_append_optimization_process_log(job_id, additions):
+        return None
+    monkeypatch.setattr(services, "append_optimization_process_log", fake_append_optimization_process_log)
     monkeypatch.setattr("app.executor.module_runner.run_bundle_optimization", fake_run_bundle_optimization)
 
     result = asyncio.run(services.run_optimization_job("opt-fail"))
@@ -646,6 +659,69 @@ def test_run_optimization_job_persists_traceback_on_failure(monkeypatch):
     assert "traceback_begin" in result["execution_log"]
     assert "RuntimeError: boom" in result["execution_log"]
     assert "traceback_end" in result["execution_log"]
+
+
+def test_run_optimization_job_flushes_live_log_updates(monkeypatch):
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+    state = {
+        "job": {
+            "id": "opt-live",
+            "status": "queued",
+            "bundle_path": str(FIXTURES / "valid_bundle"),
+            "strategy": "bootstrap_fewshot",
+            "dataset_id": None,
+            "validation_dataset_id": None,
+            "execution_lm_profile_id": None,
+            "helper_lm_profile_id": None,
+            "normalized_config": {"dspy_config": {}},
+            "train_inputs": [
+                {"input": {"question": "France capital?"}, "label": {"expected": "Paris"}, "prediction": {"answer": "Paris"}}
+            ],
+            "val_inputs": [],
+            "num_threads": 1,
+            "artifact_path": None,
+            "artifact_metadata": {},
+            "telemetry_summary": {},
+            "comparison_summary": {},
+            "failure_reason": None,
+            "run_started_at": None,
+            "finished_at": None,
+        }
+    }
+    setattr(services, "postgres_pool", FakePool(state))
+
+    appended_batches: list[list[str]] = []
+
+    async def fake_get_optimization_job(job_id):
+        assert job_id == "opt-live"
+        return dict(state["job"])
+
+    async def fake_append_optimization_process_log(job_id, additions):
+        assert job_id == "opt-live"
+        appended_batches.append(list(additions))
+
+    def fake_run_bundle_optimization(**kwargs):
+        kwargs["log_event"]("live-line-1")
+        time.sleep(0.35)
+        kwargs["log_event"]("live-line-2")
+        time.sleep(0.35)
+        return {
+            "artifact_path": "/tmp/dspy-trainer/optimization_artifacts/opt-live/program.json",
+            "artifact_metadata": {"artifact_type": "dspy_program_state"},
+            "telemetry_summary": {"strategy": "bootstrap_fewshot"},
+            "comparison_summary": {"baseline_score_pct": 50.0, "optimized_score_pct": 100.0, "score_delta_pct": 50.0},
+        }
+
+    monkeypatch.setattr(services, "get_optimization_job", fake_get_optimization_job)
+    monkeypatch.setattr(services, "append_optimization_process_log", fake_append_optimization_process_log)
+    monkeypatch.setattr("app.executor.module_runner.run_bundle_optimization", fake_run_bundle_optimization)
+
+    result = asyncio.run(services.run_optimization_job("opt-live"))
+
+    assert result is not None
+    assert result["status"] == "succeeded"
+    assert any("live-line-1" in batch for batch in appended_batches)
+    assert any("live-line-2" in batch for batch in appended_batches)
 
 
 def test_optimization_job_json_fields_persist_through_service_db_roundtrip(monkeypatch):

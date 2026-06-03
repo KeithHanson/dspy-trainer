@@ -16,6 +16,8 @@ export function OptimizationJobsPage() {
   const [jobs, setJobs] = useState([]);
   const [job, setJob] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isRefreshingJob, setIsRefreshingJob] = useState(false);
+  const [deletingJobId, setDeletingJobId] = useState("");
   const [error, setError] = useState("");
   const [moduleNames, setModuleNames] = useState({});
   const [profileNames, setProfileNames] = useState({});
@@ -81,9 +83,13 @@ export function OptimizationJobsPage() {
     }
   };
 
-  const loadJob = async (targetId) => {
-    setIsLoading(true);
-    setError("");
+  const loadJob = async (targetId, { background = false } = {}) => {
+    if (background) {
+      setIsRefreshingJob(true);
+    } else {
+      setIsLoading(true);
+      setError("");
+    }
     try {
       const response = await fetch(`${apiBase}/optimization/jobs/${encodeURIComponent(targetId)}`, { method: "GET" });
       if (!response.ok) {
@@ -96,9 +102,39 @@ export function OptimizationJobsPage() {
       setJob(payload);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load optimization job");
-      setJob(null);
+      if (!background) {
+        setJob(null);
+      }
     } finally {
-      setIsLoading(false);
+      if (background) {
+        setIsRefreshingJob(false);
+      } else {
+        setIsLoading(false);
+      }
+    }
+  };
+
+  const deleteJob = async (targetId) => {
+    const confirmed = window.confirm("Delete this optimization job?");
+    if (!confirmed) {
+      return;
+    }
+    setDeletingJobId(targetId);
+    setError("");
+    try {
+      const response = await fetch(`${apiBase}/optimization/jobs/${encodeURIComponent(targetId)}`, { method: "DELETE" });
+      if (!response.ok) {
+        throw new Error(`Could not delete optimization job (${response.status})`);
+      }
+      if (jobId === targetId) {
+        navigate("/optimization/jobs");
+        return;
+      }
+      setJobs((current) => current.filter((item) => item.id !== targetId));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not delete optimization job");
+    } finally {
+      setDeletingJobId("");
     }
   };
 
@@ -116,7 +152,7 @@ export function OptimizationJobsPage() {
       return undefined;
     }
     const interval = setInterval(() => {
-      loadJob(jobId);
+      loadJob(jobId, { background: true });
     }, JOBS_POLL_MS);
     return () => clearInterval(interval);
   }, [apiBase, job?.status, jobId]);
@@ -138,26 +174,22 @@ export function OptimizationJobsPage() {
 
           {!isLoading && !error ? (
             jobs.length ? (
-              <section className="panel" style={{ overflow: "hidden" }}>
+              <section className="panel optimization-jobs-table-wrap">
                 <table className="dashboard-table">
                   <thead>
                     <tr>
                       <th>Job ID</th>
                       <th>Module</th>
                       <th>Strategy</th>
-                      <th>Objective</th>
                       <th>Status</th>
-                      <th>Baseline</th>
-                      <th>Optimized</th>
                       <th>Delta</th>
                       <th>Started</th>
+                      <th>Actions</th>
                     </tr>
                   </thead>
                   <tbody>
                     {jobs.map((item) => {
                       const moduleLabel = item?.module_import_id ? (moduleNames[item.module_import_id] || item.module_import_id) : "-";
-                      const baseline = item?.comparison_summary?.baseline_score_pct;
-                      const optimized = item?.comparison_summary?.optimized_score_pct;
                       const delta = item?.comparison_summary?.score_delta_pct;
                       const startedAt = formatDateTime(item?.run_started_at);
                       return (
@@ -169,12 +201,22 @@ export function OptimizationJobsPage() {
                           <td className="mono">{shortId(item.id)}</td>
                           <td>{moduleLabel}</td>
                           <td>{item?.strategy || "-"}</td>
-                          <td className="mono cap">{item?.objective || "-"}</td>
                           <td><StatusPill status={item?.status} /></td>
-                          <td className="mono">{formatPercent(baseline)}</td>
-                          <td className="mono">{formatPercent(optimized)}</td>
                           <td className={`mono ${toneForDelta(delta)}`}>{formatDelta(delta)}</td>
                           <td className="mono">{startedAt}</td>
+                          <td>
+                            <Button
+                              size="sm"
+                              variant="danger"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                deleteJob(item.id);
+                              }}
+                              disabled={deletingJobId === item.id}
+                            >
+                              {deletingJobId === item.id ? "Deleting..." : "Delete"}
+                            </Button>
+                          </td>
                         </tr>
                       );
                     })}
@@ -196,6 +238,7 @@ export function OptimizationJobsPage() {
   const telemetrySummary = job?.telemetry_summary || {};
   const artifactMetadata = job?.artifact_metadata || {};
   const strategyDetails = telemetrySummary.strategy_details || {};
+  const detailJobId = job?.id || "";
 
   const executionLm = job?.execution_lm_profile_id ? (profileNames[job.execution_lm_profile_id] || job.execution_lm_profile_id) : "-";
   const helperLm = job?.helper_lm_profile_id ? (profileNames[job.helper_lm_profile_id] || job.helper_lm_profile_id) : "-";
@@ -211,6 +254,11 @@ export function OptimizationJobsPage() {
           <div className="row gap-2">
             <Button onClick={() => navigate("/optimization/jobs")}>All optimization jobs</Button>
             <Button onClick={() => navigate("/optimization")}>Back to launch</Button>
+            {detailJobId ? (
+              <Button variant="danger" onClick={() => deleteJob(detailJobId)} disabled={deletingJobId === detailJobId}>
+                {deletingJobId === detailJobId ? "Deleting..." : "Delete job"}
+              </Button>
+            ) : null}
           </div>
         </header>
 
@@ -239,6 +287,12 @@ export function OptimizationJobsPage() {
                 <Kpi label="Baseline score" value={formatPercent(comparison?.baseline_score_pct)} />
                 <Kpi label="Optimized score" value={formatPercent(comparison?.optimized_score_pct)} />
               </div>
+
+              {job.status !== "succeeded" && job.status !== "failed" && job.status !== "canceled" ? (
+                <div className="optimization-live-note" role="status">
+                  {isRefreshingJob ? "Refreshing live run output..." : "Live run output refreshes automatically."}
+                </div>
+              ) : null}
 
               <div className="panel card-pad optimization-detail-panel">
                 <div className="row between" style={{ marginBottom: 10 }}>

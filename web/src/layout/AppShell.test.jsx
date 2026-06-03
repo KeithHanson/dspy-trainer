@@ -28,7 +28,7 @@ describe("AppShell", () => {
       </MemoryRouter>,
     );
 
-    const runsLink = screen.getByRole("link", { name: "Runs" });
+    const runsLink = screen.getByRole("link", { name: "Eval Runs" });
     expect(runsLink).toHaveClass("shell-nav-item-active");
     vi.unstubAllGlobals();
   });
@@ -125,7 +125,7 @@ describe("AppShell", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByRole("link", { name: "Runs" })).toHaveTextContent("Runs");
+      expect(screen.getByRole("link", { name: "Eval Runs" })).toHaveTextContent("Eval Runs");
       expect(document.querySelector(".d-live")).not.toBeNull();
     });
     vi.unstubAllGlobals();
@@ -142,7 +142,7 @@ describe("AppShell", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByRole("link", { name: "Runs" })).toHaveTextContent("Runs");
+      expect(screen.getByRole("link", { name: "Eval Runs" })).toHaveTextContent("Eval Runs");
     });
     expect(document.querySelector(".d-live")).toBeNull();
     vi.unstubAllGlobals();

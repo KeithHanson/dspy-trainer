@@ -98,6 +98,13 @@ async def fake_cancel_optimization_job(self, optimization_job_id):
     return job
 
 
+async def fake_delete_optimization_job(self, optimization_job_id):
+    if optimization_job_id not in JOBS:
+        return False
+    del JOBS[optimization_job_id]
+    return True
+
+
 async def fake_list_optimization_jobs(self, limit=50, offset=0):
     jobs = list(JOBS.values())
     return jobs[offset: offset + limit]
@@ -239,6 +246,7 @@ def _patch_services(monkeypatch):
     monkeypatch.setattr(main_mod.AppServices, "get_optimization_job", fake_get_optimization_job)
     monkeypatch.setattr(main_mod.AppServices, "list_optimization_jobs", fake_list_optimization_jobs)
     monkeypatch.setattr(main_mod.AppServices, "cancel_optimization_job", fake_cancel_optimization_job)
+    monkeypatch.setattr(main_mod.AppServices, "delete_optimization_job", fake_delete_optimization_job)
     monkeypatch.setattr(main_mod.AppServices, "run_optimization_job", fake_run_optimization_job)
     monkeypatch.setattr(main_mod.AppServices, "create_optimization_dataset", fake_create_optimization_dataset)
     monkeypatch.setattr(main_mod.AppServices, "get_optimization_dataset", fake_get_optimization_dataset)
@@ -371,6 +379,11 @@ def test_optimization_job_create_get_run_cancel(monkeypatch):
         assert canceled.status_code == 200
         assert canceled.json()["status"] == "succeeded"
 
+        deleted = client.delete(f"/optimization/jobs/{job_id}")
+        assert deleted.status_code == 200
+        assert deleted.json() == {"id": job_id, "deleted": True}
+        assert client.get(f"/optimization/jobs/{job_id}").status_code == 404
+
 
 def test_optimization_job_not_found_paths(monkeypatch):
     _reset_state()
@@ -464,5 +477,6 @@ def test_optimization_job_not_found_paths(monkeypatch):
 
         assert client.get("/optimization/datasets/missing").status_code == 404
         assert client.get("/optimization/jobs/missing").status_code == 404
+        assert client.delete("/optimization/jobs/missing").status_code == 404
         assert client.post("/optimization/jobs/missing/run").status_code == 404
         assert client.post("/optimization/jobs/missing/cancel").status_code == 404

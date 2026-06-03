@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import logging
 from pathlib import Path
+from queue import Empty, Queue
 import random
 import re
 import tomllib
@@ -876,7 +878,7 @@ class AppServices:
             }
             optimizer_class = "BootstrapFewShot"
         elif normalized_strategy == "miprov2":
-            budget = _normalize_budget(clean_request_config.get("budget"), default="medium")
+            budget = _normalize_budget(clean_request_config.get("budget"), default="light")
             dataset_kind = "demo"
             dspy_config = {
                 "task_model_lm_profile_id": execution_role,
@@ -887,7 +889,7 @@ class AppServices:
             }
             optimizer_class = "MIPROv2"
         else:
-            budget = _normalize_budget(clean_request_config.get("budget"), default="medium")
+            budget = _normalize_budget(clean_request_config.get("budget"), default="light")
             dataset_kind = "feedback"
             dspy_config = {
                 "reflection_lm_profile_id": helper_role or execution_role,
@@ -1109,6 +1111,13 @@ class AppServices:
             if job is not None:
                 jobs.append(job)
         return jobs
+
+    async def delete_optimization_job(self, optimization_job_id: str) -> bool:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            result = await conn.execute("delete from optimization_jobs where id = $1", optimization_job_id)
+        return str(result).startswith("DELETE 1")
 
     async def create_optimization_dataset(
         self,
@@ -1440,16 +1449,33 @@ class AppServices:
             return job
         existing_log = job.get("execution_log") if isinstance(job, dict) else None
         log_lines = self._merge_process_log(existing_log, []).splitlines()
+        pending_log_updates: Queue[str] = Queue()
+        flush_stop = asyncio.Event()
 
-        def emit(message: str) -> None:
+        def emit(message: str, *, persist: bool = True) -> None:
             if not message:
                 return
             log_lines.append(message)
             logger.info("[optimization:%s] %s", optimization_job_id, message)
+            if persist:
+                pending_log_updates.put(message)
 
-        emit(f"worker_started_at={datetime.now(timezone.utc).isoformat()}")
-        emit(f"strategy={job.get('strategy') or 'unknown'}")
-        emit("status=running")
+        async def flush_process_log() -> None:
+            while not flush_stop.is_set() or not pending_log_updates.empty():
+                additions: list[str] = []
+                while True:
+                    try:
+                        additions.append(pending_log_updates.get_nowait())
+                    except Empty:
+                        break
+                if additions:
+                    await self.append_optimization_process_log(optimization_job_id, additions)
+                    continue
+                await asyncio.sleep(0.25)
+
+        emit(f"worker_started_at={datetime.now(timezone.utc).isoformat()}", persist=False)
+        emit(f"strategy={job.get('strategy') or 'unknown'}", persist=False)
+        emit("status=running", persist=False)
         now = datetime.now(timezone.utc)
         async with self.postgres_pool.acquire() as conn:
             await conn.execute(
@@ -1458,6 +1484,7 @@ class AppServices:
                 now,
                 "\n".join(log_lines),
             )
+        flush_task = asyncio.create_task(flush_process_log())
 
         try:
             strategy = _normalize_optimization_strategy(str(job.get("strategy") or "bootstrap_fewshot"))
@@ -1527,7 +1554,8 @@ class AppServices:
 
                 artifact_root = Path("/tmp/dspy-trainer/optimization_artifacts") / optimization_job_id
                 emit(f"artifact_dir={artifact_root}")
-                optimization_result = run_bundle_optimization(
+                optimization_result = await asyncio.to_thread(
+                    run_bundle_optimization,
                     bundle_path=str(job["bundle_path"]),
                     strategy=str(job["strategy"]),
                     train_records=train_records,
@@ -1569,6 +1597,8 @@ class AppServices:
 
             emit("status=succeeded")
             emit(f"artifact_path={optimization_result['artifact_path']}")
+            flush_stop.set()
+            await flush_task
             now2 = datetime.now(timezone.utc)
             async with self.postgres_pool.acquire() as conn:
                 await conn.execute(
@@ -1600,6 +1630,8 @@ class AppServices:
             for line in traceback.format_exc().splitlines():
                 emit(line)
             emit("traceback_end")
+            flush_stop.set()
+            await flush_task
             now3 = datetime.now(timezone.utc)
             async with self.postgres_pool.acquire() as conn:
                 await conn.execute(

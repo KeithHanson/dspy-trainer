@@ -28,7 +28,7 @@ const STRATEGY_OPTIONS = [
     datasetKind: "demo",
     sourceType: "eval_passes",
     requestConfigDefaults: {
-      budget: "medium",
+      budget: "light",
       max_bootstrapped_demos: 4,
       max_labeled_demos: 16,
     },
@@ -42,7 +42,7 @@ const STRATEGY_OPTIONS = [
     datasetKind: "feedback",
     sourceType: "eval_feedback",
     requestConfigDefaults: {
-      budget: "medium",
+      budget: "light",
       track_stats: true,
     },
     description: "Generation-anchored optimization that tunes from feedback-style datasets using a judge loop.",

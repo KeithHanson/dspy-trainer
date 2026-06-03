@@ -22,14 +22,48 @@ AZURE_RESPONSES_COMPAT_CLASS_PATH = "app.lm.AzureResponsesCompatLM"
 
 
 class _TeeWriter:
-    def __init__(self, primary: Any, mirror: io.StringIO):
+    def __init__(self, primary: Any, mirror: io.StringIO, label: str, log_event: Callable[[str], None] | None):
         self.primary = primary
         self.mirror = mirror
+        self.label = label
+        self.log_event = log_event
+        self._line_buffer = ""
+        self._started = False
+
+    def _start(self) -> None:
+        if not self._started and self.log_event is not None:
+            self.log_event(f"raw_{self.label}_begin")
+            self._started = True
+
+    def _emit_complete_lines(self) -> None:
+        if self.log_event is None:
+            return
+        while True:
+            newline_index = self._line_buffer.find("\n")
+            carriage_index = self._line_buffer.find("\r")
+            indexes = [index for index in (newline_index, carriage_index) if index != -1]
+            if not indexes:
+                break
+            split_index = min(indexes)
+            line = self._line_buffer[:split_index]
+            self._line_buffer = self._line_buffer[split_index + 1 :]
+            self._start()
+            self.log_event(line)
+
+    def finish(self) -> None:
+        if self.log_event is not None and self._line_buffer:
+            self._start()
+            self.log_event(self._line_buffer)
+            self._line_buffer = ""
+        if self._started and self.log_event is not None:
+            self.log_event(f"raw_{self.label}_end")
 
     def write(self, data: str) -> int:
         written = self.primary.write(data)
         self.primary.flush()
         self.mirror.write(data)
+        self._line_buffer += data
+        self._emit_complete_lines()
         return written
 
     def flush(self) -> None:
@@ -45,25 +79,43 @@ def _capture_process_output(log_event: Callable[[str], None] | None):
 
     stdout_buffer = io.StringIO()
     stderr_buffer = io.StringIO()
-    logging_buffer = io.StringIO()
-    handler = logging.StreamHandler(logging_buffer)
+    stdout_writer = _TeeWriter(sys.stdout, stdout_buffer, "stdout", log_event)
+    stderr_writer = _TeeWriter(sys.stderr, stderr_buffer, "stderr", log_event)
+
+    class _ProcessLogHandler(logging.Handler):
+        def __init__(self, callback: Callable[[str], None] | None):
+            super().__init__(level=logging.NOTSET)
+            self.callback = callback
+            self.started = False
+
+        def emit(self, record: logging.LogRecord) -> None:
+            if self.callback is None:
+                return
+            message = self.format(record)
+            if message.startswith("[optimization:"):
+                return
+            if not self.started:
+                self.callback("raw_logging_begin")
+                self.started = True
+            self.callback(message)
+
+        def finish(self) -> None:
+            if self.started and self.callback is not None:
+                self.callback("raw_logging_end")
+
+    handler = _ProcessLogHandler(log_event)
     handler.setLevel(logging.NOTSET)
     root_logger = logging.getLogger()
     root_logger.addHandler(handler)
     try:
-        with redirect_stdout(_TeeWriter(sys.stdout, stdout_buffer)), redirect_stderr(_TeeWriter(sys.stderr, stderr_buffer)):
+        with redirect_stdout(stdout_writer), redirect_stderr(stderr_writer):
             yield
     finally:
         root_logger.removeHandler(handler)
         handler.flush()
-        for label, buffer in (("stdout", stdout_buffer), ("stderr", stderr_buffer), ("logging", logging_buffer)):
-            content = buffer.getvalue().strip()
-            if not content:
-                continue
-            log_event(f"raw_{label}_begin")
-            for line in content.splitlines():
-                log_event(line)
-            log_event(f"raw_{label}_end")
+        stdout_writer.finish()
+        stderr_writer.finish()
+        handler.finish()
 
 
 def _load_module(name: str, file_path: Path) -> ModuleType:
@@ -668,7 +720,7 @@ def run_bundle_optimization(
                 trace: Any = None,
                 pred_name: str | None = None,
                 pred_trace: Any = None,
-            ) -> dict[str, Any]:
+            ) -> dspy.Prediction:
                 del trace, pred_name, pred_trace
                 result = _normalize_judge_result(
                     _run_judge_metric_without_autolog(raw_metric_fn, example, prediction, execution_lm),
@@ -680,7 +732,10 @@ def run_bundle_optimization(
                     combined = f"{record_feedback}\n\nJudge rationale: {rationale_feedback}"
                 else:
                     combined = record_feedback or rationale_feedback
-                return {"score": float(result["score"]), "feedback": combined or f"This trajectory got a score of {result['score']}."}
+                return dspy.Prediction(
+                    score=float(result["score"]),
+                    feedback=combined or f"This trajectory got a score of {result['score']}.",
+                )
 
             optimizer = dspy.GEPA(
                 metric=gepa_metric,

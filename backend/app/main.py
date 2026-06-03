@@ -479,6 +479,15 @@ async def cancel_optimization_job(optimization_job_id: str, request: Request):
     return result
 
 
+@app.delete("/optimization/jobs/{optimization_job_id}")
+async def delete_optimization_job(optimization_job_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    deleted = await services.delete_optimization_job(optimization_job_id)
+    if not deleted:
+        return JSONResponse(status_code=404, content={"error": "optimization job not found"})
+    return {"id": optimization_job_id, "deleted": True}
+
+
 @app.post("/optimization/jobs/{optimization_job_id}/run")
 async def run_optimization_job_endpoint(optimization_job_id: str, request: Request):
     services: AppServices = request.app.state.services

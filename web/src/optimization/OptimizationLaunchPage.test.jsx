@@ -119,7 +119,7 @@ describe("OptimizationLaunchPage", () => {
     expect(payload.dataset_id).toBe("ods-1");
   expect(payload.source_run_plan_id).toBe("plan-123");
     expect(payload.request_config).toMatchObject({
-      budget: "medium",
+      budget: "light",
       max_bootstrapped_demos: 4,
       max_labeled_demos: 16,
     });
