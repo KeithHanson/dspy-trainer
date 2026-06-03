@@ -86,7 +86,10 @@ class _FakeConn:
             self.state["job"]["artifact_metadata"] = json.loads(params[3])
             self.state["job"]["telemetry_summary"] = json.loads(params[4])
             self.state["job"]["comparison_summary"] = json.loads(params[5])
-            self.state["job"]["finished_at"] = params[6].isoformat()
+            self.state["job"]["generated_module_import_id"] = params[6]
+            self.state["job"]["optimized_evaluation_plan_id"] = params[7]
+            self.state["job"]["optimized_eval_run_plan_id"] = params[8]
+            self.state["job"]["finished_at"] = params[9].isoformat()
         elif "set status='failed'" in query:
             self.state["job"]["status"] = "failed"
             self.state["job"]["failure_reason"] = params[1]
@@ -142,6 +145,9 @@ class _PersistentDbConn:
                 "val_inputs": params[13],
                 "num_threads": params[14],
                 "source_run_plan_id": params[15],
+                "generated_module_import_id": None,
+                "optimized_evaluation_plan_id": None,
+                "optimized_eval_run_plan_id": None,
                 "execution_log": params[16],
                 "artifact_path": None,
                 "artifact_metadata": "{}",
@@ -188,7 +194,7 @@ class _PersistentDbConn:
             return "UPDATE 1"
 
         if "update optimization_jobs set status='succeeded'" in normalized:
-            job_id, execution_log, artifact_path, artifact_metadata, telemetry_summary, comparison_summary, finished_at = params[:7]
+            job_id, execution_log, artifact_path, artifact_metadata, telemetry_summary, comparison_summary, generated_module_import_id, optimized_evaluation_plan_id, optimized_eval_run_plan_id, finished_at = params[:10]
             job = self.state["optimization_jobs"].get(str(job_id)) or self.state.get("job")
             if isinstance(job, dict):
                 job["status"] = "succeeded"
@@ -197,6 +203,9 @@ class _PersistentDbConn:
                 job["artifact_metadata"] = artifact_metadata if isinstance(artifact_metadata, str) else json.dumps(artifact_metadata)
                 job["telemetry_summary"] = telemetry_summary if isinstance(telemetry_summary, str) else json.dumps(telemetry_summary)
                 job["comparison_summary"] = comparison_summary if isinstance(comparison_summary, str) else json.dumps(comparison_summary)
+                job["generated_module_import_id"] = generated_module_import_id
+                job["optimized_evaluation_plan_id"] = optimized_evaluation_plan_id
+                job["optimized_eval_run_plan_id"] = optimized_eval_run_plan_id
                 job["failure_reason"] = None
                 job["finished_at"] = finished_at
                 job["updated_at"] = finished_at
@@ -468,6 +477,11 @@ def test_run_optimization_job_persists_artifact_and_summaries(monkeypatch):
             "comparison_summary": {"baseline_score_pct": 50.0, "optimized_score_pct": 100.0, "score_delta_pct": 50.0},
         }
 
+    async def fake_materialize_from_job(job_payload, *, bundle_name=None, bundle_version=None):
+        del bundle_name, bundle_version
+        assert job_payload["artifact_path"].endswith("/opt-1/program.json")
+        return {"id": "mod-opt-1"}
+
     monkeypatch.setattr(services, "get_optimization_job", fake_get_optimization_job)
     monkeypatch.setattr(services, "get_optimization_dataset", fake_get_optimization_dataset)
     async def fake_append_optimization_process_log(job_id, additions):
@@ -477,13 +491,16 @@ def test_run_optimization_job_persists_artifact_and_summaries(monkeypatch):
 
     monkeypatch.setattr(services, "append_optimization_process_log", fake_append_optimization_process_log)
     monkeypatch.setattr(services, "get_lm_profile", fake_get_lm_profile)
+    monkeypatch.setattr(services, "_materialize_optimized_bundle_from_job", fake_materialize_from_job)
     monkeypatch.setattr("app.executor.module_runner.run_bundle_optimization", fake_run_bundle_optimization)
 
     result = asyncio.run(services.run_optimization_job("opt-1"))
 
     assert result is not None
     assert result["status"] == "succeeded"
+    assert result["generated_module_import_id"] == "mod-opt-1"
     assert "status=succeeded" in result["execution_log"]
+    assert "generated_module_import_id=mod-opt-1" in result["execution_log"]
     assert "bootstrap raw stdout line" in result["execution_log"]
     assert "artifact_path=/tmp/dspy-trainer/optimization_artifacts/opt-1/program.json" in result["execution_log"]
     assert result["artifact_path"].endswith("program.json")
@@ -553,8 +570,13 @@ def test_run_optimization_job_gepa_calls_bundle_optimization(monkeypatch):
     async def fake_get_lm_profile(lm_profile_id):
         return None
 
+    async def fake_materialize_from_job(job_payload, *, bundle_name=None, bundle_version=None):
+        del job_payload, bundle_name, bundle_version
+        return {"id": "mod-opt-2"}
+
     monkeypatch.setattr(services, "append_optimization_process_log", fake_append_optimization_process_log)
     monkeypatch.setattr(services, "get_lm_profile", fake_get_lm_profile)
+    monkeypatch.setattr(services, "_materialize_optimized_bundle_from_job", fake_materialize_from_job)
     monkeypatch.setattr("app.executor.module_runner.run_bundle_optimization", fake_run_bundle_optimization)
 
     result = asyncio.run(services.run_optimization_job("opt-2"))
@@ -637,18 +659,50 @@ def test_run_optimization_job_derives_records_from_source_run_plan(monkeypatch):
             "source_run_plan_id": "plan-1",
         }
         return {"score_pct": 90.0, "item_count": 2}
+    async def fake_materialize_from_job(job_payload, *, bundle_name=None, bundle_version=None):
+        del job_payload, bundle_name, bundle_version
+        return {"id": "mod-opt-derive"}
+    async def fake_create_followup_eval_plan_and_run(**kwargs):
+        assert kwargs["source_run_plan_id"] == "plan-1"
+        assert kwargs["module_import_id"] == "mod-opt-derive"
+        assert kwargs["bundle_path"]
+        return {"id": "eval-opt-derive"}, {"id": "run-opt-derive"}
+    async def fake_enqueue_agent_run_plan(plan_id):
+        assert plan_id == "run-opt-derive"
+        return {"id": plan_id}
+    async def fake_await_agent_run_plan_completion(plan_id, timeout_s=600.0):
+        assert plan_id == "run-opt-derive"
+        return {"id": plan_id, "status": "succeeded"}
+    async def fake_get_agent_run_plan_score_summary(plan_id):
+        assert plan_id == "run-opt-derive"
+        return {"average_score_pct": 88.0, "item_count": 6}
+    async def fake_get_module(module_id):
+        if module_id == "mod-opt-derive":
+            return {"id": module_id, "source_ref": str(FIXTURES / "valid_bundle")}
+        return None
     monkeypatch.setattr(services, "_get_source_run_plan_baseline", fake_get_source_run_plan_baseline)
     async def fake_append_optimization_process_log(job_id, additions):
         return None
     monkeypatch.setattr(services, "append_optimization_process_log", fake_append_optimization_process_log)
+    monkeypatch.setattr(services, "_materialize_optimized_bundle_from_job", fake_materialize_from_job)
+    monkeypatch.setattr(services, "_create_followup_eval_plan_and_run", fake_create_followup_eval_plan_and_run)
+    monkeypatch.setattr(services, "enqueue_agent_run_plan", fake_enqueue_agent_run_plan)
+    monkeypatch.setattr(services, "_await_agent_run_plan_completion", fake_await_agent_run_plan_completion)
+    monkeypatch.setattr(services, "_get_agent_run_plan_score_summary", fake_get_agent_run_plan_score_summary)
+    monkeypatch.setattr(services, "get_module", fake_get_module)
     monkeypatch.setattr("app.executor.module_runner.run_bundle_optimization", fake_run_bundle_optimization)
 
     result = asyncio.run(services.run_optimization_job("opt-derive"))
 
     assert result is not None
     assert result["status"] == "succeeded"
+    assert result["generated_module_import_id"] == "mod-opt-derive"
+    assert result["optimized_evaluation_plan_id"] == "eval-opt-derive"
+    assert result["optimized_eval_run_plan_id"] == "run-opt-derive"
+    assert "optimized_evaluation_plan_id=eval-opt-derive" in result["execution_log"]
     assert "derived_source_run_plan_id=plan-1" in result["execution_log"]
     assert "baseline_source_run_plan_id=plan-1" in result["execution_log"]
+    assert "optimized_eval_run_plan_id=run-opt-derive" in result["execution_log"]
     assert "derived dataset raw line" in result["execution_log"]
 
 
@@ -754,8 +808,13 @@ def test_run_optimization_job_flushes_live_log_updates(monkeypatch):
             "comparison_summary": {"baseline_score_pct": 50.0, "optimized_score_pct": 100.0, "score_delta_pct": 50.0},
         }
 
+    async def fake_materialize_from_job(job_payload, *, bundle_name=None, bundle_version=None):
+        del job_payload, bundle_name, bundle_version
+        return {"id": "mod-opt-live"}
+
     monkeypatch.setattr(services, "get_optimization_job", fake_get_optimization_job)
     monkeypatch.setattr(services, "append_optimization_process_log", fake_append_optimization_process_log)
+    monkeypatch.setattr(services, "_materialize_optimized_bundle_from_job", fake_materialize_from_job)
     monkeypatch.setattr("app.executor.module_runner.run_bundle_optimization", fake_run_bundle_optimization)
 
     result = asyncio.run(services.run_optimization_job("opt-live"))
@@ -975,11 +1034,47 @@ def test_optimization_job_json_fields_persist_through_service_db_roundtrip(monke
             },
         }
 
+    async def fake_materialize_from_job(job_payload, *, bundle_name=None, bundle_version=None):
+        del bundle_name, bundle_version
+        assert job_payload["artifact_path"].endswith(f"/{created['id']}/program.json")
+        return {"id": "mod-opt-roundtrip"}
+
+    async def fake_create_followup_eval_plan_and_run(**kwargs):
+        assert kwargs["source_run_plan_id"] == "plan-1"
+        assert kwargs["module_import_id"] == "mod-opt-roundtrip"
+        return {"id": "eval-opt-roundtrip"}, {"id": "run-opt-roundtrip"}
+
+    async def fake_enqueue_agent_run_plan(plan_id):
+        assert plan_id == "run-opt-roundtrip"
+        return {"id": plan_id}
+
+    async def fake_await_agent_run_plan_completion(plan_id, timeout_s=600.0):
+        assert plan_id == "run-opt-roundtrip"
+        return {"id": plan_id, "status": "succeeded"}
+
+    async def fake_get_agent_run_plan_score_summary(plan_id):
+        assert plan_id == "run-opt-roundtrip"
+        return {"average_score_pct": 91.0, "item_count": 2}
+
+    async def fake_get_module(module_id):
+        if module_id == "mod-opt-roundtrip":
+            return {"id": module_id, "source_ref": str(FIXTURES / "valid_bundle")}
+        return None
+
     monkeypatch.setattr("app.executor.module_runner.run_bundle_optimization", fake_run_bundle_optimization)
+    monkeypatch.setattr(services, "_materialize_optimized_bundle_from_job", fake_materialize_from_job)
+    monkeypatch.setattr(services, "_create_followup_eval_plan_and_run", fake_create_followup_eval_plan_and_run)
+    monkeypatch.setattr(services, "enqueue_agent_run_plan", fake_enqueue_agent_run_plan)
+    monkeypatch.setattr(services, "_await_agent_run_plan_completion", fake_await_agent_run_plan_completion)
+    monkeypatch.setattr(services, "_get_agent_run_plan_score_summary", fake_get_agent_run_plan_score_summary)
+    monkeypatch.setattr(services, "get_module", fake_get_module)
 
     run_result = asyncio.run(services.run_optimization_job(created["id"]))
     assert run_result is not None
     assert run_result["status"] == "succeeded"
+    assert run_result["generated_module_import_id"] == "mod-opt-roundtrip"
+    assert run_result["optimized_evaluation_plan_id"] == "eval-opt-roundtrip"
+    assert run_result["optimized_eval_run_plan_id"] == "run-opt-roundtrip"
 
     stored_after_run = state["optimization_jobs"][created["id"]]
     assert isinstance(stored_after_run["artifact_metadata"], str)
