@@ -534,6 +534,60 @@ button { font-family: inherit; }
   align-items: center;
   gap: 10px;
 }
+.lm-profiles-card {
+  align-items: flex-start;
+}
+.lm-profiles-icon {
+  color: var(--run);
+}
+.lm-profiles-meta {
+  min-width: 0;
+}
+.lm-profiles-title-row {
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 8px;
+  width: 100%;
+}
+.lm-profiles-title-group {
+  flex: 1;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.lm-profiles-actions {
+  margin-left: auto;
+  align-self: flex-start;
+}
+.lm-profiles-model-line {
+  margin-top: 6px;
+}
+.lm-profiles-type-badge {
+  height: 21px;
+  border-radius: 999px;
+  border: 1px solid var(--accent-line);
+  padding: 0 9px;
+  display: inline-flex;
+  align-items: center;
+  background: var(--accent-dim);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.lm-profiles-key-box {
+  width: 100%;
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  background: var(--bg-deep);
+}
+.lm-profiles-curl-box {
+  margin-top: 0;
+  max-height: 180px;
+  white-space: pre-wrap;
+}
 .field-help {
   margin-top: 3px;
   padding: 6px 8px;

@@ -21,6 +21,10 @@ const SAMPLE_ROWS = [
   },
 ];
 
+function getBundleDisplayName(bundle) {
+  return bundle?.bundle_name || bundle?.id || "Untitled bundle";
+}
+
 export function PlansPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -467,9 +471,9 @@ function PlanBuilder({ onBack, planId }) {
               <div className="col gap-2">
                 {validModules.map((bundle) => (
                   <button key={bundle.id} className={`plans-bundle-option ${selectedBundleId === bundle.id ? "plans-bundle-option-active" : ""}`} type="button" onClick={() => setSelectedBundleId(bundle.id)}>
-                    <span className="t-sm" style={{ fontWeight: 600 }}>{bundle.bundle_name || bundle.source_ref || bundle.id}</span>
+                    <span className="t-sm" style={{ fontWeight: 600 }}>{getBundleDisplayName(bundle)}</span>
                     <span className="cap mono">
-                      {bundle.bundle_version ? `v${bundle.bundle_version}` : "version n/a"} · {bundle.source_ref || "uploaded bundle"}
+                      {bundle.bundle_version ? `v${bundle.bundle_version}` : "version n/a"}
                       {bundle.created_at ? ` · created ${formatCreatedAt(bundle.created_at)}` : ""}
                     </span>
                   </button>

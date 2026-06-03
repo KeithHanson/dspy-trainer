@@ -124,13 +124,10 @@ export function OptimizationLaunchPage() {
   const apiBase = useMemo(() => (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, ""), []);
   const [modules, setModules] = useState([]);
   const [lmProfiles, setLmProfiles] = useState([]);
-  const [datasets, setDatasets] = useState([]);
   const [selectedModuleId, setSelectedModuleId] = useState("");
   const [selectedStrategy, setSelectedStrategy] = useState(STRATEGY_OPTIONS[0]?.id || "bootstrap_fewshot");
   const [executionLmProfileId, setExecutionLmProfileId] = useState("");
   const [helperLmProfileId, setHelperLmProfileId] = useState("");
-  const [datasetId, setDatasetId] = useState("");
-  const [validationDatasetId, setValidationDatasetId] = useState("");
   const [sourceRunPlanId, setSourceRunPlanId] = useState("");
   const [sourceRunPlans, setSourceRunPlans] = useState([]);
   const [isLoadingSourceRunPlans, setIsLoadingSourceRunPlans] = useState(false);
@@ -139,7 +136,6 @@ export function OptimizationLaunchPage() {
   const [sourcePreviewError, setSourcePreviewError] = useState("");
   const [isLoadingModules, setIsLoadingModules] = useState(false);
   const [isLoadingProfiles, setIsLoadingProfiles] = useState(false);
-  const [isLoadingDatasets, setIsLoadingDatasets] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [validationError, setValidationError] = useState("");
@@ -148,10 +144,7 @@ export function OptimizationLaunchPage() {
   const validModules = useMemo(() => modules.filter((item) => item.validation_status === "passed"), [modules]);
   const selectedModule = useMemo(() => modules.find((item) => item.id === selectedModuleId) || null, [modules, selectedModuleId]);
   const selectedStrategyDef = STRATEGY_BY_ID[selectedStrategy] || STRATEGY_OPTIONS[0];
-  const selectedDataset = useMemo(() => datasets.find((item) => item.id === datasetId) || null, [datasets, datasetId]);
-  const datasetKindMismatch =
-    selectedDataset && selectedStrategyDef?.datasetKind && selectedDataset.dataset_kind && selectedDataset.dataset_kind !== selectedStrategyDef.datasetKind;
-  const isLoading = isLoadingModules || isLoadingProfiles || isLoadingDatasets;
+  const isLoading = isLoadingModules || isLoadingProfiles;
 
   const defaultRequestConfig = useMemo(
     () => ({
@@ -205,26 +198,8 @@ export function OptimizationLaunchPage() {
       }
     };
 
-    const loadDatasets = async () => {
-      setIsLoadingDatasets(true);
-      try {
-        const response = await fetch(`${apiBase}/optimization/datasets`, { method: "GET" });
-        if (!response.ok) {
-          return;
-        }
-        const payload = await response.json();
-        const datasetRows = toArray(payload);
-        setDatasets(datasetRows);
-      } catch {
-        setDatasets([]);
-      } finally {
-        setIsLoadingDatasets(false);
-      }
-    };
-
     loadModules();
     loadProfiles();
-    loadDatasets();
   }, [apiBase, executionLmProfileId, selectedModuleId]);
 
   useEffect(() => {
@@ -306,11 +281,6 @@ export function OptimizationLaunchPage() {
       setValidationError("Execution LM profile is required to launch optimization.");
       return;
     }
-    if (datasetKindMismatch) {
-      setValidationError(`The selected dataset is not suitable for ${selectedStrategyDef.label}. Use ${selectedStrategyDef.datasetKind} dataset kind.`);
-      return;
-    }
-
     setIsSubmitting(true);
     try {
       const response = await fetch(`${apiBase}/optimization/jobs`, {
@@ -322,8 +292,8 @@ export function OptimizationLaunchPage() {
           bundle_path: resolveBundlePath(selectedModule),
           strategy: selectedStrategy,
           objective: selectedStrategyDef.objective || "optimize_demo_quality",
-          dataset_id: datasetId || null,
-          validation_dataset_id: validationDatasetId || null,
+          dataset_id: null,
+          validation_dataset_id: null,
           execution_lm_profile_id: executionLmProfileId,
           helper_lm_profile_id: helperLmProfileId || null,
           request_config: defaultRequestConfig,
@@ -556,55 +526,6 @@ export function OptimizationLaunchPage() {
             />
           </div>
         </section>
-
-        <section className="panel card-pad optimization-form-block optimization-grid-2">
-          <div className="col gap-2">
-            <label className="col gap-1" htmlFor="optimization-dataset-select">
-              <span className="t-label">Training dataset (optional)</span>
-              <select
-                id="optimization-dataset-select"
-                className="bundles-input"
-                value={datasetId}
-                onChange={(event) => setDatasetId(event.target.value)}
-              >
-                <option value="">No training dataset</option>
-                {datasets.map((dataset) => (
-                  <option key={dataset.id} value={dataset.id}>
-                    {dataset.name || dataset.id} ({dataset.dataset_kind || "n/a"})
-                  </option>
-                ))}
-              </select>
-            </label>
-            <FieldHelp
-              text={
-                selectedStrategyDef.datasetKind
-                  ? `Recommended dataset kind for ${selectedStrategyDef.label}: ${selectedStrategyDef.datasetKind}.`
-                  : "No dataset kind requirement configured for selected strategy."
-              }
-            />
-          </div>
-
-          <div className="col gap-2">
-            <label className="col gap-1" htmlFor="optimization-validation-dataset-select">
-              <span className="t-label">Validation dataset (optional)</span>
-              <select
-                id="optimization-validation-dataset-select"
-                className="bundles-input"
-                value={validationDatasetId}
-                onChange={(event) => setValidationDatasetId(event.target.value)}
-              >
-                <option value="">No validation dataset</option>
-                {datasets.map((dataset) => (
-                  <option key={`val-${dataset.id}`} value={dataset.id}>
-                    {dataset.name || dataset.id} ({dataset.dataset_kind || "n/a"})
-                  </option>
-                ))}
-              </select>
-            </label>
-            <FieldHelp text="Used by backend as optional validation support where the strategy supports separate train/validation partitions." />
-          </div>
-        </section>
-        {datasetKindMismatch ? <ErrorState title="Dataset compatibility" description={`Training dataset kind ${selectedDataset?.dataset_kind || "unknown"} does not match ${selectedStrategyDef.label} expectation.`} /> : null}
       </div>
     </section>
   );

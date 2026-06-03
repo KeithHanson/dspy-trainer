@@ -25,7 +25,6 @@ export function LmProfilesPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
   const [deletingId, setDeletingId] = useState("");
-  const [visibleKeyIds, setVisibleKeyIds] = useState({});
   const [copiedKeyId, setCopiedKeyId] = useState("");
 
   const loadProfiles = async () => {
@@ -65,20 +64,16 @@ export function LmProfilesPage() {
     }
   };
 
-  const toggleKeyVisibility = (profileId) => {
-    setVisibleKeyIds((prev) => ({ ...prev, [profileId]: !prev[profileId] }));
-  };
-
-  const copyVirtualKey = async (profileId, keyValue) => {
-    if (!keyValue) {
+  const copyCurlCommand = async (profileId, command) => {
+    if (!command) {
       return;
     }
     try {
-      await navigator.clipboard.writeText(keyValue);
+      await navigator.clipboard.writeText(command);
       setCopiedKeyId(profileId);
       setTimeout(() => setCopiedKeyId(""), 1200);
     } catch {
-      setError("Could not copy virtual key to clipboard.");
+      setError("Could not copy curl command to clipboard.");
     }
   };
 
@@ -102,31 +97,34 @@ export function LmProfilesPage() {
           profiles.length ? (
             <div className="col gap-2">
               {profiles.map((profile) => (
-                <article key={profile.id} className="panel card-pad lm-profiles-row">
-                  <div className="col gap-1" style={{ flex: 1 }}>
-                    <div className="row gap-2">
-                      <strong>{profile.name || "Untitled profile"}</strong>
-                      <span className="cap mono">{profile.model_type || "type n/a"}</span>
+                <article key={profile.id} className="bundles-saved-row lm-profiles-card">
+                  <div className="bundles-saved-icon center lm-profiles-icon">
+                    <Icon name="spark" size={18} />
+                  </div>
+                  <div className="bundles-row-btn lm-profiles-meta">
+                    <div className="row between lm-profiles-title-row">
+                      <div className="row gap-2 lm-profiles-title-group">
+                        <strong>{profile.name || "Untitled profile"}</strong>
+                        <span className="lm-profiles-type-badge">{profile.model_type || "type n/a"}</span>
+                      </div>
+                      <div className="row gap-2 lm-profiles-actions">
+                        <Button size="sm" onClick={() => navigate(`/lm-profiles/${encodeURIComponent(profile.id)}/edit`)}>Edit</Button>
+                        <Button size="sm" variant="danger" className="bundles-delete-btn" onClick={() => deleteProfile(profile.id)} disabled={deletingId === profile.id}>
+                          {deletingId === profile.id ? "Deleting..." : "Delete"}
+                        </Button>
+                      </div>
                     </div>
-                    <span className="cap mono">{profile.model || "model n/a"} · {profile.api_base || "api base n/a"}</span>
-                    <span className="cap mono">{profile.lm_class_path || "dspy.LM (default)"} · updated {formatDate(profile.updated_at)}</span>
-                    <div className="row gap-2" style={{ marginTop: 4 }}>
-                      <span className="cap mono">
-                        Virtual key: {profile.virtual_key ? (visibleKeyIds[profile.id] ? profile.virtual_key : maskKey(profile.virtual_key)) : "none"}
-                      </span>
+                    <span className="cap mono lm-profiles-model-line">{profile.model || "model n/a"}</span>
+                    <span className="cap mono">{profile.api_base || "api base n/a"}</span>
+                    <span className="cap mono">Updated {formatDate(profile.updated_at)}</span>
+                    <div className="lm-profiles-key-box col gap-2">
+                      <span className="t-label">Test with curl</span>
+                      <span className="cap">Copy and run this command to test an LLM call through the profile virtual key.</span>
+                      <pre className="bundles-structure lm-profiles-curl-box">{buildCurlCommand(profile)}</pre>
                       {profile.virtual_key ? (
-                        <>
-                          <Button size="sm" onClick={() => toggleKeyVisibility(profile.id)}>{visibleKeyIds[profile.id] ? "🙈" : "👁"}</Button>
-                          <Button size="sm" onClick={() => copyVirtualKey(profile.id, profile.virtual_key)}>{copiedKeyId === profile.id ? "✅" : "📋"}</Button>
-                        </>
+                        <Button size="sm" onClick={() => copyCurlCommand(profile.id, buildCurlCommand(profile))}>{copiedKeyId === profile.id ? "Copied" : "Copy curl"}</Button>
                       ) : null}
                     </div>
-                  </div>
-                  <div className="row gap-2">
-                    <Button size="sm" onClick={() => navigate(`/lm-profiles/${encodeURIComponent(profile.id)}/edit`)}>Edit</Button>
-                    <Button size="sm" variant="danger" onClick={() => deleteProfile(profile.id)} disabled={deletingId === profile.id}>
-                      {deletingId === profile.id ? "Deleting..." : "Delete"}
-                    </Button>
                   </div>
                 </article>
               ))}
@@ -138,13 +136,6 @@ export function LmProfilesPage() {
       </div>
     </section>
   );
-}
-
-function maskKey(value) {
-  if (!value || value.length < 8) {
-    return "********";
-  }
-  return `${value.slice(0, 4)}${"*".repeat(Math.max(4, value.length - 7))}${value.slice(-3)}`;
 }
 
 export function LmProfileEditorPage() {
@@ -419,4 +410,20 @@ function formatDate(value) {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function buildCurlCommand(profile) {
+  const backendBase = (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, "");
+  const litellmBase = backendBase.replace(":8000", ":4000");
+  const model = String(profile?.model || "openai/gpt-4o-mini");
+  const virtualKey = String(profile?.virtual_key || "<virtual-key-unavailable>");
+  return `curl -s ${litellmBase}/chat/completions \\
+  -H "Authorization: Bearer ${virtualKey}" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "${model}",
+    "messages": [
+      {"role": "user", "content": "Reply with: LM profile test ok"}
+    ]
+  }'`;
 }

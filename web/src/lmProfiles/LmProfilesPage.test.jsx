@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { vi } from "vitest";
@@ -36,11 +36,13 @@ describe("LmProfilesPage", () => {
     );
 
     expect(await screen.findByText("GPT-4o Baseline")).toBeInTheDocument();
-    expect(screen.getByText(/openai\/gpt-4o/)).toBeInTheDocument();
-    expect(screen.getByText(/Virtual key:/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "👁" })).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "👁" }));
-    expect(screen.getByText(/sk-very-secret-key/)).toBeInTheDocument();
+    const profileCard = screen.getByText("GPT-4o Baseline").closest("article");
+    expect(profileCard).toBeTruthy();
+    expect(within(profileCard).getByText("responses")).toBeInTheDocument();
+    expect(within(profileCard).getByText("http://litellm:4000")).toBeInTheDocument();
+    expect(within(profileCard).getByText("Test with curl")).toBeInTheDocument();
+    expect(within(profileCard).getByText(/sk-very-secret-key/)).toBeInTheDocument();
+    expect(within(profileCard).getByRole("button", { name: "Copy curl" })).toBeInTheDocument();
   });
 
   it("shows list without inline editor", async () => {
