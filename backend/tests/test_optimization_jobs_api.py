@@ -237,6 +237,24 @@ async def fake_enqueue_optimization_job(self, optimization_job_id):
     ENQUEUED_JOB_IDS.append(optimization_job_id)
 
 
+async def fake_materialize_optimized_bundle(self, optimization_job_id):
+    job = JOBS.get(optimization_job_id)
+    if job is None or job.get("status") != "succeeded":
+        return None
+    return {
+        "id": "mod-opt-1",
+        "status": "validated",
+        "source": "optimization",
+        "source_ref": "/tmp/dspy-trainer/bundles/mod-opt-1",
+        "bundle_name": f"Echo-optimized-{optimization_job_id}",
+        "bundle_version": "0.1.0",
+        "validation_status": "passed",
+        "smoke_status": "pending",
+        "diagnostics": [],
+        "created_at": "2026-01-01T00:03:00+00:00",
+    }
+
+
 def _patch_services(monkeypatch):
     monkeypatch.setenv("DSPY_TRAINER_POSTGRES_DSN", "postgresql://postgres:postgres@localhost:5432/dspy_trainer")
     monkeypatch.setattr(main_mod.AppServices, "connect", fake_connect)
@@ -248,6 +266,7 @@ def _patch_services(monkeypatch):
     monkeypatch.setattr(main_mod.AppServices, "cancel_optimization_job", fake_cancel_optimization_job)
     monkeypatch.setattr(main_mod.AppServices, "delete_optimization_job", fake_delete_optimization_job)
     monkeypatch.setattr(main_mod.AppServices, "run_optimization_job", fake_run_optimization_job)
+    monkeypatch.setattr(main_mod.AppServices, "materialize_optimized_bundle", fake_materialize_optimized_bundle)
     monkeypatch.setattr(main_mod.AppServices, "create_optimization_dataset", fake_create_optimization_dataset)
     monkeypatch.setattr(main_mod.AppServices, "get_optimization_dataset", fake_get_optimization_dataset)
     monkeypatch.setattr(main_mod.AppServices, "list_optimization_datasets", fake_list_optimization_datasets)
@@ -379,6 +398,11 @@ def test_optimization_job_create_get_run_cancel(monkeypatch):
         assert canceled.status_code == 200
         assert canceled.json()["status"] == "succeeded"
 
+        materialized = client.post(f"/optimization/jobs/{job_id}/materialize-bundle")
+        assert materialized.status_code == 200
+        assert materialized.json()["bundle_name"] == f"Echo-optimized-{job_id}"
+        assert materialized.json()["validation_status"] == "passed"
+
         deleted = client.delete(f"/optimization/jobs/{job_id}")
         assert deleted.status_code == 200
         assert deleted.json() == {"id": job_id, "deleted": True}
@@ -480,3 +504,18 @@ def test_optimization_job_not_found_paths(monkeypatch):
         assert client.delete("/optimization/jobs/missing").status_code == 404
         assert client.post("/optimization/jobs/missing/run").status_code == 404
         assert client.post("/optimization/jobs/missing/cancel").status_code == 404
+        assert client.post("/optimization/jobs/missing/materialize-bundle").status_code == 404
+
+
+def test_materialize_bundle_rejects_non_succeeded_job(monkeypatch):
+    _reset_state()
+    _patch_services(monkeypatch)
+    JOBS["opt-canceled"] = {
+        "id": "opt-canceled",
+        "status": "canceled",
+        "artifact_path": None,
+    }
+    with TestClient(main_mod.app) as client:
+        response = client.post("/optimization/jobs/opt-canceled/materialize-bundle")
+        assert response.status_code == 409
+        assert response.json()["error"] == "only succeeded optimization jobs can create optimized bundles"

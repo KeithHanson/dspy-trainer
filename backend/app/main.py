@@ -479,6 +479,22 @@ async def cancel_optimization_job(optimization_job_id: str, request: Request):
     return result
 
 
+@app.post("/optimization/jobs/{optimization_job_id}/materialize-bundle")
+async def materialize_optimized_bundle(optimization_job_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    job = await services.get_optimization_job(optimization_job_id)
+    if job is None:
+        return JSONResponse(status_code=404, content={"error": "optimization job not found"})
+    if str(job.get("status")) != "succeeded":
+        return JSONResponse(status_code=409, content={"error": "only succeeded optimization jobs can create optimized bundles"})
+    if not str(job.get("artifact_path") or "").strip():
+        return JSONResponse(status_code=409, content={"error": "optimization job has no saved artifact to materialize"})
+    result = await services.materialize_optimized_bundle(optimization_job_id)
+    if result is None:
+        return JSONResponse(status_code=400, content={"error": "optimized bundle could not be materialized"})
+    return result
+
+
 @app.delete("/optimization/jobs/{optimization_job_id}")
 async def delete_optimization_job(optimization_job_id: str, request: Request):
     services: AppServices = request.app.state.services

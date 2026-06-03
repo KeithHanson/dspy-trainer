@@ -81,7 +81,7 @@ button { font-family: inherit; }
 .page-head { padding: 22px 32px 16px; border-bottom: 1px solid var(--border-soft); }
 .page-body { flex: 1; overflow-y: auto; min-height: 0; padding: 24px 32px 80px; }
 
-.btn { display: inline-flex; align-items: center; justify-content: center; gap: 7px; height: 32px; padding: 0 13px; font-size: 13px; font-weight: 500; border-radius: var(--r-sm); border: 1px solid var(--border); background: var(--surface); color: var(--text); }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 7px; height: 32px; padding: 0 13px; font-size: 13px; font-weight: 500; border-radius: var(--r-sm); border: 1px solid var(--border); background: var(--surface); color: var(--text); white-space: nowrap; }
 .btn:hover { background: var(--surface-hover); border-color: var(--border-strong); }
 .btn-primary { background: var(--accent); border-color: transparent; color: var(--text); font-weight: 600; }
 .btn-primary:hover { background: var(--accent-hi); border-color: transparent; color: var(--text); }
@@ -413,6 +413,7 @@ button { font-family: inherit; }
 .optimization-jobs-table-wrap { overflow-x: auto; }
 .optimization-job-action { margin-left: 8px; }
 .optimization-head { align-items: flex-start; margin-bottom: 18px; }
+.optimization-detail-actions { flex-wrap: wrap; justify-content: flex-end; }
 .optimization-form-block { margin-bottom: 14px; }
 .optimization-detail-layout { gap: 18px; }
 .optimization-detail-section { gap: 14px; }
@@ -561,6 +562,14 @@ button { font-family: inherit; }
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
 }
+.optimization-summary-kpis {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+.runs-kpi-value.optimization-strategy-kpi-value {
+  font-size: 16px;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
 .runs-kpi {
   border: 1px solid var(--border-soft);
   border-radius: var(--r);
@@ -685,6 +694,7 @@ button { font-family: inherit; }
   .plans-row-edit { grid-template-columns: 24px 1fr; }
   .plans-row-head { grid-template-columns: 24px 1fr; }
   .runs-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .optimization-summary-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .lm-profiles-grid { grid-template-columns: 1fr; }
   .optimization-grid-2 { grid-template-columns: 1fr; }
   .optimization-strategy-grid { grid-template-columns: 1fr; }

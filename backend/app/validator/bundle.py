@@ -165,11 +165,35 @@ def _validate_bundle_toml(toml_file: Path, diagnostics: list[dict[str, Any]]) ->
             )
         )
 
+    optimized_program_state = payload.get("optimized_program_state")
+    if optimized_program_state is not None:
+        if not isinstance(optimized_program_state, str) or not optimized_program_state.strip():
+            diagnostics.append(
+                _diag(
+                    "error",
+                    "bundle_toml_optimized_program_state_invalid",
+                    "bundle.toml optional 'optimized_program_state' must be a non-empty string when provided",
+                    TOML_FILE,
+                )
+            )
+        else:
+            state_path = toml_file.parent / optimized_program_state.strip()
+            if not state_path.exists() or not state_path.is_file():
+                diagnostics.append(
+                    _diag(
+                        "error",
+                        "optimized_program_state_missing",
+                        "optimized_program_state file referenced by bundle.toml does not exist",
+                        optimized_program_state.strip(),
+                    )
+                )
+
     return {
         "name": payload.get("name"),
         "version": payload.get("version"),
         "lm_target": payload.get("lm_target"),
         "score_pass_threshold": float(score_pass_threshold) if isinstance(score_pass_threshold, (int, float)) and not isinstance(score_pass_threshold, bool) else None,
+        "optimized_program_state": optimized_program_state.strip() if isinstance(optimized_program_state, str) and optimized_program_state.strip() else None,
     }
 
 

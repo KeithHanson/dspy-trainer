@@ -10,6 +10,7 @@ from pathlib import Path
 from queue import Empty, Queue
 import random
 import re
+import shutil
 import tomllib
 import traceback
 from typing import Any
@@ -20,6 +21,7 @@ import httpx
 import redis.asyncio as redis
 
 from app.config import Settings
+from app.validator import validate_bundle
 
 
 logger = logging.getLogger(__name__)
@@ -799,7 +801,15 @@ class AppServices:
         if not root.exists() or not root.is_dir():
             return {}
         files: dict[str, str] = {}
-        for file_name in ("module.py", "metric.py", "bundle.toml"):
+        file_names = ["module.py", "metric.py", "bundle.toml"]
+        try:
+            bundle_payload = tomllib.loads((root / "bundle.toml").read_text(encoding="utf-8"))
+            optimized_program_state = bundle_payload.get("optimized_program_state")
+            if isinstance(optimized_program_state, str) and optimized_program_state.strip():
+                file_names.append(optimized_program_state.strip())
+        except Exception:
+            pass
+        for file_name in file_names:
             file_path = root / file_name
             if not file_path.exists() or not file_path.is_file():
                 continue
@@ -856,6 +866,70 @@ class AppServices:
                 module_id,
                 source_ref,
             )
+
+    @staticmethod
+    def _upsert_toml_string_key(content: str, key: str, value: str) -> str:
+        pattern = re.compile(rf"^{re.escape(key)}\s*=.*$", re.MULTILINE)
+        line = f'{key} = {json.dumps(value)}'
+        if pattern.search(content):
+            return pattern.sub(line, content)
+        suffix = "" if not content.endswith("\n") else ""
+        return f"{content}{suffix}\n{line}\n" if content else f"{line}\n"
+
+    async def materialize_optimized_bundle(self, optimization_job_id: str) -> dict[str, Any] | None:
+        job = await self.get_optimization_job(optimization_job_id)
+        if job is None or str(job.get("status")) != "succeeded":
+            return None
+        module_id = str(job.get("module_import_id") or "").strip()
+        source_module = await self.get_module(module_id)
+        if source_module is None:
+            return None
+        source_ref = str(source_module.get("source_ref") or "").strip()
+        if not source_ref:
+            return None
+        source_root = Path(source_ref).expanduser().resolve()
+        if not source_root.exists() or not source_root.is_dir():
+            return None
+
+        artifact_path_value = str(job.get("artifact_path") or "").strip()
+        if not artifact_path_value:
+            return None
+        artifact_path = Path(artifact_path_value).expanduser().resolve()
+        if not artifact_path.exists() or not artifact_path.is_file():
+            return None
+
+        base_bundle_name = str(source_module.get("bundle_name") or source_root.name or "module-bundle").strip() or "module-bundle"
+        optimized_bundle_name = f"{base_bundle_name}-optimized-{optimization_job_id}"
+        created = await self.create_module_import("optimization", optimization_job_id, None)
+        new_module_id = str(created["id"])
+
+        bundles_dir = Path("/tmp/dspy-trainer/bundles")
+        bundles_dir.mkdir(parents=True, exist_ok=True)
+        target_dir = bundles_dir / new_module_id
+        if target_dir.exists():
+            shutil.rmtree(target_dir)
+        shutil.copytree(source_root, target_dir)
+
+        artifact_target_name = artifact_path.name or "program.json"
+        shutil.copy2(artifact_path, target_dir / artifact_target_name)
+
+        bundle_toml_path = target_dir / "bundle.toml"
+        bundle_toml = bundle_toml_path.read_text(encoding="utf-8")
+        bundle_toml = self._upsert_toml_string_key(bundle_toml, "name", optimized_bundle_name)
+        bundle_toml = self._upsert_toml_string_key(bundle_toml, "optimized_program_state", artifact_target_name)
+        bundle_toml = self._upsert_toml_string_key(bundle_toml, "source_optimization_job_id", optimization_job_id)
+        bundle_toml_path.write_text(bundle_toml, encoding="utf-8")
+
+        await self.set_module_source_ref(new_module_id, str(target_dir))
+        report = validate_bundle(str(target_dir))
+        await self.set_module_bundle_metadata(
+            new_module_id,
+            report.metadata.get("name") if isinstance(report.metadata.get("name"), str) else optimized_bundle_name,
+            report.metadata.get("version") if isinstance(report.metadata.get("version"), str) else None,
+        )
+        status = "passed" if report.passed else "failed"
+        await self.set_validation_status(new_module_id, status, report.diagnostics)
+        return await self.get_module(new_module_id)
 
     async def _mlflow_request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         if self.http_client is None:

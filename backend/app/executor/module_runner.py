@@ -228,9 +228,10 @@ def _build_lm_from_profile(lm_profile: dict[str, Any]) -> Any:
     return lm_cls(**kwargs)
 
 
-def _load_bundle(bundle_path: str) -> tuple[Path, float, ModuleType, ModuleType]:
+def _load_bundle(bundle_path: str) -> tuple[Path, float, str | None, ModuleType, ModuleType]:
     root = Path(bundle_path).expanduser().resolve()
     pass_threshold = 0.5
+    optimized_program_state: str | None = None
     toml_path = root / "bundle.toml"
     if toml_path.exists():
         try:
@@ -238,6 +239,9 @@ def _load_bundle(bundle_path: str) -> tuple[Path, float, ModuleType, ModuleType]
             threshold_value = payload.get("score_pass_threshold")
             if isinstance(threshold_value, (int, float)) and not isinstance(threshold_value, bool):
                 pass_threshold = min(1.0, max(0.0, float(threshold_value)))
+            state_value = payload.get("optimized_program_state")
+            if isinstance(state_value, str) and state_value.strip():
+                optimized_program_state = state_value.strip()
         except Exception:
             pass
 
@@ -249,7 +253,14 @@ def _load_bundle(bundle_path: str) -> tuple[Path, float, ModuleType, ModuleType]
     if not hasattr(metric_mod, "judge_metric"):
         raise RuntimeError("metric.py must define judge_metric(example, prediction)")
 
-    return root, pass_threshold, module_mod, metric_mod
+    return root, pass_threshold, optimized_program_state, module_mod, metric_mod
+
+
+def _load_program_state(program: Any, program_state_path: Path) -> None:
+    state = json.loads(program_state_path.read_text(encoding="utf-8"))
+    if not hasattr(program, "load_state"):
+        raise RuntimeError("program does not support load_state() for optimized program state")
+    program.load_state(state)
 
 
 def _build_eval_example(item: dict[str, Any]) -> dspy.Example:
@@ -593,7 +604,7 @@ def run_bundle_optimization(
         if log_event is not None:
             log_event(message)
 
-    _, pass_threshold, module_mod, metric_mod = _load_bundle(bundle_path)
+    root, pass_threshold, optimized_program_state, module_mod, metric_mod = _load_bundle(bundle_path)
     raw_metric_fn = metric_mod.judge_metric
     config = dict(dspy_config or {})
     _log(f"bundle_path={bundle_path}")
@@ -608,6 +619,8 @@ def run_bundle_optimization(
 
     student_program = module_mod.build_program()
     baseline_program = module_mod.build_program() if baseline_summary is None else None
+    if optimized_program_state is not None:
+        _load_program_state(student_program, root / optimized_program_state)
 
     execution_lm = _build_execution_lm()
     if execution_lm is not None:
@@ -847,9 +860,11 @@ def run_bundle_eval(
     num_threads: int = 1,
     lm_profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    _, pass_threshold, module_mod, metric_mod = _load_bundle(bundle_path)
+    root, pass_threshold, optimized_program_state, module_mod, metric_mod = _load_bundle(bundle_path)
 
     program = module_mod.build_program()
+    if optimized_program_state is not None:
+        _load_program_state(program, root / optimized_program_state)
     if hasattr(module_mod, "build_lm"):
         lm = module_mod.build_lm()
     elif lm_profile is not None:

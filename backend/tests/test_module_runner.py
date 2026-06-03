@@ -218,3 +218,49 @@ def test_run_bundle_optimization_reuses_source_baseline(monkeypatch, tmp_path):
     assert result["comparison_summary"]["baseline_item_count"] == 3
     assert result["comparison_summary"]["optimized_score_pct"] == 100.0
     assert result["comparison_summary"]["score_delta_pct"] == 50.0
+
+
+def test_run_bundle_eval_loads_optimized_program_state(tmp_path):
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "module.py").write_text(
+        "import dspy\n"
+        "class QA(dspy.Signature):\n"
+        "  question = dspy.InputField()\n"
+        "  answer = dspy.OutputField()\n"
+        "class Program(dspy.Module):\n"
+        "  def __init__(self):\n"
+        "    super().__init__()\n"
+        "    self.answer = 'London'\n"
+        "  def forward(self, question: str):\n"
+        "    return dspy.Prediction(answer=self.answer)\n"
+        "  def dump_state(self):\n"
+        "    return {'answer': self.answer}\n"
+        "  def load_state(self, state):\n"
+        "    self.answer = state.get('answer', self.answer)\n"
+        "def build_program():\n"
+        "  return Program()\n",
+        encoding="utf-8",
+    )
+    (bundle / "metric.py").write_text(
+        "def judge_metric(example, prediction, trace=None):\n"
+        "  expected = str(example.label.get('expected', ''))\n"
+        "  got = str(prediction.answer)\n"
+        "  matched = expected == got\n"
+        "  return {'score': 1.0 if matched else 0.0, 'rationale': 'exact_match' if matched else 'mismatch', 'flags': [] if matched else ['answer_mismatch'], 'raw_response': {'expected': expected, 'got': got}}\n",
+        encoding="utf-8",
+    )
+    (bundle / "program.json").write_text('{"answer": "Paris"}', encoding="utf-8")
+    (bundle / "bundle.toml").write_text(
+        "name='x'\nversion='0.1.0'\nlm_target='x'\nscore_pass_threshold=0.8\noptimized_program_state='program.json'\n",
+        encoding="utf-8",
+    )
+
+    result = run_bundle_eval(
+        bundle_path=str(bundle),
+        eval_inputs=[{"input": {"question": "France capital?"}, "label": {"expected": "Paris"}}],
+        num_threads=1,
+    )
+
+    assert result["items"][0]["score"] == 1.0
+    assert result["items"][0]["prediction"]["answer"] == "Paris"

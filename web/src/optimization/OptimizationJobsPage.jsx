@@ -18,8 +18,10 @@ export function OptimizationJobsPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [isRefreshingJob, setIsRefreshingJob] = useState(false);
   const [cancelingJobId, setCancelingJobId] = useState("");
+  const [materializingJobId, setMaterializingJobId] = useState("");
   const [deletingJobId, setDeletingJobId] = useState("");
   const [error, setError] = useState("");
+  const [materializedBundle, setMaterializedBundle] = useState(null);
   const [moduleNames, setModuleNames] = useState({});
   const [profileNames, setProfileNames] = useState({});
 
@@ -163,6 +165,25 @@ export function OptimizationJobsPage() {
     }
   };
 
+  const materializeBundle = async (targetId) => {
+    setMaterializingJobId(targetId);
+    setError("");
+    setMaterializedBundle(null);
+    try {
+      const response = await fetch(`${apiBase}/optimization/jobs/${encodeURIComponent(targetId)}/materialize-bundle`, { method: "POST" });
+      if (!response.ok) {
+        const detail = await readApiError(response);
+        throw new Error(detail || `Could not create optimized bundle (${response.status})`);
+      }
+      const payload = await response.json();
+      setMaterializedBundle(payload);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not create optimized bundle");
+    } finally {
+      setMaterializingJobId("");
+    }
+  };
+
   useEffect(() => {
     if (!jobId) {
       setJob(null);
@@ -270,12 +291,7 @@ export function OptimizationJobsPage() {
     );
   }
 
-  const startedAt = formatDateTime(job?.run_started_at);
-  const finishedAt = formatDateTime(job?.finished_at);
   const comparison = job?.comparison_summary || {};
-  const telemetrySummary = job?.telemetry_summary || {};
-  const artifactMetadata = job?.artifact_metadata || {};
-  const strategyDetails = telemetrySummary.strategy_details || {};
   const detailJobId = job?.id || "";
 
   const executionLm = job?.execution_lm_profile_id ? (profileNames[job.execution_lm_profile_id] || job.execution_lm_profile_id) : "-";
@@ -287,11 +303,14 @@ export function OptimizationJobsPage() {
         <header className="row between plans-head">
           <div className="col gap-1">
             <h1 className="t-display" style={{ fontSize: 22 }}>Optimization Job Detail</h1>
-            <p className="muted t-sm">Deep view of one persisted optimization run and its outcomes.</p>
+            <p className="muted t-sm mono">{detailJobId || "-"}</p>
           </div>
-          <div className="row gap-2">
-            <Button onClick={() => navigate("/optimization/jobs")}>All optimization jobs</Button>
-            <Button onClick={() => navigate("/optimization")}>Back to launch</Button>
+          <div className="row gap-2 optimization-detail-actions">
+            {detailJobId && job?.status === "succeeded" ? (
+              <Button onClick={() => materializeBundle(detailJobId)} disabled={materializingJobId === detailJobId}>
+                {materializingJobId === detailJobId ? "Creating bundle..." : "Create optimized bundle"}
+              </Button>
+            ) : null}
             {detailJobId && canCancelJob(job?.status) ? (
               <Button onClick={() => cancelJob(detailJobId)} disabled={cancelingJobId === detailJobId}>
                 {cancelingJobId === detailJobId ? "Canceling..." : "Cancel job"}
@@ -307,6 +326,14 @@ export function OptimizationJobsPage() {
 
         {isLoading ? <LoadingState label="Loading optimization job..." /> : null}
         {error ? <ErrorState title="Could not load optimization job" description={error} /> : null}
+        {materializedBundle ? (
+          <div className="optimization-success" role="status" aria-live="polite">
+            <div className="optimization-success-title">Optimized bundle created</div>
+            <div className="optimization-success-copy">
+              <Link className="lnk" to="/bundles">{materializedBundle.bundle_name || materializedBundle.id}</Link>
+            </div>
+          </div>
+        ) : null}
 
         {job ? (
           <div className="optimization-detail-layout col">
@@ -318,17 +345,12 @@ export function OptimizationJobsPage() {
             ) : null}
 
             <section className="col optimization-detail-section">
-              <h2 className="t-h2">Run summary</h2>
-              <div className="optimization-detail-facts col">
-                <p className="cap mono">Job ID: {job.id}</p>
-                <p className="cap mono">Module: {job.module_import_id ? (moduleNames[job.module_import_id] || job.module_import_id) : "-"}</p>
-              </div>
-
-              <div className="runs-kpis">
-                <Kpi label="Status" value={<StatusPill status={job.status} />} />
-                <Kpi label="Artifact type" value={artifactMetadata?.artifact_type || "pending"} />
+              <div className="runs-kpis optimization-summary-kpis">
+                <Kpi label="Run Status" value={<StatusPill status={job.status} />} />
+                <Kpi label="Strategy" value={job.strategy || "-"} valueClassName="optimization-strategy-kpi-value" />
                 <Kpi label="Baseline score" value={formatPercent(comparison?.baseline_score_pct)} />
                 <Kpi label="Optimized score" value={formatPercent(comparison?.optimized_score_pct)} />
+                <Kpi label="Total Runtime" value={formatDuration(job.created_at, job.finished_at)} />
               </div>
 
               {job.status !== "succeeded" && job.status !== "failed" && job.status !== "canceled" ? (
@@ -347,10 +369,6 @@ export function OptimizationJobsPage() {
                     <div className="t-label">Baseline / Optimized / Delta</div>
                     <p className="runs-kpi-value">{`${formatPercent(comparison?.baseline_score_pct)} / ${formatPercent(comparison?.optimized_score_pct)} / ${formatDelta(comparison?.score_delta_pct)}`}</p>
                   </div>
-                  <div>
-                    <div className="t-label">Artifact</div>
-                    <p className="mono">{job.artifact_path || "Pending"}</p>
-                  </div>
                 </div>
               </div>
             </section>
@@ -359,12 +377,8 @@ export function OptimizationJobsPage() {
               <div className="panel card-pad optimization-detail-panel">
                 <h3 className="t-h2">Run configuration</h3>
                 <div className="optimization-detail-facts col">
-                  <p className="cap mono">Strategy: {job.strategy || "-"}</p>
-                  <p className="cap mono">Objective: {job.objective || "-"}</p>
                   <p className="cap mono">Execution LM: {executionLm}</p>
                   <p className="cap mono">Helper LM: {helperLm}</p>
-                  <p className="cap mono">Training dataset: {job.dataset_id || "not set"}</p>
-                  <p className="cap mono">Validation dataset: {job.validation_dataset_id || "not set"}</p>
                 </div>
                 {job.source_run_plan_id ? (
                   <p className="cap">
@@ -374,35 +388,6 @@ export function OptimizationJobsPage() {
                     </Link>
                   </p>
                 ) : null}
-              </div>
-
-              <div className="panel card-pad optimization-detail-panel">
-                <h3 className="t-h2">Timing</h3>
-                <div className="optimization-detail-facts col">
-                  <p className="cap mono">Created: {formatDateTime(job.created_at)}</p>
-                  <p className="cap mono">Started: {startedAt}</p>
-                  <p className="cap mono">Finished: {finishedAt}</p>
-                </div>
-              </div>
-
-              <div className="panel card-pad optimization-detail-panel">
-                <h3 className="t-h2">Compiled artifact metadata</h3>
-                <pre className="optimization-request-config-preview"><code>{JSON.stringify(artifactMetadata, null, 2)}</code></pre>
-              </div>
-
-              <div className="panel card-pad optimization-detail-panel">
-                <h3 className="t-h2">Strategy details</h3>
-                <pre className="optimization-request-config-preview"><code>{JSON.stringify(strategyDetails, null, 2)}</code></pre>
-              </div>
-
-              <div className="panel card-pad optimization-detail-panel">
-                <h3 className="t-h2">Request config</h3>
-                <pre className="optimization-request-config-preview"><code>{JSON.stringify(job.request_config || {}, null, 2)}</code></pre>
-              </div>
-
-              <div className="panel card-pad optimization-detail-panel">
-                <h3 className="t-h2">Normalized config</h3>
-                <pre className="optimization-request-config-preview"><code>{JSON.stringify(job.normalized_config || {}, null, 2)}</code></pre>
               </div>
 
               <div className="panel card-pad optimization-detail-panel">
@@ -421,11 +406,11 @@ function StatusPill({ status }) {
   return <span className="plans-status">{status || "unknown"}</span>;
 }
 
-function Kpi({ label, value }) {
+function Kpi({ label, value, valueClassName = "" }) {
   return (
     <div className="runs-kpi">
       <div className="t-label">{label}</div>
-      <div className="runs-kpi-value">{value}</div>
+      <div className={["runs-kpi-value", valueClassName].filter(Boolean).join(" ")}>{value}</div>
     </div>
   );
 }
@@ -446,6 +431,24 @@ function formatDateTime(value) {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function formatDuration(startValue, endValue) {
+  const start = new Date(startValue);
+  const end = new Date(endValue);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end.getTime() < start.getTime()) {
+    return "-";
+  }
+  const totalSeconds = Math.round((end.getTime() - start.getTime()) / 1000);
+  if (totalSeconds < 60) {
+    return `${totalSeconds}s`;
+  }
+  const totalMinutes = Math.round(totalSeconds / 60);
+  if (totalMinutes < 60) {
+    return `${totalMinutes}m`;
+  }
+  const totalHours = (totalMinutes / 60).toFixed(1).replace(/\.0$/, "");
+  return `${totalHours}h`;
 }
 
 function formatPercent(value) {
@@ -488,4 +491,16 @@ function toneForDelta(value) {
 
 function canCancelJob(status) {
   return status === "queued" || status === "running";
+}
+
+async function readApiError(response) {
+  try {
+    const payload = await response.json();
+    if (payload && typeof payload.error === "string" && payload.error.trim()) {
+      return payload.error;
+    }
+  } catch {
+    return "";
+  }
+  return "";
 }

@@ -2,6 +2,7 @@ import asyncio
 import json
 import sys
 from datetime import datetime, timezone
+import shutil
 import time
 from types import SimpleNamespace
 from pathlib import Path
@@ -999,3 +1000,109 @@ def test_optimization_job_json_fields_persist_through_service_db_roundtrip(monke
     assert persisted["artifact_metadata"] == run_result["artifact_metadata"]
     assert persisted["telemetry_summary"] == run_result["telemetry_summary"]
     assert persisted["comparison_summary"] == run_result["comparison_summary"]
+
+
+def test_materialize_optimized_bundle_creates_new_bundle(tmp_path, monkeypatch):
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+
+    source_bundle = tmp_path / "source-bundle"
+    source_bundle.mkdir()
+    (source_bundle / "module.py").write_text(
+        "import dspy\n"
+        "class Sig(dspy.Signature):\n"
+        "  q=dspy.InputField()\n"
+        "  a=dspy.OutputField()\n"
+        "class Agent(dspy.Module):\n"
+        "  def forward(self, q: str):\n"
+        "    return dspy.Prediction(a='x')\n"
+        "def build_program():\n"
+        "  return Agent()\n",
+        encoding="utf-8",
+    )
+    (source_bundle / "metric.py").write_text(
+        "def judge_metric(example, prediction, trace=None):\n"
+        "  return {'score': 1.0, 'rationale': 'ok', 'flags': [], 'raw_response': {}}\n",
+        encoding="utf-8",
+    )
+    (source_bundle / "bundle.toml").write_text(
+        "name='echo-bundle'\nversion='0.1.0'\nlm_target='x'\nscore_pass_threshold=0.8\n",
+        encoding="utf-8",
+    )
+
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    artifact_path = artifact_dir / "program.json"
+    artifact_path.write_text('{"answer": "Paris"}', encoding="utf-8")
+
+    bundles_root = Path("/tmp/dspy-trainer/bundles")
+    if bundles_root.exists():
+        shutil.rmtree(bundles_root)
+
+    created_modules: dict[str, dict] = {}
+    validation_calls: list[tuple[str, str]] = []
+
+    async def fake_get_optimization_job(job_id):
+        assert job_id == "opt-123"
+        return {
+            "id": "opt-123",
+            "status": "succeeded",
+            "module_import_id": "mod-1",
+            "artifact_path": str(artifact_path),
+        }
+
+    async def fake_get_module(module_id):
+        if module_id == "mod-1":
+            return {
+                "id": "mod-1",
+                "bundle_name": "echo-bundle",
+                "source_ref": str(source_bundle),
+            }
+        entry = created_modules[module_id]
+        return {
+            "id": module_id,
+            "status": "validated",
+            "source": "optimization",
+            "source_ref": entry["source_ref"],
+            "bundle_name": entry["bundle_name"],
+            "bundle_version": entry["bundle_version"],
+            "validation_status": entry["validation_status"],
+            "smoke_status": "pending",
+            "diagnostics": entry["diagnostics"],
+        }
+
+    async def fake_create_module_import(source, source_ref, version_hash):
+        del source_ref, version_hash
+        assert source == "optimization"
+        created_modules["mod-opt-1"] = {"id": "mod-opt-1", "status": "imported"}
+        return {"id": "mod-opt-1", "status": "imported"}
+
+    async def fake_set_module_source_ref(module_id, source_ref):
+        created_modules[module_id]["source_ref"] = source_ref
+
+    async def fake_set_module_bundle_metadata(module_id, bundle_name, bundle_version):
+        created_modules[module_id]["bundle_name"] = bundle_name
+        created_modules[module_id]["bundle_version"] = bundle_version
+
+    async def fake_set_validation_status(module_id, status, diagnostics):
+        validation_calls.append((module_id, status))
+        created_modules[module_id]["validation_status"] = status
+        created_modules[module_id]["diagnostics"] = diagnostics
+        return True
+
+    monkeypatch.setattr(services, "get_optimization_job", fake_get_optimization_job)
+    monkeypatch.setattr(services, "get_module", fake_get_module)
+    monkeypatch.setattr(services, "create_module_import", fake_create_module_import)
+    monkeypatch.setattr(services, "set_module_source_ref", fake_set_module_source_ref)
+    monkeypatch.setattr(services, "set_module_bundle_metadata", fake_set_module_bundle_metadata)
+    monkeypatch.setattr(services, "set_validation_status", fake_set_validation_status)
+
+    result = asyncio.run(services.materialize_optimized_bundle("opt-123"))
+
+    assert result is not None
+    assert result["bundle_name"] == "echo-bundle-optimized-opt-123"
+    materialized_root = Path(result["source_ref"])
+    assert materialized_root.joinpath("program.json").exists()
+    bundle_toml = materialized_root.joinpath("bundle.toml").read_text(encoding="utf-8")
+    assert 'optimized_program_state = "program.json"' in bundle_toml
+    assert 'source_optimization_job_id = "opt-123"' in bundle_toml
+    assert validation_calls == [("mod-opt-1", "passed")]

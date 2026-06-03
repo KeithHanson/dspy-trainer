@@ -105,6 +105,7 @@ services:
       - "8000:8000"
     volumes:
       - bundles_data:/tmp/dspy-trainer/bundles
+      - optimization_artifacts_data:/tmp/dspy-trainer/optimization_artifacts
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready', timeout=3)"]
       interval: 10s
@@ -154,6 +155,7 @@ services:
         condition: service_healthy
     volumes:
       - bundles_data:/tmp/dspy-trainer/bundles
+      - optimization_artifacts_data:/tmp/dspy-trainer/optimization_artifacts
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import os, redis; redis.Redis.from_url(os.environ['DSPY_TRAINER_REDIS_URL']).ping()\""]
       interval: 15s
@@ -211,3 +213,4 @@ volumes:
   postgres_data:
   mlflow_artifacts:
   bundles_data:
+  optimization_artifacts_data:

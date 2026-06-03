@@ -101,3 +101,62 @@ def test_validator_rejects_build_lm_with_required_args(tmp_path):
     report = validate_bundle(str(bundle))
     assert report.passed is False
     assert "build_lm_signature_invalid" in _diag_codes(report)
+
+
+def test_validator_accepts_optimized_program_state_file(tmp_path):
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "module.py").write_text(
+        "import dspy\n"
+        "class Sig(dspy.Signature):\n"
+        "  q=dspy.InputField()\n"
+        "  a=dspy.OutputField()\n"
+        "class Agent(dspy.Module):\n"
+        "  def forward(self, q: str):\n"
+        "    return dspy.Prediction(a='x')\n"
+        "def build_program():\n"
+        "  return Agent()\n",
+        encoding="utf-8",
+    )
+    (bundle / "metric.py").write_text(
+        "def judge_metric(example, prediction, trace=None):\n"
+        "  return {'score': 1.0, 'rationale': 'ok', 'flags': [], 'raw_response': {}}\n",
+        encoding="utf-8",
+    )
+    (bundle / "program.json").write_text("{}", encoding="utf-8")
+    (bundle / "bundle.toml").write_text(
+        "name='x'\nversion='0.1.0'\nlm_target='x'\nscore_pass_threshold=0.8\noptimized_program_state='program.json'\n",
+        encoding="utf-8",
+    )
+    report = validate_bundle(str(bundle))
+    assert report.passed is True
+    assert report.metadata["optimized_program_state"] == "program.json"
+
+
+def test_validator_rejects_missing_optimized_program_state_file(tmp_path):
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "module.py").write_text(
+        "import dspy\n"
+        "class Sig(dspy.Signature):\n"
+        "  q=dspy.InputField()\n"
+        "  a=dspy.OutputField()\n"
+        "class Agent(dspy.Module):\n"
+        "  def forward(self, q: str):\n"
+        "    return dspy.Prediction(a='x')\n"
+        "def build_program():\n"
+        "  return Agent()\n",
+        encoding="utf-8",
+    )
+    (bundle / "metric.py").write_text(
+        "def judge_metric(example, prediction, trace=None):\n"
+        "  return {'score': 1.0, 'rationale': 'ok', 'flags': [], 'raw_response': {}}\n",
+        encoding="utf-8",
+    )
+    (bundle / "bundle.toml").write_text(
+        "name='x'\nversion='0.1.0'\nlm_target='x'\nscore_pass_threshold=0.8\noptimized_program_state='program.json'\n",
+        encoding="utf-8",
+    )
+    report = validate_bundle(str(bundle))
+    assert report.passed is False
+    assert "optimized_program_state_missing" in _diag_codes(report)
