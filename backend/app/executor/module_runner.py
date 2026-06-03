@@ -618,16 +618,13 @@ def run_bundle_optimization(
         return None
 
     student_program = module_mod.build_program()
-    baseline_program = module_mod.build_program() if baseline_summary is None else None
     if optimized_program_state is not None:
         _load_program_state(student_program, root / optimized_program_state)
 
-    execution_lm = _build_execution_lm()
+    execution_lm: Any | None = _build_execution_lm()
     if execution_lm is not None:
         _disable_lm_cache(execution_lm)
         student_program.set_lm(execution_lm)
-        if baseline_program is not None:
-            baseline_program.set_lm(execution_lm)
 
     helper_lm = None
     if helper_lm_profile is not None:
@@ -779,40 +776,8 @@ def run_bundle_optimization(
         else:
             raise RuntimeError(f"unsupported optimization strategy: {strategy}")
 
-        optimized_eval_lm = _build_execution_lm()
-        if optimized_eval_lm is not None:
-            _disable_lm_cache(optimized_eval_lm)
-
-        if baseline_summary is None:
-            baseline_eval_lm = _build_execution_lm()
-            if baseline_eval_lm is not None:
-                _disable_lm_cache(baseline_eval_lm)
-            baseline_report = _evaluate_program(
-                baseline_program,
-                raw_metric_fn,
-                evaluation_inputs,
-                pass_threshold,
-                baseline_eval_lm,
-                phase_name="baseline_eval",
-                log_event=_log,
-            )
-        else:
-            baseline_report = {
-                "score_pct": float(baseline_summary.get("score_pct") or 0.0),
-                "items": [{}] * max(0, int(baseline_summary.get("item_count") or 0)),
-            }
+        if baseline_summary is not None:
             _log("baseline_eval=reused_source_run_plan")
-        optimized_report = _evaluate_program(
-            compiled_program,
-            raw_metric_fn,
-            evaluation_inputs,
-            pass_threshold,
-            optimized_eval_lm,
-            phase_name="optimized_eval",
-            log_event=_log,
-        )
-        _log(f"baseline_score_pct={baseline_report['score_pct']}")
-        _log(f"optimized_score_pct={optimized_report['score_pct']}")
 
         artifact_root = Path(artifact_dir).expanduser().resolve()
         if artifact_root.exists():
@@ -823,13 +788,6 @@ def run_bundle_optimization(
         _log(f"program_state_path={program_state_path}")
 
         predictor_demos = _summarize_predictor_demos(compiled_program)
-        comparison_summary = {
-            "baseline_score_pct": baseline_report["score_pct"],
-            "optimized_score_pct": optimized_report["score_pct"],
-            "score_delta_pct": optimized_report["score_pct"] - baseline_report["score_pct"],
-            "baseline_item_count": len(baseline_report["items"]),
-            "optimized_item_count": len(optimized_report["items"]),
-        }
         telemetry_summary = {
             "strategy": normalized_strategy,
             "score_pass_threshold": pass_threshold,
@@ -850,7 +808,6 @@ def run_bundle_optimization(
             "artifact_path": str(program_state_path),
             "artifact_metadata": artifact_metadata,
             "telemetry_summary": telemetry_summary,
-            "comparison_summary": comparison_summary,
         }
 
 

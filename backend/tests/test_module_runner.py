@@ -195,8 +195,6 @@ def test_run_bundle_optimization_reuses_source_baseline(monkeypatch, tmp_path):
         phases.append(phase_name)
         return {"score_pct": 100.0, "items": [{}]}
 
-    monkeypatch.setattr(module_runner, "_evaluate_program", fake_evaluate_program)
-
     result = run_bundle_optimization(
         bundle_path=str(FIXTURES / "valid_bundle"),
         strategy="bootstrap_fewshot",
@@ -213,11 +211,8 @@ def test_run_bundle_optimization_reuses_source_baseline(monkeypatch, tmp_path):
         baseline_summary={"score_pct": 50.0, "item_count": 3},
     )
 
-    assert phases == ["optimized_eval"]
-    assert result["comparison_summary"]["baseline_score_pct"] == 50.0
-    assert result["comparison_summary"]["baseline_item_count"] == 3
-    assert result["comparison_summary"]["optimized_score_pct"] == 100.0
-    assert result["comparison_summary"]["score_delta_pct"] == 50.0
+    assert phases == []
+    assert result["telemetry_summary"]["strategy"] == "bootstrap_fewshot"
 
 
 def test_run_bundle_eval_loads_optimized_program_state(tmp_path):

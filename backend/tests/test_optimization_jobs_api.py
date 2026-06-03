@@ -427,6 +427,7 @@ def test_optimization_job_not_found_paths(monkeypatch):
                 "normalized_config": {},
                 "train_inputs": [],
                 "val_inputs": [],
+                "source_run_plan_id": "plan-1",
             },
         )
         assert missing_create.status_code == 404
@@ -440,6 +441,7 @@ def test_optimization_job_not_found_paths(monkeypatch):
                 "strategy": "bootstrap_fewshot",
                 "objective": "optimize_demo_quality",
                 "request_config": {},
+                "source_run_plan_id": "plan-1",
             },
         )
         assert missing_execution.status_code == 400
@@ -455,6 +457,7 @@ def test_optimization_job_not_found_paths(monkeypatch):
                 "objective": "optimize_demo_quality",
                 "execution_lm_profile_id": "lm-exec-1",
                 "request_config": {},
+                "source_run_plan_id": "plan-1",
             },
         )
         assert invalid_strategy.status_code == 400
@@ -470,6 +473,7 @@ def test_optimization_job_not_found_paths(monkeypatch):
                 "objective": "optimize_demo_quality",
                 "execution_lm_profile_id": "lm-exec-1",
                 "request_config": {"budget": "max"},
+                "source_run_plan_id": "plan-1",
             },
         )
         assert invalid_budget.status_code == 400

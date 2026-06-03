@@ -356,7 +356,6 @@ def test_run_bundle_optimization_bootstrap_fewshot_saves_artifact_and_demo_summa
     assert result["telemetry_summary"]["strategy"] == "bootstrap_fewshot"
     assert result["telemetry_summary"]["dataset_summary"]["usable_record_count"] == 1
     assert result["telemetry_summary"]["selected_demos"][0]["demos"][0]["label"] == {"expected": "Paris"}
-    assert result["comparison_summary"]["optimized_score_pct"] == 100.0
 
 
 def test_run_bundle_optimization_miprov2_records_strategy_details(monkeypatch, tmp_path):
@@ -428,6 +427,8 @@ def test_run_optimization_job_persists_artifact_and_summaries(monkeypatch):
         "job": {
             "id": "opt-1",
             "status": "queued",
+            "project_id": "proj-1",
+            "module_import_id": "mod-1",
             "bundle_path": str(FIXTURES / "valid_bundle"),
             "strategy": "bootstrap_fewshot",
             "dataset_id": "ods-1",
@@ -438,6 +439,7 @@ def test_run_optimization_job_persists_artifact_and_summaries(monkeypatch):
             "train_inputs": [],
             "val_inputs": [{"input": {"question": "France capital?"}, "label": {"expected": "Paris"}}],
             "num_threads": 1,
+            "source_run_plan_id": "plan-1",
             "artifact_path": None,
             "artifact_metadata": {},
             "telemetry_summary": {},
@@ -466,6 +468,14 @@ def test_run_optimization_job_persists_artifact_and_summaries(monkeypatch):
             ],
         }
 
+    async def fake_get_source_run_plan_baseline(**kwargs):
+        assert kwargs == {
+            "project_id": "proj-1",
+            "module_import_id": "mod-1",
+            "source_run_plan_id": "plan-1",
+        }
+        return None
+
     def fake_run_bundle_optimization(**kwargs):
         assert kwargs["strategy"] == "bootstrap_fewshot"
         assert kwargs["train_records"][0]["prediction"] == {"answer": "Paris"}
@@ -474,16 +484,32 @@ def test_run_optimization_job_persists_artifact_and_summaries(monkeypatch):
             "artifact_path": "/tmp/dspy-trainer/optimization_artifacts/opt-1/program.json",
             "artifact_metadata": {"artifact_type": "dspy_program_state"},
             "telemetry_summary": {"strategy": "bootstrap_fewshot", "selected_demos": [{"demo_count": 1}]},
-            "comparison_summary": {"baseline_score_pct": 50.0, "optimized_score_pct": 100.0, "score_delta_pct": 50.0},
         }
 
     async def fake_materialize_from_job(job_payload, *, bundle_name=None, bundle_version=None):
         del bundle_name, bundle_version
         assert job_payload["artifact_path"].endswith("/opt-1/program.json")
         return {"id": "mod-opt-1"}
+    async def fake_get_module(module_id):
+        if module_id == "mod-opt-1":
+            return {"id": module_id, "source_ref": str(FIXTURES / "valid_bundle")}
+        return None
+    async def fake_create_followup_eval_plan_and_run(**kwargs):
+        assert kwargs["source_run_plan_id"] == "plan-1"
+        return {"id": "eval-opt-1"}, {"id": "run-opt-1"}
+    async def fake_enqueue_agent_run_plan(plan_id):
+        assert plan_id == "run-opt-1"
+        return {"id": plan_id}
+    async def fake_await_agent_run_plan_completion(plan_id, timeout_s=600.0):
+        assert plan_id == "run-opt-1"
+        return {"id": plan_id, "status": "succeeded"}
+    async def fake_get_agent_run_plan_score_summary(plan_id):
+        assert plan_id == "run-opt-1"
+        return {"average_score_pct": 100.0, "item_count": 1}
 
     monkeypatch.setattr(services, "get_optimization_job", fake_get_optimization_job)
     monkeypatch.setattr(services, "get_optimization_dataset", fake_get_optimization_dataset)
+    monkeypatch.setattr(services, "_get_source_run_plan_baseline", fake_get_source_run_plan_baseline)
     async def fake_append_optimization_process_log(job_id, additions):
         return None
     async def fake_get_lm_profile(lm_profile_id):
@@ -492,6 +518,11 @@ def test_run_optimization_job_persists_artifact_and_summaries(monkeypatch):
     monkeypatch.setattr(services, "append_optimization_process_log", fake_append_optimization_process_log)
     monkeypatch.setattr(services, "get_lm_profile", fake_get_lm_profile)
     monkeypatch.setattr(services, "_materialize_optimized_bundle_from_job", fake_materialize_from_job)
+    monkeypatch.setattr(services, "get_module", fake_get_module)
+    monkeypatch.setattr(services, "_create_followup_eval_plan_and_run", fake_create_followup_eval_plan_and_run)
+    monkeypatch.setattr(services, "enqueue_agent_run_plan", fake_enqueue_agent_run_plan)
+    monkeypatch.setattr(services, "_await_agent_run_plan_completion", fake_await_agent_run_plan_completion)
+    monkeypatch.setattr(services, "_get_agent_run_plan_score_summary", fake_get_agent_run_plan_score_summary)
     monkeypatch.setattr("app.executor.module_runner.run_bundle_optimization", fake_run_bundle_optimization)
 
     result = asyncio.run(services.run_optimization_job("opt-1"))
@@ -506,7 +537,13 @@ def test_run_optimization_job_persists_artifact_and_summaries(monkeypatch):
     assert result["artifact_path"].endswith("program.json")
     assert result["artifact_metadata"] == {"artifact_type": "dspy_program_state"}
     assert result["telemetry_summary"]["selected_demos"][0]["demo_count"] == 1
-    assert result["comparison_summary"]["optimized_score_pct"] == 100.0
+    assert result["comparison_summary"] == {
+        "baseline_score_pct": None,
+        "optimized_score_pct": 100.0,
+        "score_delta_pct": None,
+        "baseline_item_count": None,
+        "optimized_item_count": 1,
+    }
 
 
 def test_run_optimization_job_gepa_calls_bundle_optimization(monkeypatch):
@@ -515,6 +552,8 @@ def test_run_optimization_job_gepa_calls_bundle_optimization(monkeypatch):
         "job": {
             "id": "opt-2",
             "status": "queued",
+            "project_id": "proj-1",
+            "module_import_id": "mod-1",
             "bundle_path": str(FIXTURES / "valid_bundle"),
             "strategy": "gepa",
             "dataset_id": "ods-1",
@@ -525,6 +564,7 @@ def test_run_optimization_job_gepa_calls_bundle_optimization(monkeypatch):
             "train_inputs": [],
             "val_inputs": [{"input": {"question": "France capital?"}, "label": {"expected": "Paris"}}],
             "num_threads": 1,
+            "source_run_plan_id": "plan-2",
         }
     }
     setattr(services, "postgres_pool", FakePool(state))
@@ -547,6 +587,14 @@ def test_run_optimization_job_gepa_calls_bundle_optimization(monkeypatch):
             ],
         }
 
+    async def fake_get_source_run_plan_baseline(**kwargs):
+        assert kwargs == {
+            "project_id": "proj-1",
+            "module_import_id": "mod-1",
+            "source_run_plan_id": "plan-2",
+        }
+        return None
+
     def fake_run_bundle_optimization(**kwargs):
         assert kwargs["strategy"] == "gepa"
         assert len(kwargs["train_records"]) == 1
@@ -559,11 +607,11 @@ def test_run_optimization_job_gepa_calls_bundle_optimization(monkeypatch):
                 "selected_demos": [{"demo_count": 1}],
                 "strategy_details": {"optimizer_class": "GEPA"},
             },
-            "comparison_summary": {"baseline_score_pct": 50.0, "optimized_score_pct": 100.0, "score_delta_pct": 50.0},
         }
 
     monkeypatch.setattr(services, "get_optimization_job", fake_get_optimization_job)
     monkeypatch.setattr(services, "get_optimization_dataset", fake_get_optimization_dataset)
+    monkeypatch.setattr(services, "_get_source_run_plan_baseline", fake_get_source_run_plan_baseline)
     async def fake_append_optimization_process_log(job_id, additions):
         return None
 
@@ -573,10 +621,31 @@ def test_run_optimization_job_gepa_calls_bundle_optimization(monkeypatch):
     async def fake_materialize_from_job(job_payload, *, bundle_name=None, bundle_version=None):
         del job_payload, bundle_name, bundle_version
         return {"id": "mod-opt-2"}
+    async def fake_get_module(module_id):
+        if module_id == "mod-opt-2":
+            return {"id": module_id, "source_ref": str(FIXTURES / "valid_bundle")}
+        return None
+    async def fake_create_followup_eval_plan_and_run(**kwargs):
+        assert kwargs["source_run_plan_id"] == "plan-2"
+        return {"id": "eval-opt-2"}, {"id": "run-opt-2"}
+    async def fake_enqueue_agent_run_plan(plan_id):
+        assert plan_id == "run-opt-2"
+        return {"id": plan_id}
+    async def fake_await_agent_run_plan_completion(plan_id, timeout_s=600.0):
+        assert plan_id == "run-opt-2"
+        return {"id": plan_id, "status": "succeeded"}
+    async def fake_get_agent_run_plan_score_summary(plan_id):
+        assert plan_id == "run-opt-2"
+        return {"average_score_pct": 95.0, "item_count": 1}
 
     monkeypatch.setattr(services, "append_optimization_process_log", fake_append_optimization_process_log)
     monkeypatch.setattr(services, "get_lm_profile", fake_get_lm_profile)
     monkeypatch.setattr(services, "_materialize_optimized_bundle_from_job", fake_materialize_from_job)
+    monkeypatch.setattr(services, "get_module", fake_get_module)
+    monkeypatch.setattr(services, "_create_followup_eval_plan_and_run", fake_create_followup_eval_plan_and_run)
+    monkeypatch.setattr(services, "enqueue_agent_run_plan", fake_enqueue_agent_run_plan)
+    monkeypatch.setattr(services, "_await_agent_run_plan_completion", fake_await_agent_run_plan_completion)
+    monkeypatch.setattr(services, "_get_agent_run_plan_score_summary", fake_get_agent_run_plan_score_summary)
     monkeypatch.setattr("app.executor.module_runner.run_bundle_optimization", fake_run_bundle_optimization)
 
     result = asyncio.run(services.run_optimization_job("opt-2"))
@@ -647,7 +716,6 @@ def test_run_optimization_job_derives_records_from_source_run_plan(monkeypatch):
             "artifact_path": "/tmp/dspy-trainer/optimization_artifacts/opt-derive/program.json",
             "artifact_metadata": {"artifact_type": "dspy_program_state"},
             "telemetry_summary": {"strategy": "bootstrap_fewshot"},
-            "comparison_summary": {"baseline_score_pct": 50.0, "optimized_score_pct": 100.0, "score_delta_pct": 50.0},
         }
 
     monkeypatch.setattr(services, "get_optimization_job", fake_get_optimization_job)
@@ -704,6 +772,13 @@ def test_run_optimization_job_derives_records_from_source_run_plan(monkeypatch):
     assert "baseline_source_run_plan_id=plan-1" in result["execution_log"]
     assert "optimized_eval_run_plan_id=run-opt-derive" in result["execution_log"]
     assert "derived dataset raw line" in result["execution_log"]
+    assert result["comparison_summary"] == {
+        "baseline_score_pct": 90.0,
+        "optimized_score_pct": 88.0,
+        "score_delta_pct": -2.0,
+        "baseline_item_count": 2,
+        "optimized_item_count": 6,
+    }
 
 
 def test_run_optimization_job_persists_traceback_on_failure(monkeypatch):
@@ -712,6 +787,8 @@ def test_run_optimization_job_persists_traceback_on_failure(monkeypatch):
         "job": {
             "id": "opt-fail",
             "status": "queued",
+            "project_id": "proj-1",
+            "module_import_id": "mod-1",
             "bundle_path": str(FIXTURES / "valid_bundle"),
             "strategy": "bootstrap_fewshot",
             "dataset_id": None,
@@ -724,6 +801,7 @@ def test_run_optimization_job_persists_traceback_on_failure(monkeypatch):
             ],
             "val_inputs": [],
             "num_threads": 1,
+            "source_run_plan_id": "plan-fail",
             "artifact_path": None,
             "artifact_metadata": {},
             "telemetry_summary": {},
@@ -739,10 +817,19 @@ def test_run_optimization_job_persists_traceback_on_failure(monkeypatch):
         assert job_id == "opt-fail"
         return dict(state["job"])
 
+    async def fake_get_source_run_plan_baseline(**kwargs):
+        assert kwargs == {
+            "project_id": "proj-1",
+            "module_import_id": "mod-1",
+            "source_run_plan_id": "plan-fail",
+        }
+        return None
+
     def fake_run_bundle_optimization(**kwargs):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(services, "get_optimization_job", fake_get_optimization_job)
+    monkeypatch.setattr(services, "_get_source_run_plan_baseline", fake_get_source_run_plan_baseline)
     async def fake_append_optimization_process_log(job_id, additions):
         return None
     monkeypatch.setattr(services, "append_optimization_process_log", fake_append_optimization_process_log)
@@ -763,6 +850,8 @@ def test_run_optimization_job_flushes_live_log_updates(monkeypatch):
         "job": {
             "id": "opt-live",
             "status": "queued",
+            "project_id": "proj-1",
+            "module_import_id": "mod-1",
             "bundle_path": str(FIXTURES / "valid_bundle"),
             "strategy": "bootstrap_fewshot",
             "dataset_id": None,
@@ -775,6 +864,7 @@ def test_run_optimization_job_flushes_live_log_updates(monkeypatch):
             ],
             "val_inputs": [],
             "num_threads": 1,
+            "source_run_plan_id": "plan-live",
             "artifact_path": None,
             "artifact_metadata": {},
             "telemetry_summary": {},
@@ -792,6 +882,14 @@ def test_run_optimization_job_flushes_live_log_updates(monkeypatch):
         assert job_id == "opt-live"
         return dict(state["job"])
 
+    async def fake_get_source_run_plan_baseline(**kwargs):
+        assert kwargs == {
+            "project_id": "proj-1",
+            "module_import_id": "mod-1",
+            "source_run_plan_id": "plan-live",
+        }
+        return None
+
     async def fake_append_optimization_process_log(job_id, additions):
         assert job_id == "opt-live"
         appended_batches.append(list(additions))
@@ -805,16 +903,37 @@ def test_run_optimization_job_flushes_live_log_updates(monkeypatch):
             "artifact_path": "/tmp/dspy-trainer/optimization_artifacts/opt-live/program.json",
             "artifact_metadata": {"artifact_type": "dspy_program_state"},
             "telemetry_summary": {"strategy": "bootstrap_fewshot"},
-            "comparison_summary": {"baseline_score_pct": 50.0, "optimized_score_pct": 100.0, "score_delta_pct": 50.0},
         }
 
     async def fake_materialize_from_job(job_payload, *, bundle_name=None, bundle_version=None):
         del job_payload, bundle_name, bundle_version
         return {"id": "mod-opt-live"}
+    async def fake_get_module(module_id):
+        if module_id == "mod-opt-live":
+            return {"id": module_id, "source_ref": str(FIXTURES / "valid_bundle")}
+        return None
+    async def fake_create_followup_eval_plan_and_run(**kwargs):
+        assert kwargs["source_run_plan_id"] == "plan-live"
+        return {"id": "eval-opt-live"}, {"id": "run-opt-live"}
+    async def fake_enqueue_agent_run_plan(plan_id):
+        assert plan_id == "run-opt-live"
+        return {"id": plan_id}
+    async def fake_await_agent_run_plan_completion(plan_id, timeout_s=600.0):
+        assert plan_id == "run-opt-live"
+        return {"id": plan_id, "status": "succeeded"}
+    async def fake_get_agent_run_plan_score_summary(plan_id):
+        assert plan_id == "run-opt-live"
+        return {"average_score_pct": 100.0, "item_count": 1}
 
     monkeypatch.setattr(services, "get_optimization_job", fake_get_optimization_job)
+    monkeypatch.setattr(services, "_get_source_run_plan_baseline", fake_get_source_run_plan_baseline)
     monkeypatch.setattr(services, "append_optimization_process_log", fake_append_optimization_process_log)
     monkeypatch.setattr(services, "_materialize_optimized_bundle_from_job", fake_materialize_from_job)
+    monkeypatch.setattr(services, "get_module", fake_get_module)
+    monkeypatch.setattr(services, "_create_followup_eval_plan_and_run", fake_create_followup_eval_plan_and_run)
+    monkeypatch.setattr(services, "enqueue_agent_run_plan", fake_enqueue_agent_run_plan)
+    monkeypatch.setattr(services, "_await_agent_run_plan_completion", fake_await_agent_run_plan_completion)
+    monkeypatch.setattr(services, "_get_agent_run_plan_score_summary", fake_get_agent_run_plan_score_summary)
     monkeypatch.setattr("app.executor.module_runner.run_bundle_optimization", fake_run_bundle_optimization)
 
     result = asyncio.run(services.run_optimization_job("opt-live"))
@@ -1025,13 +1144,6 @@ def test_optimization_job_json_fields_persist_through_service_db_roundtrip(monke
                 "strategy": "gepa",
                 "strategy_details": {"optimizer_class": "GEPA", "candidate_count": 3},
             },
-            "comparison_summary": {
-                "baseline_score_pct": 50.0,
-                "optimized_score_pct": 100.0,
-                "score_delta_pct": 50.0,
-                "baseline_item_count": 1,
-                "optimized_item_count": 1,
-            },
         }
 
     async def fake_materialize_from_job(job_payload, *, bundle_name=None, bundle_version=None):
@@ -1075,6 +1187,13 @@ def test_optimization_job_json_fields_persist_through_service_db_roundtrip(monke
     assert run_result["generated_module_import_id"] == "mod-opt-roundtrip"
     assert run_result["optimized_evaluation_plan_id"] == "eval-opt-roundtrip"
     assert run_result["optimized_eval_run_plan_id"] == "run-opt-roundtrip"
+    assert run_result["comparison_summary"] == {
+        "baseline_score_pct": 75.0,
+        "optimized_score_pct": 91.0,
+        "score_delta_pct": 16.0,
+        "baseline_item_count": 2,
+        "optimized_item_count": 2,
+    }
 
     stored_after_run = state["optimization_jobs"][created["id"]]
     assert isinstance(stored_after_run["artifact_metadata"], str)

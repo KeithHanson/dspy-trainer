@@ -100,7 +100,7 @@ class OptimizationJobCreateRequest(BaseModel):
     train_inputs: list[dict[str, Any]] = Field(default_factory=list)
     val_inputs: list[dict[str, Any]] = Field(default_factory=list)
     num_threads: int = 1
-    source_run_plan_id: str | None = None
+    source_run_plan_id: str
 
 
 class OptimizationDatasetCreateRequest(BaseModel):

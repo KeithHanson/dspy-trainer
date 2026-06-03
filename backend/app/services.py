@@ -1238,6 +1238,8 @@ class AppServices:
     ) -> dict[str, Any] | None:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
+        if source_run_plan_id is None or not str(source_run_plan_id).strip():
+            raise ValueError("source_run_plan_id is required for optimization jobs")
         now = datetime.now(timezone.utc)
         job_id = str(uuid4())
         comparison_summary: dict[str, Any] = {}
@@ -1875,6 +1877,7 @@ class AppServices:
         try:
             strategy = _normalize_optimization_strategy(str(job.get("strategy") or "bootstrap_fewshot"))
             emit(f"normalized_strategy={strategy}")
+            baseline_summary = None
             if strategy in {"bootstrap_fewshot", "miprov2", "gepa"}:
                 train_records: list[dict[str, Any]] = []
                 if job.get("dataset_id"):
@@ -1922,7 +1925,6 @@ class AppServices:
                     emit(f"validation_dataset_id={job['validation_dataset_id']}")
                 emit(f"validation_input_count={len(validation_inputs)}")
 
-                baseline_summary = None
                 if job.get("source_run_plan_id"):
                     baseline_summary = await self._get_source_run_plan_baseline(
                         project_id=str(job["project_id"]),
@@ -2005,41 +2007,46 @@ class AppServices:
             if generated_module_import_id is None:
                 raise RuntimeError("materialized optimized bundle returned no module id")
 
-            optimized_evaluation_plan_id = None
-            optimized_eval_run_plan_id = None
-            if job.get("source_run_plan_id"):
-                generated_module = await self.get_module(generated_module_import_id)
-                generated_bundle_path = str(generated_module.get("source_ref") or "").strip() if generated_module else ""
-                if not generated_bundle_path:
-                    raise RuntimeError("generated optimized bundle has no runnable source path")
-                followup_eval_plan, followup_run_plan = await self._create_followup_eval_plan_and_run(
-                    source_run_plan_id=str(job["source_run_plan_id"]),
-                    module_import_id=generated_module_import_id,
-                    bundle_path=generated_bundle_path,
-                )
-                if followup_eval_plan is None or followup_run_plan is None:
-                    raise RuntimeError("failed to create follow-up eval plan and run")
-                optimized_evaluation_plan_id = str(followup_eval_plan["id"])
-                optimized_eval_run_plan_id = str(followup_run_plan["id"])
-                emit(f"optimized_evaluation_plan_id={optimized_evaluation_plan_id}")
-                emit(f"optimized_eval_run_plan_id={optimized_eval_run_plan_id}")
-                enqueued_plan = await self.enqueue_agent_run_plan(optimized_eval_run_plan_id)
-                if enqueued_plan is None:
-                    raise RuntimeError("failed to enqueue follow-up eval run plan")
-                completed_plan = await self._await_agent_run_plan_completion(optimized_eval_run_plan_id)
-                if completed_plan is None or completed_plan.get("status") != "succeeded":
-                    raise RuntimeError("follow-up eval run failed")
-                followup_summary = await self._get_agent_run_plan_score_summary(optimized_eval_run_plan_id)
-                if followup_summary and followup_summary.get("average_score_pct") is not None:
-                    optimization_result["comparison_summary"] = {
-                        **(optimization_result.get("comparison_summary") or {}),
-                        "optimized_score_pct": float(followup_summary["average_score_pct"]),
-                        "optimized_item_count": int(followup_summary.get("item_count") or 0),
-                    }
-                    baseline_score_pct = optimization_result["comparison_summary"].get("baseline_score_pct")
-                    optimized_score_pct = optimization_result["comparison_summary"].get("optimized_score_pct")
-                    if isinstance(baseline_score_pct, (int, float)) and isinstance(optimized_score_pct, (int, float)):
-                        optimization_result["comparison_summary"]["score_delta_pct"] = float(optimized_score_pct) - float(baseline_score_pct)
+            source_run_plan_id = str(job.get("source_run_plan_id") or "").strip()
+            if not source_run_plan_id:
+                raise RuntimeError("optimization job is missing required source_run_plan_id")
+
+            generated_module = await self.get_module(generated_module_import_id)
+            generated_bundle_path = str(generated_module.get("source_ref") or "").strip() if generated_module else ""
+            if not generated_bundle_path:
+                raise RuntimeError("generated optimized bundle has no runnable source path")
+            followup_eval_plan, followup_run_plan = await self._create_followup_eval_plan_and_run(
+                source_run_plan_id=source_run_plan_id,
+                module_import_id=generated_module_import_id,
+                bundle_path=generated_bundle_path,
+            )
+            if followup_eval_plan is None or followup_run_plan is None:
+                raise RuntimeError("failed to create follow-up eval plan and run")
+            optimized_evaluation_plan_id = str(followup_eval_plan["id"])
+            optimized_eval_run_plan_id = str(followup_run_plan["id"])
+            emit(f"optimized_evaluation_plan_id={optimized_evaluation_plan_id}")
+            emit(f"optimized_eval_run_plan_id={optimized_eval_run_plan_id}")
+            enqueued_plan = await self.enqueue_agent_run_plan(optimized_eval_run_plan_id)
+            if enqueued_plan is None:
+                raise RuntimeError("failed to enqueue follow-up eval run plan")
+            completed_plan = await self._await_agent_run_plan_completion(optimized_eval_run_plan_id)
+            if completed_plan is None or completed_plan.get("status") != "succeeded":
+                raise RuntimeError("follow-up eval run failed")
+            followup_summary = await self._get_agent_run_plan_score_summary(optimized_eval_run_plan_id)
+            baseline_score_pct = baseline_summary["score_pct"] if baseline_summary is not None else None
+            baseline_item_count = baseline_summary["item_count"] if baseline_summary is not None else None
+            optimized_score_pct = float(followup_summary["average_score_pct"]) if followup_summary and followup_summary.get("average_score_pct") is not None else None
+            optimized_item_count = int(followup_summary.get("item_count") or 0) if followup_summary else None
+            score_delta_pct = None
+            if isinstance(baseline_score_pct, (int, float)) and isinstance(optimized_score_pct, (int, float)):
+                score_delta_pct = float(optimized_score_pct) - float(baseline_score_pct)
+            optimization_result["comparison_summary"] = {
+                "baseline_score_pct": float(baseline_score_pct) if isinstance(baseline_score_pct, (int, float)) else None,
+                "optimized_score_pct": optimized_score_pct,
+                "score_delta_pct": score_delta_pct,
+                "baseline_item_count": int(baseline_item_count) if baseline_item_count is not None else None,
+                "optimized_item_count": optimized_item_count,
+            }
 
             emit("status=succeeded")
             emit(f"artifact_path={optimization_result['artifact_path']}")
