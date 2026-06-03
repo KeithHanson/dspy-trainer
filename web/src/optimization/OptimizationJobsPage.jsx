@@ -407,9 +407,10 @@ export function OptimizationJobsPage() {
               <div className="runs-kpis optimization-summary-kpis">
                 <Kpi label="Run Status" value={<StatusPill status={job.status} />} />
                 <Kpi label="Strategy" value={job.strategy || "-"} valueClassName="optimization-strategy-kpi-value" />
-                <Kpi label="Baseline score" value={formatPercent(comparison?.baseline_score_pct)} />
-                <Kpi label="Optimized score" value={formatPercent(comparison?.optimized_score_pct)} />
                 <Kpi label="Total Runtime" value={formatDuration(job.created_at, job.finished_at)} />
+                <Kpi label="Baseline score" value={formatPercent(comparison?.baseline_score_pct)} valueClassName="optimization-comparison-baseline" />
+                <Kpi label="Optimized score" value={formatPercent(comparison?.optimized_score_pct)} valueClassName={getOptimizedComparisonClass(comparison?.optimized_score_pct, comparison?.baseline_score_pct)} />
+                <Kpi label="Delta" value={formatDelta(comparison?.score_delta_pct)} valueClassName={getDeltaComparisonClass(comparison?.score_delta_pct)} />
               </div>
 
               {job.status !== "succeeded" && job.status !== "failed" && job.status !== "canceled" ? (
@@ -417,36 +418,31 @@ export function OptimizationJobsPage() {
                   {isRefreshingJob ? "Refreshing live run output..." : "Live run output refreshes automatically."}
                 </div>
               ) : null}
-
-              <div className="panel card-pad optimization-detail-panel">
-                <div className="row between" style={{ marginBottom: 10 }}>
-                  <h3 className="t-h2">Comparison</h3>
-                  <span className="t-label">{formatDeltaLabel(comparison?.score_delta_pct)}</span>
-                </div>
-                <div className="optimization-grid-2">
-                  <div>
-                    <div className="t-label">Baseline / Optimized / Delta</div>
-                    <p className="runs-kpi-value">{`${formatPercent(comparison?.baseline_score_pct)} / ${formatPercent(comparison?.optimized_score_pct)} / ${formatDelta(comparison?.score_delta_pct)}`}</p>
-                  </div>
-                </div>
-              </div>
             </section>
 
             <section className="col optimization-detail-section optimization-form-block">
               <div className="panel card-pad optimization-detail-panel">
                 <h3 className="t-h2">Run configuration</h3>
-                <div className="optimization-detail-facts col">
-                  <p className="cap mono">Execution LM: {executionLm}</p>
-                  <p className="cap mono">Helper LM: {helperLm}</p>
+                <div className="optimization-config-grid">
+                  <div className="optimization-config-card">
+                    <span className="t-label">Execution LM</span>
+                    <strong className="optimization-config-value">{executionLm}</strong>
+                  </div>
+                  <div className="optimization-config-card">
+                    <span className="t-label">Helper LM</span>
+                    <strong className="optimization-config-value">{helperLm}</strong>
+                  </div>
+                  <div className="optimization-config-card">
+                    <span className="t-label">Source run plan</span>
+                    {job.source_run_plan_id ? (
+                      <Link className="lnk optimization-config-link" to={`/runs?plan=${encodeURIComponent(job.source_run_plan_id)}`}>
+                        {job.source_run_plan_id}
+                      </Link>
+                    ) : (
+                      <strong className="optimization-config-value">-</strong>
+                    )}
+                  </div>
                 </div>
-                {job.source_run_plan_id ? (
-                  <p className="cap">
-                    Source run plan:
-                    <Link className="lnk" to={`/runs?plan=${encodeURIComponent(job.source_run_plan_id)}`}>
-                      {job.source_run_plan_id}
-                    </Link>
-                  </p>
-                ) : null}
               </div>
 
               <div className="panel card-pad optimization-detail-panel">
@@ -543,6 +539,35 @@ function toneForDelta(value) {
     return "runs-kpi-pass";
   }
   if (numeric < 0) {
+    return "runs-kpi-fail";
+  }
+  return "runs-kpi-warn";
+}
+
+function getOptimizedComparisonClass(optimizedValue, baselineValue) {
+  const optimized = Number(optimizedValue);
+  const baseline = Number(baselineValue);
+  if (!Number.isFinite(optimized) || !Number.isFinite(baseline)) {
+    return "";
+  }
+  if (optimized > baseline) {
+    return "runs-kpi-pass";
+  }
+  if (optimized < baseline) {
+    return "runs-kpi-fail";
+  }
+  return "runs-kpi-warn";
+}
+
+function getDeltaComparisonClass(deltaValue) {
+  const delta = Number(deltaValue);
+  if (!Number.isFinite(delta)) {
+    return "";
+  }
+  if (delta > 0) {
+    return "runs-kpi-pass";
+  }
+  if (delta < 0) {
     return "runs-kpi-fail";
   }
   return "runs-kpi-warn";

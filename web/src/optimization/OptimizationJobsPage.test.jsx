@@ -125,7 +125,12 @@ describe("OptimizationJobsPage", () => {
     expect(await screen.findByText("opt-job-001")).toBeInTheDocument();
     expect(await screen.findByText("Strategy")).toBeInTheDocument();
     expect(await screen.findByText("gepa")).toBeInTheDocument();
-    expect(await screen.findByText("50.0% / 100.0% / +50.0%")).toBeInTheDocument();
+    expect(await screen.findByText("Baseline score")).toBeInTheDocument();
+    expect(await screen.findByText("50.0%")).toBeInTheDocument();
+    expect(await screen.findByText("Optimized score")).toBeInTheDocument();
+    expect(await screen.findByText("100.0%")).toBeInTheDocument();
+    expect(await screen.findByText("Delta")).toBeInTheDocument();
+    expect(await screen.findByText("+50.0%")).toBeInTheDocument();
     expect(await screen.findByText("Process log")).toBeInTheDocument();
     expect(await screen.findByText(/job=opt-job-001/i)).toBeInTheDocument();
 
