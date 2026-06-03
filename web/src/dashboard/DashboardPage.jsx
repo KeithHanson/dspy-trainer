@@ -19,6 +19,11 @@ function greetingForLocalTime() {
   return "Good evening";
 }
 
+function shortId(value) {
+  const text = String(value || "");
+  return text.length > 10 ? `${text.slice(0, 8)}...` : text;
+}
+
 export function DashboardPage({ adapter, onOpenRun, user }) {
   const navigate = useNavigate();
   const { isLoading, error, data } = useDashboardOverview(adapter);
@@ -162,21 +167,41 @@ export function DashboardPage({ adapter, onOpenRun, user }) {
         <section className="dashboard-two-up">
           <article className="panel card-pad">
             <div className="row between dashboard-section-head">
-              <h2 className="t-h2">Needs attention</h2>
+              <div>
+                <h2 className="t-h2">Workers</h2>
+                <p className="muted t-sm">
+                  {data.workerSummary.availableWorkers} available of {data.workerSummary.totalWorkers} total
+                  {data.workerSummary.busyWorkers ? ` · ${data.workerSummary.busyWorkers} busy` : ""}
+                  {data.workerSummary.missingWorkers ? ` · ${data.workerSummary.missingWorkers} not reporting` : ""}
+                </p>
+              </div>
             </div>
-            {data.alerts.length === 0 ? (
-              <div className="dashboard-zero">No alerts right now.</div>
+            {data.workerTable.length === 0 ? (
+              <div className="dashboard-zero">No workers reported yet.</div>
             ) : (
-              <div className="col gap-2">
-                {data.alerts.map((alert) => (
-                  <div key={alert.id} className="dashboard-alert row between gap-2">
-                    <div className="col gap-1">
-                      <p className="t-sm">{alert.title}</p>
-                      <p className="cap">{alert.detail}</p>
-                    </div>
-                    <Button size="sm" onClick={() => navigate(alert.ctaTo)}>{alert.ctaLabel}</Button>
-                  </div>
-                ))}
+              <div className="dashboard-table-wrap">
+                <table className="dashboard-table">
+                  <thead>
+                    <tr>
+                      <th>Worker</th>
+                      <th>Status</th>
+                      <th>Task</th>
+                      <th>Last seen</th>
+                      <th>State</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.workerTable.map((worker) => (
+                      <tr key={worker.workerId}>
+                        <td className="mono">{worker.workerId}</td>
+                        <td>{statusLabel(worker.status)}</td>
+                        <td className="mono">{worker.taskId ? shortId(worker.taskId) : "Idle"}</td>
+                        <td>{worker.lastSeenLabel}</td>
+                        <td>{worker.stateLabel}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             )}
           </article>

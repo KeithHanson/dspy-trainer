@@ -42,6 +42,12 @@ function formatScore(value) {
   return typeof value === "number" ? value.toFixed(3) : "-";
 }
 
+function describeWorkerState(status, taskId) {
+  if (status === "listening") return "Ready for the next task";
+  if (status === "running") return taskId ? "Actively processing work" : "Busy";
+  return "Heartbeat reported";
+}
+
 function buildEvalBreakdown(row, moduleNameById) {
   if (!row) return null;
   const passCount = Number(row.eval_pass_count || 0);
@@ -115,25 +121,13 @@ export function mapDashboardOverview({ plans, modules, workers }) {
 
   const liveJob = buildEvalBreakdown(liveJobRow, moduleNameById);
   const spotlightJob = buildEvalBreakdown(liveJobRow || mostRecent, moduleNameById);
-
-  const alerts = [
-    ...failedBundles.slice(0, 2).map((bundle) => ({
-      id: `bundle-${bundle.id}`,
-      title: `${bundle.bundle_name || bundle.id} failed validation`,
-      detail: "Open bundle details to inspect diagnostics.",
-      ctaLabel: "Open bundle",
-      ctaTo: "/bundles",
-    })),
-  ];
-  if (failedJobs.length > 0) {
-    alerts.push({
-      id: "failed-runs",
-      title: `${failedJobs.length} run${failedJobs.length === 1 ? "" : "s"} failed`,
-      detail: "Review errored runs to inspect worker logs and failures.",
-      ctaLabel: "Open runs",
-      ctaTo: "/runs",
-    });
-  }
+  const workerTable = workerRows.map((worker) => ({
+    workerId: String(worker.worker_id || "unknown"),
+    status: String(worker.status || "unknown"),
+    taskId: worker.task_id ? String(worker.task_id) : null,
+    lastSeenLabel: worker.last_seen ? formatTimeAgo(worker.last_seen) : "unknown",
+    stateLabel: describeWorkerState(worker.status, worker.task_id),
+  }));
 
   return {
     greetingName: "there",
@@ -148,7 +142,13 @@ export function mapDashboardOverview({ plans, modules, workers }) {
       { id: "workers", label: "Available workers", value: `${availableWorkers}/${totalWorkers}`, delta: "" },
     ],
     recentJobs,
-    alerts,
+    workerSummary: {
+      availableWorkers,
+      totalWorkers,
+      busyWorkers: Math.max(0, workerRows.length - availableWorkers),
+      missingWorkers: Math.max(0, totalWorkers - workerRows.length),
+    },
+    workerTable,
     quickStart: [
       { id: "upload", title: "Upload your module", detail: "module.py + metric.py zipped", to: "/bundles?upload=1" },
       { id: "plan", title: "Create a new plan", detail: "Define question set and runs", to: "/plans?new=1" },

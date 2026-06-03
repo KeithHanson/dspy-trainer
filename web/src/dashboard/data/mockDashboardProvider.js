@@ -22,15 +22,10 @@ export const mockDashboardProvider = {
         { id: "run-103", planName: "Refund edge-case checks", bundleName: "policy-bot v4", status: "complete", progress: { done: 120, total: 120 }, passRate: 0.88, startedLabel: "48m ago" },
         { id: "run-102", planName: "Escalation calibration", bundleName: "routing-agent v2", status: "failed", progress: { done: 37, total: 120 }, passRate: 0.41, startedLabel: "3h ago" },
       ],
-      alerts: [
-        {
-          id: "alert-bundle-validation",
-          severity: "fail",
-          title: "sql-generator v7 failed validation",
-          detail: "metric.py is missing the trace parameter and dspy pin conflicts.",
-          ctaLabel: "Fix",
-          ctaTo: "/bundles?bundle=sql-generator-v7",
-        },
+      workerSummary: { availableWorkers: 5, totalWorkers: 8, busyWorkers: 3, missingWorkers: 0 },
+      workerTable: [
+        { workerId: "worker-1", status: "listening", taskId: null, lastSeenLabel: "just now", stateLabel: "Ready for the next task" },
+        { workerId: "worker-2", status: "running", taskId: "task-204", lastSeenLabel: "just now", stateLabel: "Actively processing work" },
       ],
       quickStart: [
         { id: "upload", title: "Upload your module", detail: "module.py + metric.py zipped", to: "/bundles?upload=1" },

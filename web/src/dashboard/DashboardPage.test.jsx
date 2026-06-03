@@ -17,7 +17,8 @@ const baseOverview = {
   spotlightJob: null,
   kpis: [{ id: "one", label: "Pass rate", value: "80%", delta: "+1.0" }],
   recentJobs: [],
-  alerts: [],
+  workerSummary: { availableWorkers: 1, totalWorkers: 8, busyWorkers: 0, missingWorkers: 7 },
+  workerTable: [],
   quickStart: [{ id: "q1", title: "Create plan", detail: "Start quickly", to: "/plans?new=1" }],
 };
 
@@ -56,6 +57,24 @@ describe("DashboardPage", () => {
     );
 
     expect(await screen.findByText("No recent jobs")).toBeInTheDocument();
+  });
+
+  it("renders workers table in place of alerts", async () => {
+    render(
+      <MemoryRouter>
+        <DashboardPage adapter={makeAdapter({
+          ...baseOverview,
+          workerSummary: { availableWorkers: 1, totalWorkers: 8, busyWorkers: 1, missingWorkers: 6 },
+          workerTable: [
+            { workerId: "worker-2", status: "running", taskId: "task-204", lastSeenLabel: "just now", stateLabel: "Actively processing work" },
+          ],
+        })} />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("Workers")).toBeInTheDocument();
+    expect(await screen.findByText("worker-2")).toBeInTheDocument();
+    expect(await screen.findByText("Actively processing work")).toBeInTheDocument();
   });
 
   it("calls row handler when recent job row is clicked", async () => {

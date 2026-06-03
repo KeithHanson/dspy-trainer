@@ -14,7 +14,7 @@ function validateOverview(data) {
   assert(typeof data.summaryLine === "string", "overview.summaryLine must be a string");
   assert(Array.isArray(data.kpis), "overview.kpis must be an array");
   assert(Array.isArray(data.recentJobs), "overview.recentJobs must be an array");
-  assert(Array.isArray(data.alerts), "overview.alerts must be an array");
+  assert(Array.isArray(data.workerTable), "overview.workerTable must be an array");
   assert(Array.isArray(data.quickStart), "overview.quickStart must be an array");
 }
 
