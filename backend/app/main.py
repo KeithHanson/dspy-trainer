@@ -282,6 +282,8 @@ async def import_module(request: Request, payload: ModuleImportRequest):
             )
         except ValueError as exc:
             return JSONResponse(status_code=400, content={"error": str(exc)})
+        except ModuleSyncError as exc:
+            return JSONResponse(status_code=409, content={"error": str(exc), "sync_state": exc.sync_state})
         except RuntimeError as exc:
             return JSONResponse(status_code=400, content={"error": str(exc)})
         return {"id": result["id"], "status": result["status"]}
@@ -369,6 +371,8 @@ async def refresh_module_sync_status(module_id: str, request: Request, payload: 
         return JSONResponse(status_code=status_code, content={"error": str(exc)})
     except ModuleSyncError as exc:
         return JSONResponse(status_code=409, content={"error": str(exc), "sync_state": exc.sync_state})
+    except RuntimeError as exc:
+        return JSONResponse(status_code=409, content={"error": str(exc)})
 
 
 @app.post("/modules/{module_id}/sync")
@@ -381,6 +385,8 @@ async def sync_module(module_id: str, request: Request, payload: ModuleSyncReque
         return JSONResponse(status_code=status_code, content={"error": str(exc)})
     except ModuleSyncError as exc:
         return JSONResponse(status_code=409, content={"error": str(exc), "sync_state": exc.sync_state})
+    except RuntimeError as exc:
+        return JSONResponse(status_code=409, content={"error": str(exc)})
 
 
 @app.get("/modules/{module_id}/revisions")
