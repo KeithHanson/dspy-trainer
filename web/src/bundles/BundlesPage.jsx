@@ -173,9 +173,36 @@ const BUNDLE_FILE_TEMPLATES = {
 export function BundlesPage() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState("");
   const showImportIntent = searchParams.get("import") === "1";
 
+  const sampleUrl = useMemo(() => buildApiUrl("/samples/module-bundle"), []);
   const validateUrl = useMemo(() => buildApiUrl("/modules"), []);
+
+  const handleDownload = async () => {
+    setIsDownloading(true);
+    setDownloadError("");
+    try {
+      const response = await fetch(sampleUrl, { method: "GET" });
+      if (!response.ok) {
+        throw new Error(`Sample download failed (${response.status})`);
+      }
+      const blob = await response.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = "example-bundle.zip";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(objectUrl);
+    } catch (error) {
+      setDownloadError(error instanceof Error ? error.message : "Could not download sample bundle");
+    } finally {
+      setIsDownloading(false);
+    }
+  };
 
   return (
     <section className="page">
@@ -186,9 +213,14 @@ export function BundlesPage() {
             <p className="muted t-sm">GitHub-backed DSPy bundles with root-level <span className="mono">module.py</span>, <span className="mono">metric.py</span>, and <span className="mono">bundle.toml</span>.</p>
           </div>
           <div className="row gap-2">
+            <Button onClick={handleDownload} disabled={isDownloading}>
+              {isDownloading ? "Downloading..." : "Download example"}
+            </Button>
             <Button variant="primary" onClick={() => navigate("/bundles?import=1")}>Import from GitHub</Button>
           </div>
         </header>
+
+        {downloadError ? <ErrorState title="Download failed" description={downloadError} /> : null}
 
         {showImportIntent ? (
           <>
@@ -210,6 +242,9 @@ export function BundlesPage() {
                   <li key={step}>{step}</li>
                 ))}
               </ol>
+              <p className="cap" style={{ marginTop: 12 }}>
+                New here? Download the example bundle, customize it locally, then push it to a GitHub repo before importing.
+              </p>
             </section>
 
             <GitHubImportPanel modulesUrl={validateUrl} onBack={() => navigate("/bundles")} onCreatePlan={() => navigate("/plans?new=1")} />
