@@ -122,12 +122,12 @@ describe("BundlesPage", () => {
     );
 
     await userEvent.click(await screen.findByRole("button", { name: "View files" }));
-    expect(await screen.findByText("Bundle metadata")).toBeInTheDocument();
+    expect(await screen.findByText("Bundle detail")).toBeInTheDocument();
 
     vi.unstubAllGlobals();
   });
 
-  it("updates bundle name and version from bundle detail", async () => {
+  it("updates bundle name and version from bundle edit modal", async () => {
     const fetchMock = vi.fn((url, init) => {
       if (String(url).endsWith("/modules") && (!init || init.method === "GET")) {
         return Promise.resolve({
@@ -173,7 +173,7 @@ describe("BundlesPage", () => {
       </MemoryRouter>,
     );
 
-    await userEvent.click(await screen.findByRole("button", { name: "View files" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Edit" }));
     await userEvent.clear(screen.getByLabelText("Bundle name"));
     await userEvent.type(screen.getByLabelText("Bundle name"), "renamed-bundle");
     await userEvent.clear(screen.getByLabelText("Bundle version"));
@@ -181,8 +181,8 @@ describe("BundlesPage", () => {
     await userEvent.click(screen.getByRole("button", { name: "Save metadata" }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/modules\/mod-2$/), expect.objectContaining({ method: "PATCH" })));
-    expect(await screen.findByDisplayValue("renamed-bundle")).toBeInTheDocument();
-    expect(await screen.findByDisplayValue("2.1.0")).toBeInTheDocument();
+    expect(await screen.findByText("renamed-bundle")).toBeInTheDocument();
+    expect(await screen.findByText("v2.1.0")).toBeInTheDocument();
 
     vi.unstubAllGlobals();
   });

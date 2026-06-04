@@ -267,6 +267,7 @@ function SavedBundlesPanel({ modulesUrl }) {
   const [editingVersion, setEditingVersion] = useState("");
   const [isSavingMetadata, setIsSavingMetadata] = useState(false);
   const [metadataError, setMetadataError] = useState("");
+  const [metadataModalBundle, setMetadataModalBundle] = useState(null);
 
   const loadBundleFiles = async (bundleId) => {
     if (!bundleId) {
@@ -326,10 +327,11 @@ function SavedBundlesPanel({ modulesUrl }) {
   }, []);
 
   useEffect(() => {
-    setEditingName(selectedBundle?.bundle_name || "");
-    setEditingVersion(selectedBundle?.bundle_version || "");
+    const source = metadataModalBundle || selectedBundle;
+    setEditingName(source?.bundle_name || "");
+    setEditingVersion(source?.bundle_version || "");
     setMetadataError("");
-  }, [selectedBundle?.id, selectedBundle?.bundle_name, selectedBundle?.bundle_version]);
+  }, [selectedBundle?.id, selectedBundle?.bundle_name, selectedBundle?.bundle_version, metadataModalBundle?.id, metadataModalBundle?.bundle_name, metadataModalBundle?.bundle_version]);
 
   useEffect(() => {
     const loadFiles = async () => {
@@ -353,13 +355,14 @@ function SavedBundlesPanel({ modulesUrl }) {
   }, [bundleFiles, activeFileName]);
 
   const saveBundleMetadata = async () => {
-    if (!selectedBundle?.id) {
+    const targetBundle = metadataModalBundle || selectedBundle;
+    if (!targetBundle?.id) {
       return;
     }
     setIsSavingMetadata(true);
     setMetadataError("");
     try {
-      const response = await fetch(`${modulesUrl}/${selectedBundle.id}`, {
+      const response = await fetch(`${modulesUrl}/${targetBundle.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -372,7 +375,10 @@ function SavedBundlesPanel({ modulesUrl }) {
       }
       const updated = await response.json();
       setSavedBundles((current) => current.map((bundle) => (bundle.id === updated.id ? updated : bundle)));
-      setSelectedBundle(updated);
+      if (selectedBundle?.id === updated.id) {
+        setSelectedBundle(updated);
+      }
+      setMetadataModalBundle(null);
     } catch (error) {
       setMetadataError(error instanceof Error ? error.message : "Could not update bundle");
     } finally {
@@ -414,11 +420,36 @@ function SavedBundlesPanel({ modulesUrl }) {
                 setActiveFileName("module.py");
                 setSelectedBundle(bundle);
               }}>View files</Button>
+              <Button size="sm" onClick={() => setMetadataModalBundle(bundle)}>Edit</Button>
               <Button size="sm" className="bundles-delete-btn" onClick={() => deleteBundle(bundle.id)}>Delete</Button>
             </div>
           ))}
         </div>
       )}
+
+      {metadataModalBundle ? (
+        <div className="bundles-modal-backdrop" onClick={() => setMetadataModalBundle(null)}>
+          <div className="panel card-pad bundles-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="row between" style={{ marginBottom: 8 }}>
+              <h4 className="t-h2">Edit bundle metadata</h4>
+              <Button size="sm" variant="ghost" onClick={() => setMetadataModalBundle(null)}>Close</Button>
+            </div>
+            <p className="cap" style={{ marginBottom: 8 }}>ID: <span className="faint">{metadataModalBundle.id}</span></p>
+            <div className="bundles-metadata-form" style={{ marginBottom: 12 }}>
+              <div className="bundles-metadata-grid">
+                <label className="bundles-label" htmlFor="bundle-name-input">Bundle name</label>
+                <input id="bundle-name-input" className="bundles-file-input" type="text" value={editingName} onChange={(event) => setEditingName(event.target.value)} />
+                <label className="bundles-label" htmlFor="bundle-version-input">Bundle version</label>
+                <input id="bundle-version-input" className="bundles-file-input" type="text" value={editingVersion} onChange={(event) => setEditingVersion(event.target.value)} />
+              </div>
+              <div className="row gap-2" style={{ marginTop: 10 }}>
+                <Button size="sm" variant="primary" onClick={saveBundleMetadata} disabled={isSavingMetadata}>{isSavingMetadata ? "Saving..." : "Save metadata"}</Button>
+              </div>
+              {metadataError ? <p className="cap" style={{ marginTop: 8 }}>{metadataError}</p> : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {selectedBundle ? (
         <div className="panel card-pad bundles-validation-result">
@@ -426,19 +457,6 @@ function SavedBundlesPanel({ modulesUrl }) {
             <h4 className="t-h2">Bundle detail</h4>
           </div>
           <p className="cap" style={{ marginBottom: 8 }}>ID: <span className="faint">{selectedBundle.id}</span></p>
-          <div className="bundles-metadata-form" style={{ marginBottom: 12 }}>
-            <div className="t-h2" style={{ marginBottom: 8 }}>Bundle metadata</div>
-            <div className="bundles-metadata-grid">
-              <label className="bundles-label" htmlFor="bundle-name-input">Bundle name</label>
-              <input id="bundle-name-input" className="bundles-file-input" type="text" value={editingName} onChange={(event) => setEditingName(event.target.value)} />
-              <label className="bundles-label" htmlFor="bundle-version-input">Bundle version</label>
-              <input id="bundle-version-input" className="bundles-file-input" type="text" value={editingVersion} onChange={(event) => setEditingVersion(event.target.value)} />
-            </div>
-            <div className="row gap-2" style={{ marginTop: 10 }}>
-              <Button size="sm" variant="primary" onClick={saveBundleMetadata} disabled={isSavingMetadata}>{isSavingMetadata ? "Saving..." : "Save metadata"}</Button>
-            </div>
-            {metadataError ? <p className="cap" style={{ marginTop: 8 }}>{metadataError}</p> : null}
-          </div>
           <div className="bundles-check-report" style={{ marginBottom: 12 }}>
             <div className="t-h2" style={{ marginBottom: 8 }}>Validation checklist</div>
             <ul className="bundles-check-results">
