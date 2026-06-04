@@ -92,7 +92,8 @@ class _FakeConn:
             self.state["job"]["resulting_bundle_revision_id"] = params[9]
             self.state["job"]["resulting_bundle_commit_sha"] = params[10]
             self.state["job"]["resulting_bundle_version"] = params[11]
-            self.state["job"]["finished_at"] = params[12].isoformat()
+            self.state["job"]["resulting_bundle_branch"] = params[12]
+            self.state["job"]["finished_at"] = params[13].isoformat()
         elif "set status='failed'" in query:
             self.state["job"]["status"] = "failed"
             self.state["job"]["failure_reason"] = params[1]
@@ -142,6 +143,7 @@ class _PersistentDbConn:
                 "resulting_bundle_revision_id": None,
                 "resulting_bundle_commit_sha": None,
                 "resulting_bundle_version": None,
+                "resulting_bundle_branch": None,
                 "strategy": params[7],
                 "objective": params[8],
                 "dataset_id": params[9],
@@ -203,7 +205,7 @@ class _PersistentDbConn:
             return "UPDATE 1"
 
         if "update optimization_jobs set status='succeeded'" in normalized:
-            job_id, execution_log, artifact_path, artifact_metadata, telemetry_summary, comparison_summary, generated_module_import_id, optimized_evaluation_plan_id, optimized_eval_run_plan_id, resulting_bundle_revision_id, resulting_bundle_commit_sha, resulting_bundle_version, finished_at = params[:13]
+            job_id, execution_log, artifact_path, artifact_metadata, telemetry_summary, comparison_summary, generated_module_import_id, optimized_evaluation_plan_id, optimized_eval_run_plan_id, resulting_bundle_revision_id, resulting_bundle_commit_sha, resulting_bundle_version, resulting_bundle_branch, finished_at = params[:14]
             job = self.state["optimization_jobs"].get(str(job_id)) or self.state.get("job")
             if isinstance(job, dict):
                 job["status"] = "succeeded"
@@ -218,6 +220,7 @@ class _PersistentDbConn:
                 job["resulting_bundle_revision_id"] = resulting_bundle_revision_id
                 job["resulting_bundle_commit_sha"] = resulting_bundle_commit_sha
                 job["resulting_bundle_version"] = resulting_bundle_version
+                job["resulting_bundle_branch"] = resulting_bundle_branch
                 job["failure_reason"] = None
                 job["finished_at"] = finished_at
                 job["updated_at"] = finished_at
@@ -512,7 +515,13 @@ def test_run_optimization_job_persists_artifact_and_summaries(monkeypatch):
 
     async def fake_materialize_from_job(job_payload, *, bundle_name=None, bundle_version=None, commit_message=None):
         del job_payload, bundle_name, bundle_version, commit_message
-        return {"id": "mod-opt-1", "current_revision_id": "rev-opt-1", "current_commit_sha": "commit-opt-1", "bundle_version": "0.1.0"}
+        return {
+            "id": "mod-opt-1",
+            "resulting_bundle_revision_id": "rev-opt-1",
+            "resulting_bundle_commit_sha": "commit-opt-1",
+            "resulting_bundle_version": "0.1.0",
+            "resulting_bundle_branch": "optimization-opt",
+        }
     async def fake_get_module(module_id):
         if module_id == "mod-opt-1":
             return {"id": module_id, "source_ref": str(FIXTURES / "valid_bundle")}
@@ -655,7 +664,13 @@ def test_run_optimization_job_gepa_calls_bundle_optimization(monkeypatch):
 
     async def fake_materialize_from_job(job_payload, *, bundle_name=None, bundle_version=None, commit_message=None):
         del job_payload, bundle_name, bundle_version, commit_message
-        return {"id": "mod-opt-2", "current_revision_id": "rev-opt-2", "current_commit_sha": "commit-opt-2", "bundle_version": "0.1.0"}
+        return {
+            "id": "mod-opt-2",
+            "resulting_bundle_revision_id": "rev-opt-2",
+            "resulting_bundle_commit_sha": "commit-opt-2",
+            "resulting_bundle_version": "0.1.0",
+            "resulting_bundle_branch": "optimization-opt",
+        }
     async def fake_get_module(module_id):
         if module_id == "mod-opt-2":
             return {"id": module_id, "source_ref": str(FIXTURES / "valid_bundle")}
@@ -776,7 +791,13 @@ def test_run_optimization_job_derives_records_from_source_run_plan(monkeypatch):
 
     async def fake_materialize_from_job(job_payload, *, bundle_name=None, bundle_version=None, commit_message=None):
         del job_payload, bundle_name, bundle_version, commit_message
-        return {"id": "mod-opt-derive", "current_revision_id": "rev-opt-derive", "current_commit_sha": "commit-opt-derive", "bundle_version": "0.1.0"}
+        return {
+            "id": "mod-opt-derive",
+            "resulting_bundle_revision_id": "rev-opt-derive",
+            "resulting_bundle_commit_sha": "commit-opt-derive",
+            "resulting_bundle_version": "0.1.0",
+            "resulting_bundle_branch": "optimization-opt",
+        }
     async def fake_create_followup_eval_plan_and_run(**kwargs):
         assert kwargs["source_run_plan_id"] == "plan-1"
         assert kwargs["module_import_id"] == "mod-opt-derive"
@@ -1237,9 +1258,10 @@ def test_optimization_job_json_fields_persist_through_service_db_roundtrip(monke
         assert commit_message and "baseline 75.0% -> optimized 91.0%" in commit_message
         return {
             "id": "mod-opt-roundtrip",
-            "current_revision_id": "rev-opt-roundtrip",
-            "current_commit_sha": "commit-opt-roundtrip",
-            "bundle_version": "2.0.0",
+            "resulting_bundle_revision_id": "rev-opt-roundtrip",
+            "resulting_bundle_commit_sha": "commit-opt-roundtrip",
+            "resulting_bundle_version": "2.0.0",
+            "resulting_bundle_branch": "optimization-opt",
         }
 
     async def fake_create_followup_eval_plan_and_run(**kwargs):
@@ -1315,8 +1337,9 @@ def test_optimization_job_json_fields_persist_through_service_db_roundtrip(monke
 def test_materialize_optimized_bundle_updates_existing_checkout(tmp_path, monkeypatch):
     services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
 
-    source_bundle = tmp_path / "source-bundle"
-    source_bundle.mkdir()
+    repo_root = tmp_path / "repo"
+    source_bundle = repo_root / "bundles" / "source-bundle"
+    source_bundle.mkdir(parents=True)
     (source_bundle / "module.py").write_text(
         "import dspy\n"
         "class Sig(dspy.Signature):\n"
@@ -1344,9 +1367,8 @@ def test_materialize_optimized_bundle_updates_existing_checkout(tmp_path, monkey
     artifact_path = artifact_dir / "program.json"
     artifact_path.write_text('{"answer": "Paris"}', encoding="utf-8")
 
-    validation_calls: list[tuple[str, str]] = []
-    sync_state_calls: list[dict[str, object]] = []
     git_calls: list[tuple[list[str], str | None]] = []
+    branch_root = tmp_path / "worktree"
 
     async def fake_get_optimization_job(job_id):
         assert job_id == "opt-123"
@@ -1365,29 +1387,36 @@ def test_materialize_optimized_bundle_updates_existing_checkout(tmp_path, monkey
                 "bundle_name": "echo-bundle",
                 "bundle_version": "0.1.0",
                 "source_ref": str(source_bundle),
-                "checkout_path": str(source_bundle),
+                "checkout_path": str(repo_root),
                 "github_branch": "main",
-                "current_revision_id": "rev-before",
+                "github_subpath": "bundles/source-bundle",
             }
         return None
 
-    async def fake_update_module_bundle_metadata_record(module_id, *, bundle_name, bundle_version):
+    async def fake_create_worktree(repo_root_arg, *, base_branch, optimization_job_id):
+        assert repo_root_arg == repo_root
+        assert base_branch == "main"
+        assert optimization_job_id == "opt-123"
+        shutil.copytree(repo_root, branch_root)
+        return branch_root, "optimization-opt"
+
+    async def fake_remove_worktree(repo_root_arg, worktree_path):
+        assert repo_root_arg == repo_root
+        assert worktree_path == branch_root
+
+    async def fake_create_noncurrent_bundle_revision(module_id, **kwargs):
         assert module_id == "mod-1"
-        assert bundle_name == "echo-bundle"
-        assert bundle_version == "2.0.0"
-
-    async def fake_set_validation_status(module_id, status, diagnostics, **kwargs):
-        validation_calls.append((module_id, status))
         assert kwargs["commit_sha"] == "commit-after"
+        assert kwargs["bundle_name"] == "custom-bundle"
         assert kwargs["bundle_version"] == "2.0.0"
-        return True
-
-    async def fake_set_module_sync_state(module_id, **kwargs):
-        sync_state_calls.append({"module_id": module_id, **kwargs})
+        assert kwargs["source_event"] == "optimization_branch"
+        return "rev-after"
 
     async def fake_run_git_command(args, *, cwd=None):
         git_calls.append((args, str(cwd) if cwd is not None else None))
         if args[:4] == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            if str(cwd) == str(branch_root):
+                return "optimization-opt"
             return "main"
         if args[:3] == ["git", "rev-parse", "HEAD"]:
             return "commit-after"
@@ -1400,21 +1429,22 @@ def test_materialize_optimized_bundle_updates_existing_checkout(tmp_path, monkey
             "id": "mod-1",
             "source": "github",
             "source_ref": str(source_bundle),
-            "checkout_path": str(source_bundle),
+            "checkout_path": str(repo_root),
             "github_branch": "main",
+            "github_subpath": "bundles/source-bundle",
             "bundle_name": "echo-bundle",
-            "bundle_version": "2.0.0",
+            "bundle_version": "0.1.0",
             "validation_status": "passed",
             "smoke_status": "pending",
             "diagnostics": [],
-            "current_revision_id": "rev-after",
+            "current_revision_id": "rev-before",
         }
 
     monkeypatch.setattr(services, "get_optimization_job", fake_get_optimization_job)
     monkeypatch.setattr(services, "get_module", fake_get_updated_module)
-    monkeypatch.setattr(services, "_update_module_bundle_metadata_record", fake_update_module_bundle_metadata_record)
-    monkeypatch.setattr(services, "set_validation_status", fake_set_validation_status)
-    monkeypatch.setattr(services, "_set_module_sync_state", fake_set_module_sync_state)
+    monkeypatch.setattr(services, "_create_optimization_worktree", fake_create_worktree)
+    monkeypatch.setattr(services, "_remove_optimization_worktree", fake_remove_worktree)
+    monkeypatch.setattr(services, "_create_noncurrent_bundle_revision", fake_create_noncurrent_bundle_revision)
     monkeypatch.setattr(services, "_run_git_command", fake_run_git_command)
     async def fake_ensure_module_mutation_allowed(module_id):
         assert module_id == "mod-1"
@@ -1426,25 +1456,27 @@ def test_materialize_optimized_bundle_updates_existing_checkout(tmp_path, monkey
 
     assert result is not None
     assert result["bundle_name"] == "echo-bundle"
-    materialized_root = Path(source_bundle)
+    assert result["resulting_bundle_branch"] == "optimization-opt"
+    assert result["resulting_bundle_revision_id"] == "rev-after"
+    assert result["resulting_bundle_commit_sha"] == "commit-after"
+    assert result["resulting_bundle_version"] == "2.0.0"
+    materialized_root = Path(branch_root) / "bundles" / "source-bundle"
     assert materialized_root.joinpath("program.json").exists()
     bundle_toml = materialized_root.joinpath("bundle.toml").read_text(encoding="utf-8")
-    assert 'name = "echo-bundle"' in bundle_toml
+    assert 'name = "custom-bundle"' in bundle_toml
     assert 'version = "2.0.0"' in bundle_toml
     assert 'optimized_program_state = "program.json"' in bundle_toml
     assert 'source_optimization_job_id = "opt-123"' in bundle_toml
-    assert validation_calls == [("mod-1", "passed")]
-    assert sync_state_calls[0]["module_id"] == "mod-1"
-    assert sync_state_calls[0]["source_event"] == "optimization_writeback"
     assert any(call[0][0] == "git" and "commit" in call[0] and "-m" in call[0] for call in git_calls)
-    assert any(call[0][:4] == ["git", "push", "origin", "main"] for call in git_calls)
+    assert any(call[0][:4] == ["git", "push", "origin", "optimization-opt"] for call in git_calls)
 
 
 def test_materialize_optimized_bundle_strips_legacy_generated_suffix_from_name(tmp_path, monkeypatch):
     services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
 
-    source_bundle = tmp_path / "source-bundle"
-    source_bundle.mkdir()
+    repo_root = tmp_path / "repo-legacy"
+    source_bundle = repo_root / "bundles" / "source-bundle"
+    source_bundle.mkdir(parents=True)
     (source_bundle / "module.py").write_text(
         "import dspy\nclass Sig(dspy.Signature):\n  q=dspy.InputField()\n  a=dspy.OutputField()\nclass Agent(dspy.Module):\n  def forward(self, q: str):\n    return dspy.Prediction(a='x')\ndef build_program():\n  return Agent()\n",
         encoding="utf-8",
@@ -1461,6 +1493,7 @@ def test_materialize_optimized_bundle_strips_legacy_generated_suffix_from_name(t
     artifact_dir.mkdir()
     artifact_path = artifact_dir / "program.json"
     artifact_path.write_text('{"answer": "Paris"}', encoding="utf-8")
+    branch_root = tmp_path / "worktree-legacy"
 
     async def fake_get_optimization_job(job_id):
         return {
@@ -1480,25 +1513,31 @@ def test_materialize_optimized_bundle_strips_legacy_generated_suffix_from_name(t
                 "bundle_name": "support-triage-agent-imported-optimized-2af601ca-fd59-41e3-931c-228c1252918e",
                 "bundle_version": "0.1.0",
                 "source_ref": str(source_bundle),
-                "checkout_path": str(source_bundle),
+                "checkout_path": str(repo_root),
                 "github_branch": "main",
-                "current_revision_id": "rev-before",
+                "github_subpath": "bundles/source-bundle",
             }
         return None
 
-    async def fake_update_module_bundle_metadata_record(module_id, *, bundle_name, bundle_version):
+    async def fake_create_worktree(repo_root_arg, *, base_branch, optimization_job_id):
+        assert repo_root_arg == repo_root
+        shutil.copytree(repo_root, branch_root)
+        return branch_root, "optimization-opt"
+
+    async def fake_remove_worktree(repo_root_arg, worktree_path):
+        assert repo_root_arg == repo_root
+        assert worktree_path == branch_root
+
+    async def fake_create_noncurrent_bundle_revision(module_id, **kwargs):
         assert module_id == "mod-1"
-        assert bundle_name == "support-triage-agent"
-        assert bundle_version == "0.1.1"
-
-    async def fake_set_validation_status(module_id, status, diagnostics, **kwargs):
-        return True
-
-    async def fake_set_module_sync_state(module_id, **kwargs):
-        return None
+        assert kwargs["bundle_name"] == "support-triage-agent"
+        assert kwargs["bundle_version"] == "0.1.1"
+        return "rev-after"
 
     async def fake_run_git_command(args, *, cwd=None):
         if args[:4] == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            if str(cwd) == str(branch_root):
+                return "optimization-opt"
             return "main"
         if args[:3] == ["git", "rev-parse", "HEAD"]:
             return "commit-after"
@@ -1509,14 +1548,15 @@ def test_materialize_optimized_bundle_strips_legacy_generated_suffix_from_name(t
             "id": "mod-1",
             "source": "github",
             "source_ref": str(source_bundle),
-            "checkout_path": str(source_bundle),
+            "checkout_path": str(repo_root),
             "github_branch": "main",
+            "github_subpath": "bundles/source-bundle",
             "bundle_name": "support-triage-agent",
-            "bundle_version": "0.1.1",
+            "bundle_version": "0.1.0",
             "validation_status": "passed",
             "smoke_status": "pending",
             "diagnostics": [],
-            "current_revision_id": "rev-after",
+            "current_revision_id": "rev-before",
         }
 
     async def fake_ensure_module_mutation_allowed(module_id):
@@ -1524,16 +1564,17 @@ def test_materialize_optimized_bundle_strips_legacy_generated_suffix_from_name(t
 
     monkeypatch.setattr(services, "get_optimization_job", fake_get_optimization_job)
     monkeypatch.setattr(services, "get_module", fake_get_updated_module)
-    monkeypatch.setattr(services, "_update_module_bundle_metadata_record", fake_update_module_bundle_metadata_record)
-    monkeypatch.setattr(services, "set_validation_status", fake_set_validation_status)
-    monkeypatch.setattr(services, "_set_module_sync_state", fake_set_module_sync_state)
+    monkeypatch.setattr(services, "_create_optimization_worktree", fake_create_worktree)
+    monkeypatch.setattr(services, "_remove_optimization_worktree", fake_remove_worktree)
+    monkeypatch.setattr(services, "_create_noncurrent_bundle_revision", fake_create_noncurrent_bundle_revision)
     monkeypatch.setattr(services, "_run_git_command", fake_run_git_command)
     monkeypatch.setattr(services, "ensure_module_mutation_allowed", fake_ensure_module_mutation_allowed)
 
     result = asyncio.run(services.materialize_optimized_bundle("opt-legacy"))
 
     assert result is not None
-    bundle_toml = source_bundle.joinpath("bundle.toml").read_text(encoding="utf-8")
+    assert result["resulting_bundle_branch"] == "optimization-opt"
+    bundle_toml = (branch_root / "bundles" / "source-bundle" / "bundle.toml").read_text(encoding="utf-8")
     assert 'name = "support-triage-agent"' in bundle_toml
     assert 'version = "0.1.1"' in bundle_toml
 

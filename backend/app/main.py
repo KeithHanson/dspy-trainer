@@ -75,6 +75,7 @@ class ModuleImportRequest(BaseModel):
     version_hash: str | None = None
     github_repo_url: str | None = None
     github_branch: str | None = None
+    github_subpath: str | None = None
     checkout_path: str | None = None
     current_commit_sha: str | None = None
     upstream_commit_sha: str | None = None
@@ -279,6 +280,7 @@ async def import_module(request: Request, payload: ModuleImportRequest):
             result = await services.import_github_module(
                 payload.github_repo_url or payload.source_ref or "",
                 payload.github_branch or "",
+                payload.github_subpath,
             )
         except ValueError as exc:
             return JSONResponse(status_code=400, content={"error": str(exc)})
@@ -294,6 +296,7 @@ async def import_module(request: Request, payload: ModuleImportRequest):
         payload.version_hash,
         github_repo_url=payload.github_repo_url,
         github_branch=payload.github_branch,
+        github_subpath=payload.github_subpath,
         checkout_path=payload.checkout_path,
         current_commit_sha=payload.current_commit_sha,
         upstream_commit_sha=payload.upstream_commit_sha,
@@ -356,6 +359,7 @@ async def get_module_sync_status(module_id: str, request: Request):
         "upstream_commit_sha": current.get("upstream_commit_sha"),
         "github_branch": current.get("github_branch"),
         "github_repo_url": current.get("github_repo_url"),
+        "github_subpath": current.get("github_subpath"),
         "last_sync_error": current.get("last_sync_error"),
         "last_synced_at": current.get("last_synced_at"),
     }

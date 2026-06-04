@@ -391,6 +391,10 @@ export function OptimizationJobsPage() {
                       <strong className="optimization-config-value">Pending</strong>
                     )}
                   </div>
+                  <div className="optimization-config-card">
+                    <span className="t-label">Optimization branch</span>
+                    <strong className="optimization-config-value mono">{job.resulting_bundle_branch || "Pending"}</strong>
+                  </div>
                 </div>
               </div>
 

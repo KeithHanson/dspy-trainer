@@ -17,13 +17,15 @@ class _Conn:
 
     async def fetchrow(self, query, *params):
         normalized = " ".join(query.strip().lower().split())
-        if normalized == "select source_ref, checkout_path, current_commit_sha from module_imports where id = $1":
+        if normalized == "select source, source_ref, checkout_path, github_subpath, current_commit_sha from module_imports where id = $1":
             module = self.state.get(str(params[0]))
             if module is None:
                 return None
             return {
+                "source": module.get("source", "upload"),
                 "source_ref": module["source_ref"],
                 "checkout_path": module.get("checkout_path"),
+                "github_subpath": module.get("github_subpath"),
                 "current_commit_sha": module.get("current_commit_sha"),
             }
         return None
@@ -84,6 +86,7 @@ def test_set_module_bundle_metadata_updates_saved_bundle_toml(tmp_path):
     services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
     state: dict[str, Any] = {
         "mod-1": {
+            "source": "upload",
             "source_ref": str(bundle_root),
             "checkout_path": str(bundle_root),
             "current_commit_sha": "abc123",

@@ -80,6 +80,7 @@ describe("BundlesPage", () => {
             bundle_version: "1.2.3",
             github_repo_url: "https://github.com/example/repo-bundle",
             github_branch: "main",
+            github_subpath: "bundles/support",
             current_commit_sha: "abc12345",
             validation_status: "failed",
             diagnostics: [{ severity: "error", code: "module_missing", message: "module.py missing" }],
@@ -99,11 +100,13 @@ describe("BundlesPage", () => {
     await userEvent.type(screen.getByLabelText("GitHub repository URL"), "https://github.com/example/repo-bundle");
     await userEvent.clear(screen.getByLabelText("Branch"));
     await userEvent.type(screen.getByLabelText("Branch"), "main");
+    await userEvent.type(screen.getByLabelText("Bundle subfolder (optional)"), "bundles/support");
     fireEvent.submit(screen.getByRole("button", { name: "Import + validate" }).closest("form"));
 
     await waitFor(() => expect(screen.getByText("Validation result")).toBeInTheDocument());
     expect(screen.getByText(/module_missing: module.py missing/)).toBeInTheDocument();
     expect(screen.getByText(/https:\/\/github.com\/example\/repo-bundle/)).toBeInTheDocument();
+    expect(screen.getByText("bundles/support")).toBeInTheDocument();
 
     vi.unstubAllGlobals();
   });

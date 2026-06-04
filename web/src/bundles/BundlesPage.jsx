@@ -158,10 +158,10 @@ function buildApiUrl(path) {
 }
 
 const IMPORT_GUIDANCE = [
-  "Repository root must contain module.py, metric.py, and bundle.toml.",
-  "The configured branch is cloned exactly as-is; subdirectories are not supported.",
+  "Repository root is cloned exactly as-is, then an optional subfolder can be validated as the bundle root.",
+  "The selected bundle root must contain module.py, metric.py, and bundle.toml.",
   "GitHub access is provided by the backend environment; the browser never collects the token.",
-  "Import fails immediately if the repo root does not satisfy the bundle contract.",
+  "Import fails immediately if the selected bundle root does not satisfy the bundle contract.",
 ];
 
 const BUNDLE_FILE_TEMPLATES = {
@@ -210,7 +210,7 @@ export function BundlesPage() {
         <header className="row between bundles-head">
           <div className="col gap-1">
             <h1 className="t-display" style={{ fontSize: 22 }}>Module Bundles</h1>
-            <p className="muted t-sm">GitHub-backed DSPy bundles with root-level <span className="mono">module.py</span>, <span className="mono">metric.py</span>, and <span className="mono">bundle.toml</span>.</p>
+            <p className="muted t-sm">GitHub-backed DSPy bundles with <span className="mono">module.py</span>, <span className="mono">metric.py</span>, and <span className="mono">bundle.toml</span> at the repo root or an imported subfolder.</p>
           </div>
           <div className="row gap-2">
             <Button onClick={handleDownload} disabled={isDownloading}>
@@ -230,9 +230,10 @@ export function BundlesPage() {
                 <span className="t-label">Required</span>
               </div>
               <pre className="bundles-structure">{`repo-root/
-├── module.py   # DSPy module + build_program()
-├── metric.py   # judge_metric(example, prediction, trace=None)
-└── bundle.toml # name, version, score_pass_threshold`}</pre>
+└── optional/subfolder/
+    ├── module.py   # DSPy module + build_program()
+    ├── metric.py   # judge_metric(example, prediction, trace=None)
+    └── bundle.toml # name, version, score_pass_threshold`}</pre>
             </section>
 
             <section className="panel card-pad bundles-section">
@@ -523,6 +524,7 @@ function SavedBundlesPanel({ modulesUrl }) {
                 {bundle.bundle_version ? <span className="cap">v{bundle.bundle_version}</span> : null}
                 {bundle.sync_status ? <span className="cap mono">Sync {bundle.sync_status}</span> : null}
                 {bundle.github_branch ? <span className="cap mono">Branch {bundle.github_branch}</span> : null}
+                {bundle.github_subpath ? <span className="cap mono">Subfolder {bundle.github_subpath}</span> : null}
                 {bundle.current_commit_sha ? <span className="cap mono">Commit {bundle.current_commit_sha.slice(0, 8)}</span> : null}
                 {bundle.created_at ? <span className="cap mono">Imported {formatDateTime(bundle.created_at)}</span> : null}
               </div>
@@ -571,6 +573,7 @@ function SavedBundlesPanel({ modulesUrl }) {
             <div className="col gap-1" style={{ marginBottom: 12 }}>
               <p className="cap">Repository: <span className="faint">{selectedBundle.github_repo_url}</span></p>
               <p className="cap">Branch: <span className="faint">{selectedBundle.github_branch || "unknown"}</span></p>
+              <p className="cap">Subfolder: <span className="faint mono">{selectedBundle.github_subpath || "."}</span></p>
               <p className="cap">Sync status: <span className="faint">{selectedBundleSync?.sync_status || selectedBundle.sync_status || "unknown"}</span></p>
               {selectedBundle.current_commit_sha ? <p className="cap">Current commit: <span className="faint mono">{selectedBundle.current_commit_sha}</span></p> : null}
               {selectedBundleSync?.upstream_commit_sha ? <p className="cap">Upstream commit: <span className="faint mono">{selectedBundleSync.upstream_commit_sha}</span></p> : null}
@@ -691,6 +694,7 @@ async function parseError(response, fallback) {
 function GitHubImportPanel({ modulesUrl, onBack, onCreatePlan }) {
   const [githubRepoUrl, setGithubRepoUrl] = useState("");
   const [githubBranch, setGithubBranch] = useState("main");
+  const [githubSubpath, setGithubSubpath] = useState("");
   const [githubConfigured, setGithubConfigured] = useState(null);
   const [githubConfigMessage, setGithubConfigMessage] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -749,6 +753,7 @@ function GitHubImportPanel({ modulesUrl, onBack, onCreatePlan }) {
           source: "github",
           github_repo_url: githubRepoUrl.trim(),
           github_branch: githubBranch.trim(),
+          github_subpath: githubSubpath.trim() || null,
         }),
       });
       if (!importResp.ok) {
@@ -769,6 +774,7 @@ function GitHubImportPanel({ modulesUrl, onBack, onCreatePlan }) {
         bundle_version: detail.bundle_version,
         github_repo_url: detail.github_repo_url,
         github_branch: detail.github_branch,
+        github_subpath: detail.github_subpath,
         current_commit_sha: detail.current_commit_sha,
       });
     } catch (error) {
@@ -784,7 +790,7 @@ function GitHubImportPanel({ modulesUrl, onBack, onCreatePlan }) {
         <h2 className="t-h2">Step 2: Import and validate GitHub bundle</h2>
         <Button variant="ghost" size="sm" onClick={onBack}>Back</Button>
       </div>
-      <p className="cap" style={{ marginBottom: 14 }}>Import a GitHub repo root that already matches the bundle contract. GitHub access is configured server-side only.</p>
+      <p className="cap" style={{ marginBottom: 14 }}>Import a GitHub repository and optionally point at a subfolder that matches the bundle contract. GitHub access is configured server-side only.</p>
       {githubConfigMessage ? (
         githubConfigured ? (
           <div className="field-help row gap-2" role="status" style={{ marginBottom: 14 }}>
@@ -821,6 +827,16 @@ function GitHubImportPanel({ modulesUrl, onBack, onCreatePlan }) {
           required
         />
 
+        <label className="bundles-label" htmlFor="github-subpath">Bundle subfolder (optional)</label>
+        <input
+          id="github-subpath"
+          className="bundles-file-input"
+          type="text"
+          placeholder="e.g. bundles/support-triage"
+          value={githubSubpath}
+          onChange={(event) => setGithubSubpath(event.target.value)}
+        />
+
         <div className="row" style={{ marginTop: 8 }}>
           <button className="btn btn-primary" type="submit" disabled={isSubmitting || !githubConfigured || !githubRepoUrl.trim() || !githubBranch.trim()}>{isSubmitting ? "Importing..." : "Import + validate"}</button>
         </div>
@@ -838,6 +854,7 @@ function GitHubImportPanel({ modulesUrl, onBack, onCreatePlan }) {
           <p className="cap" style={{ marginBottom: 10 }}>Module ID: <span className="faint">{result.moduleId}</span></p>
           {result.github_repo_url ? <p className="cap" style={{ marginBottom: 6 }}>Repository: <span className="faint">{result.github_repo_url}</span></p> : null}
           {result.github_branch ? <p className="cap" style={{ marginBottom: 6 }}>Branch: <span className="faint">{result.github_branch}</span></p> : null}
+          <p className="cap" style={{ marginBottom: 6 }}>Subfolder: <span className="faint mono">{result.github_subpath || "."}</span></p>
           {result.current_commit_sha ? <p className="cap" style={{ marginBottom: 10 }}>Commit: <span className="faint mono">{result.current_commit_sha}</span></p> : null}
           <div className="bundles-check-report" style={{ marginBottom: 12 }}>
             <div className="t-label" style={{ marginBottom: 8 }}>Validation checks</div>

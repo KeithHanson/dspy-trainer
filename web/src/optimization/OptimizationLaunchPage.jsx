@@ -300,7 +300,7 @@ export function OptimizationLaunchPage() {
       return;
     }
     if (mutationBlocked) {
-      setValidationError("This bundle must be synced before optimization can write back to the tracked branch.");
+      setValidationError("This bundle must be synced before optimization can push an optimization branch.");
       return;
     }
     setIsSubmitting(true);
@@ -419,7 +419,7 @@ export function OptimizationLaunchPage() {
               placeholder="e.g. 1.2.4-rc1"
             />
           </label>
-          <FieldHelp text="Freeform version string used for direct-branch optimization writeback. Choose any version format your repo expects." />
+          <FieldHelp text="Freeform version string used for the optimization branch writeback. Choose any version format your repo expects before manually merging that branch." />
 
           <label className="col gap-1" htmlFor="optimization-source-run-plan">
             <span className="t-label">Source run plan</span>

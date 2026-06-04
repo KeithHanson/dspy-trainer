@@ -92,6 +92,19 @@ def _github_clone_url(repo_url: str, pat: str) -> str:
     return urlunparse(parsed._replace(netloc=f"x-access-token:{pat}@{parsed.netloc}"))
 
 
+def _normalize_github_subpath(subpath: str | None) -> str | None:
+    raw = str(subpath or "").strip().replace("\\", "/")
+    if not raw or raw == ".":
+        return None
+    if raw.startswith("/"):
+        raise ValueError("github_subpath must be relative to the repository root")
+    parts = [part for part in raw.split("/") if part and part != "."]
+    if any(part == ".." for part in parts):
+        raise ValueError("github_subpath must stay within the repository root")
+    normalized = "/".join(parts)
+    return normalized or None
+
+
 def _normalize_tracked_bundle_name(name: str) -> str:
     normalized = str(name or "").strip()
     if not normalized:
@@ -577,6 +590,7 @@ class AppServices:
             await conn.execute("alter table module_imports add column if not exists deleted_at timestamptz;")
             await conn.execute("alter table module_imports add column if not exists github_repo_url text;")
             await conn.execute("alter table module_imports add column if not exists github_branch text;")
+            await conn.execute("alter table module_imports add column if not exists github_subpath text;")
             await conn.execute("alter table module_imports add column if not exists checkout_path text;")
             await conn.execute("alter table module_imports add column if not exists current_commit_sha text;")
             await conn.execute("alter table module_imports add column if not exists upstream_commit_sha text;")
@@ -704,6 +718,7 @@ class AppServices:
             await conn.execute("alter table optimization_jobs add column if not exists resulting_bundle_revision_id text;")
             await conn.execute("alter table optimization_jobs add column if not exists resulting_bundle_commit_sha text;")
             await conn.execute("alter table optimization_jobs add column if not exists resulting_bundle_version text;")
+            await conn.execute("alter table optimization_jobs add column if not exists resulting_bundle_branch text;")
             await conn.execute("alter table optimization_jobs add column if not exists objective text not null default 'optimize_demo_quality';")
             await conn.execute("alter table optimization_jobs add column if not exists dataset_id text references optimization_datasets(id) on delete set null;")
             await conn.execute("alter table optimization_jobs add column if not exists validation_dataset_id text references optimization_datasets(id) on delete set null;")
@@ -941,7 +956,7 @@ class AppServices:
         async with self.postgres_pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                select id, source, source_ref, bundle_name, bundle_version, github_repo_url, github_branch,
+                select id, source, source_ref, bundle_name, bundle_version, github_repo_url, github_branch, github_subpath,
                        checkout_path, current_commit_sha, upstream_commit_sha, sync_status,
                        last_synced_at, last_sync_error, current_revision_id, deleted_at
                 from module_imports
@@ -1006,7 +1021,9 @@ class AppServices:
         if module is None:
             return None
         if str(module.get("source") or "") == "github":
-            checkout_path = str(module.get("checkout_path") or module.get("source_ref") or fallback_bundle_path or "").strip()
+            checkout_root = str(module.get("checkout_path") or module.get("source_ref") or fallback_bundle_path or "").strip()
+            github_subpath = _clean_optional_text(module.get("github_subpath"))
+            checkout_path = str(Path(checkout_root).expanduser().resolve() / github_subpath) if checkout_root and github_subpath else checkout_root
         else:
             checkout_path = str(fallback_bundle_path or module.get("checkout_path") or module.get("source_ref") or "").strip()
         if not checkout_path:
@@ -1022,9 +1039,10 @@ class AppServices:
             "bundle_name": str(module.get("bundle_name") or current_revision.get("bundle_name") or "").strip() or None,
         }
 
-    async def import_github_module(self, github_repo_url: str, github_branch: str) -> dict[str, Any]:
+    async def import_github_module(self, github_repo_url: str, github_branch: str, github_subpath: str | None = None) -> dict[str, Any]:
         normalized_repo_url = _normalize_github_repo_url(github_repo_url)
         normalized_branch = str(github_branch or "").strip()
+        normalized_subpath = _normalize_github_subpath(github_subpath)
         normalized_pat = self._require_github_pat()
         if not normalized_branch:
             raise ValueError("github_branch is required")
@@ -1039,17 +1057,21 @@ class AppServices:
                 ["git", "clone", "--depth", "1", "--branch", normalized_branch, clone_url, str(checkout_path)]
             )
             current_commit_sha = await self._run_git_command(["git", "rev-parse", "HEAD"], cwd=checkout_path)
-            report = validate_bundle(str(checkout_path))
+            bundle_root = checkout_path / normalized_subpath if normalized_subpath else checkout_path
+            if not bundle_root.exists() or not bundle_root.is_dir():
+                raise ValueError("github_subpath does not exist in the repository")
+            report = validate_bundle(str(bundle_root))
             if not report.passed:
                 raise ValueError(report.summary)
 
             created = await self.create_module_import(
                 "github",
-                str(checkout_path),
+                str(bundle_root),
                 current_commit_sha,
                 module_id=module_id,
                 github_repo_url=normalized_repo_url,
                 github_branch=normalized_branch,
+                github_subpath=normalized_subpath,
                 checkout_path=str(checkout_path),
                 current_commit_sha=current_commit_sha,
                 upstream_commit_sha=current_commit_sha,
@@ -1065,6 +1087,7 @@ class AppServices:
             created["checkout_path"] = str(checkout_path)
             created["github_repo_url"] = normalized_repo_url
             created["github_branch"] = normalized_branch
+            created["github_subpath"] = normalized_subpath
             created["current_commit_sha"] = current_commit_sha
             return created
         except Exception:
@@ -1084,6 +1107,7 @@ class AppServices:
                 "upstream_commit_sha": str(module.get("upstream_commit_sha") or "") or None,
                 "github_branch": module.get("github_branch"),
                 "github_repo_url": module.get("github_repo_url"),
+                "github_subpath": module.get("github_subpath"),
                 "last_sync_error": module.get("last_sync_error"),
             }
 
@@ -1116,6 +1140,7 @@ class AppServices:
                 "upstream_commit_sha": upstream_commit_sha,
                 "github_branch": branch,
                 "github_repo_url": repo_url,
+                "github_subpath": module.get("github_subpath"),
                 "last_sync_error": None,
             }
         except Exception as exc:
@@ -1137,6 +1162,7 @@ class AppServices:
                     "upstream_commit_sha": upstream_commit_sha or None,
                     "github_branch": branch,
                     "github_repo_url": repo_url,
+                    "github_subpath": module.get("github_subpath"),
                     "last_sync_error": str(exc),
                 },
             )
@@ -1166,7 +1192,8 @@ class AppServices:
             await self._run_git_command(["git", "fetch", clone_url, branch], cwd=checkout_path)
             await self._run_git_command(["git", "merge", "--ff-only", "FETCH_HEAD"], cwd=checkout_path)
             current_commit_sha = await self._run_git_command(["git", "rev-parse", "HEAD"], cwd=checkout_path)
-            report = validate_bundle(str(checkout_path))
+            bundle_root = Path(self._module_bundle_root_path(module)).expanduser().resolve()
+            report = validate_bundle(str(bundle_root))
             if not report.passed:
                 raise RuntimeError(report.summary)
             await self.set_module_bundle_metadata(
@@ -1196,6 +1223,7 @@ class AppServices:
                 "upstream_commit_sha": current_commit_sha,
                 "github_branch": branch,
                 "github_repo_url": repo_url,
+                "github_subpath": module.get("github_subpath"),
                 "last_sync_error": None,
                 "synced": True,
             }
@@ -1236,6 +1264,7 @@ class AppServices:
         module_id: str | None = None,
         github_repo_url: str | None = None,
         github_branch: str | None = None,
+        github_subpath: str | None = None,
         checkout_path: str | None = None,
         current_commit_sha: str | None = None,
         upstream_commit_sha: str | None = None,
@@ -1269,6 +1298,7 @@ class AppServices:
                   bundle_version,
                   github_repo_url,
                   github_branch,
+                  github_subpath,
                   checkout_path,
                   current_commit_sha,
                   upstream_commit_sha,
@@ -1278,7 +1308,7 @@ class AppServices:
                   created_at,
                   updated_at
                 )
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
                 """,
                 module_id,
                 source,
@@ -1288,6 +1318,7 @@ class AppServices:
                 _clean_optional_text(bundle_version),
                 _clean_optional_text(github_repo_url),
                 _clean_optional_text(github_branch),
+                _normalize_github_subpath(github_subpath),
                 normalized_checkout_path,
                 normalized_current_commit_sha,
                 normalized_upstream_commit_sha,
@@ -1463,6 +1494,20 @@ class AppServices:
         return str(source_ref or "").strip()
 
     @staticmethod
+    def _module_bundle_root_path(row: Any) -> str:
+        checkout_root = AppServices._module_checkout_path(row)
+        if not checkout_root:
+            return ""
+        source = str(AppServices._row_value(row, "source") or "").strip()
+        if source != "github":
+            return checkout_root
+        github_subpath = _clean_optional_text(AppServices._row_value(row, "github_subpath"))
+        if not github_subpath:
+            source_ref = _clean_optional_text(AppServices._row_value(row, "source_ref"))
+            return source_ref or checkout_root
+        return str(Path(checkout_root).expanduser().resolve() / github_subpath)
+
+    @staticmethod
     def _build_current_revision_payload(row: Any) -> dict[str, Any] | None:
         revision_id = AppServices._row_value(row, "current_revision_id")
         if not revision_id:
@@ -1495,6 +1540,7 @@ class AppServices:
             "diagnostics": row["diagnostics"],
             "github_repo_url": self._row_value(row, "github_repo_url"),
             "github_branch": self._row_value(row, "github_branch"),
+            "github_subpath": self._row_value(row, "github_subpath"),
             "checkout_path": self._row_value(row, "checkout_path"),
             "current_commit_sha": self._row_value(row, "current_commit_sha"),
             "upstream_commit_sha": self._row_value(row, "upstream_commit_sha"),
@@ -1518,7 +1564,7 @@ class AppServices:
             rows = await conn.fetch(
                 """
                 select m.id, m.source, m.source_ref, m.version_hash, m.bundle_name, m.bundle_version, m.status, m.created_at,
-                       m.github_repo_url, m.github_branch, m.checkout_path, m.current_commit_sha, m.upstream_commit_sha,
+                       m.github_repo_url, m.github_branch, m.github_subpath, m.checkout_path, m.current_commit_sha, m.upstream_commit_sha,
                        m.sync_status, m.last_synced_at, m.last_sync_error, m.current_revision_id,
                        r.validation_status, r.smoke_status, r.diagnostics,
                        r.validation_revision_id, r.validation_commit_sha, r.validation_bundle_version,
@@ -1551,7 +1597,7 @@ class AppServices:
         async with self.postgres_pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                select source_ref, checkout_path
+                select source, source_ref, checkout_path, github_subpath
                 from module_imports
                 where id = $1 and deleted_at is null
                 """,
@@ -1559,10 +1605,10 @@ class AppServices:
             )
         if row is None:
             return None
-        checkout_path = self._module_checkout_path(row)
-        if not checkout_path:
+        bundle_root_path = self._module_bundle_root_path(row)
+        if not bundle_root_path:
             return {}
-        root = Path(checkout_path)
+        root = Path(bundle_root_path)
         if not root.exists() or not root.is_dir():
             return {}
         files: dict[str, str] = {}
@@ -1605,11 +1651,11 @@ class AppServices:
             raise RuntimeError("database not initialized")
         async with self.postgres_pool.acquire() as conn:
             row = await conn.fetchrow(
-                "select source_ref, checkout_path, current_commit_sha from module_imports where id = $1",
+                "select source, source_ref, checkout_path, github_subpath, current_commit_sha from module_imports where id = $1",
                 module_id,
             )
-            checkout_path = self._module_checkout_path(row) if row else ""
-            bundle_root = Path(checkout_path).expanduser().resolve() if checkout_path else None
+            bundle_root_path = self._module_bundle_root_path(row) if row else ""
+            bundle_root = Path(bundle_root_path).expanduser().resolve() if bundle_root_path else None
             bundle_toml_path = bundle_root / "bundle.toml" if bundle_root is not None else None
             if bundle_toml_path is not None and bundle_toml_path.exists() and bundle_toml_path.is_file():
                 bundle_toml = bundle_toml_path.read_text(encoding="utf-8")
@@ -1635,7 +1681,7 @@ class AppServices:
                     conn,
                     module_id,
                     commit_sha=row["current_commit_sha"],
-                    checkout_path=checkout_path,
+                    checkout_path=bundle_root_path,
                     bundle_name=bundle_name,
                     bundle_version=bundle_version,
                     source_event="metadata_update",
@@ -1715,6 +1761,125 @@ class AppServices:
                 bundle_version,
             )
 
+    async def _create_noncurrent_bundle_revision(
+        self,
+        module_id: str,
+        *,
+        commit_sha: str | None,
+        checkout_path: str | None,
+        bundle_name: str | None,
+        bundle_version: str | None,
+        source_event: str,
+    ) -> str:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            revision_id = str(uuid4())
+            now = datetime.now(timezone.utc)
+            await conn.execute(
+                """
+                insert into bundle_revisions (
+                  id,
+                  module_import_id,
+                  commit_sha,
+                  checkout_path,
+                  bundle_name,
+                  bundle_version,
+                  source_event,
+                  created_at
+                )
+                values ($1, $2, $3, $4, $5, $6, $7, $8)
+                """,
+                revision_id,
+                module_id,
+                _clean_optional_text(commit_sha),
+                _clean_optional_text(checkout_path),
+                _clean_optional_text(bundle_name),
+                _clean_optional_text(bundle_version),
+                source_event,
+                now,
+            )
+        return revision_id
+
+    def _module_repo_root_and_bundle_root(self, module: dict[str, Any]) -> tuple[Path, Path, str | None]:
+        checkout_root_value = str(module.get("checkout_path") or module.get("source_ref") or "").strip()
+        if not checkout_root_value:
+            raise RuntimeError("module checkout is not available")
+        checkout_root = Path(checkout_root_value).expanduser().resolve()
+        github_subpath = _normalize_github_subpath(module.get("github_subpath"))
+        if str(module.get("source") or "") == "github":
+            bundle_root = checkout_root / github_subpath if github_subpath else checkout_root
+        else:
+            bundle_root = Path(str(module.get("source_ref") or checkout_root_value)).expanduser().resolve()
+        return checkout_root, bundle_root, github_subpath
+
+    def _optimization_branch_name(self, optimization_job_id: str) -> str:
+        prefix = str(optimization_job_id or "").strip().split("-", 1)[0] or str(optimization_job_id or "").strip() or uuid4().hex[:8]
+        safe_prefix = re.sub(r"[^A-Za-z0-9._-]", "-", prefix)
+        return f"optimization-{safe_prefix}"
+
+    async def _create_optimization_worktree(self, repo_root: Path, *, base_branch: str, optimization_job_id: str) -> tuple[Path, str]:
+        current_branch = await self._run_git_command(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_root)
+        if current_branch.strip() != base_branch.strip():
+            raise RuntimeError(
+                f"checkout is on branch '{current_branch.strip()}' but expected '{base_branch.strip()}' for optimization branching"
+            )
+        branch_name = self._optimization_branch_name(optimization_job_id)
+        worktree_root = Path("/tmp/dspy-trainer/optimization_worktrees").expanduser().resolve()
+        worktree_root.mkdir(parents=True, exist_ok=True)
+        worktree_path = worktree_root / f"{branch_name}-{uuid4().hex[:8]}"
+        await self._run_git_command(["git", "worktree", "add", "-b", branch_name, str(worktree_path), base_branch], cwd=repo_root)
+        return worktree_path, branch_name
+
+    async def _remove_optimization_worktree(self, repo_root: Path, worktree_path: Path) -> None:
+        try:
+            await self._run_git_command(["git", "worktree", "remove", "--force", str(worktree_path)], cwd=repo_root)
+        finally:
+            if worktree_path.exists():
+                shutil.rmtree(worktree_path, ignore_errors=True)
+
+    def _write_optimized_bundle_to_root(
+        self,
+        bundle_root: Path,
+        *,
+        source_module: dict[str, Any],
+        optimization_job_id: str,
+        artifact_path: Path,
+        bundle_name: str | None = None,
+        bundle_version: str | None = None,
+        request_config: dict[str, Any],
+        normalized_config: dict[str, Any],
+    ) -> dict[str, Any]:
+        base_bundle_name = str(source_module.get("bundle_name") or bundle_root.name or "module-bundle").strip() or "module-bundle"
+        if str(source_module.get("source") or "") == "github":
+            base_bundle_name = _normalize_tracked_bundle_name(base_bundle_name)
+        base_bundle_version = str(source_module.get("bundle_version") or "").strip() or "0.1.0"
+        requested_target_version = str(
+            request_config.get("target_bundle_version")
+            or normalized_config.get("target_bundle_version")
+            or ""
+        ).strip()
+        optimized_bundle_name = str(bundle_name or "").strip() or base_bundle_name
+        optimized_bundle_version = str(bundle_version or "").strip() or requested_target_version or base_bundle_version
+        artifact_target_name = artifact_path.name or "program.json"
+        shutil.copy2(artifact_path, bundle_root / artifact_target_name)
+
+        bundle_toml_path = bundle_root / "bundle.toml"
+        bundle_toml = bundle_toml_path.read_text(encoding="utf-8")
+        bundle_toml = self._upsert_toml_string_key(bundle_toml, "name", optimized_bundle_name)
+        bundle_toml = self._upsert_toml_string_key(bundle_toml, "version", optimized_bundle_version)
+        bundle_toml = self._upsert_toml_string_key(bundle_toml, "optimized_program_state", artifact_target_name)
+        bundle_toml = self._upsert_toml_string_key(bundle_toml, "source_optimization_job_id", optimization_job_id)
+        bundle_toml_path.write_text(bundle_toml, encoding="utf-8")
+
+        report = validate_bundle(str(bundle_root))
+        return {
+            "bundle_root": str(bundle_root),
+            "optimized_bundle_name": optimized_bundle_name,
+            "optimized_bundle_version": optimized_bundle_version,
+            "report": report,
+        }
+
     async def _apply_optimized_bundle_writeback(
         self,
         job: dict[str, Any],
@@ -1731,10 +1896,7 @@ class AppServices:
             return None
         if str(source_module.get("source") or "") == "github":
             await self.ensure_module_mutation_allowed(module_id)
-        source_root_value = str(source_module.get("checkout_path") or source_module.get("source_ref") or "").strip()
-        if not source_root_value:
-            return None
-        source_root = Path(source_root_value).expanduser().resolve()
+        _, source_root, github_subpath = self._module_repo_root_and_bundle_root(source_module)
         if not source_root.exists() or not source_root.is_dir():
             return None
 
@@ -1744,42 +1906,28 @@ class AppServices:
         artifact_path = Path(artifact_path_value).expanduser().resolve()
         if not artifact_path.exists() or not artifact_path.is_file():
             return None
-
-        base_bundle_name = str(source_module.get("bundle_name") or source_root.name or "module-bundle").strip() or "module-bundle"
-        if str(source_module.get("source") or "") == "github":
-            base_bundle_name = _normalize_tracked_bundle_name(base_bundle_name)
-        base_bundle_version = str(source_module.get("bundle_version") or "").strip() or "0.1.0"
         request_config = self._json_dict(job.get("request_config"))
         normalized_config = self._json_dict(job.get("normalized_config"))
-        requested_target_version = str(
-            request_config.get("target_bundle_version")
-            or normalized_config.get("target_bundle_version")
-            or ""
-        ).strip()
-        optimized_bundle_name = base_bundle_name
-        optimized_bundle_version = str(bundle_version or "").strip() or base_bundle_version
-        if not str(bundle_version or "").strip() and requested_target_version:
-            optimized_bundle_version = requested_target_version
-        artifact_target_name = artifact_path.name or "program.json"
-        shutil.copy2(artifact_path, source_root / artifact_target_name)
-
-        bundle_toml_path = source_root / "bundle.toml"
-        bundle_toml = bundle_toml_path.read_text(encoding="utf-8")
-        bundle_toml = self._upsert_toml_string_key(bundle_toml, "name", optimized_bundle_name)
-        bundle_toml = self._upsert_toml_string_key(bundle_toml, "version", optimized_bundle_version)
-        bundle_toml = self._upsert_toml_string_key(bundle_toml, "optimized_program_state", artifact_target_name)
-        bundle_toml = self._upsert_toml_string_key(bundle_toml, "source_optimization_job_id", optimization_job_id)
-        bundle_toml_path.write_text(bundle_toml, encoding="utf-8")
-
-        report = validate_bundle(str(source_root))
+        eval_bundle_root = Path("/tmp/dspy-trainer/generated_bundles").expanduser().resolve() / f"{optimization_job_id}-{uuid4().hex[:8]}"
+        shutil.copytree(source_root, eval_bundle_root)
+        writeback = self._write_optimized_bundle_to_root(
+            eval_bundle_root,
+            source_module=source_module,
+            optimization_job_id=optimization_job_id,
+            artifact_path=artifact_path,
+            bundle_name=bundle_name,
+            bundle_version=bundle_version,
+            request_config=request_config,
+            normalized_config=normalized_config,
+        )
         return {
             "module_id": module_id,
             "optimization_job_id": optimization_job_id,
-            "source_root": str(source_root),
-            "optimized_bundle_name": optimized_bundle_name,
-            "optimized_bundle_version": optimized_bundle_version,
-            "report": report,
-            "expected_branch": str(source_module.get("github_branch") or "").strip() or None,
+            "source_root": writeback["bundle_root"],
+            "optimized_bundle_name": writeback["optimized_bundle_name"],
+            "optimized_bundle_version": writeback["optimized_bundle_version"],
+            "report": writeback["report"],
+            "repo_subpath": github_subpath,
         }
 
     async def _materialize_optimized_bundle_from_job(
@@ -1799,48 +1947,66 @@ class AppServices:
             return None
         module_id = str(prepared["module_id"])
         optimization_job_id = str(prepared["optimization_job_id"])
-        source_root = Path(str(prepared["source_root"]))
+        source_module = await self.get_module(module_id)
+        if source_module is None:
+            return None
+        repo_root, _, github_subpath = self._module_repo_root_and_bundle_root(source_module)
         optimized_bundle_name = str(prepared["optimized_bundle_name"])
         optimized_bundle_version = str(prepared["optimized_bundle_version"])
-        report = prepared["report"]
-        expected_branch = prepared["expected_branch"]
+        artifact_path_value = str(job.get("artifact_path") or "").strip()
+        if not artifact_path_value:
+            return None
+        artifact_path = Path(artifact_path_value).expanduser().resolve()
+        if not artifact_path.exists() or not artifact_path.is_file():
+            return None
+        base_branch = str(source_module.get("github_branch") or "").strip()
+        if not base_branch:
+            raise RuntimeError("tracked github branch is required for optimization branching")
 
-        commit_sha = await self._commit_and_push_checkout(
-            source_root,
-            message=commit_message or f"Apply optimization output {optimization_job_id}",
-            expected_branch=expected_branch,
+        worktree_path, branch_name = await self._create_optimization_worktree(
+            repo_root,
+            base_branch=base_branch,
+            optimization_job_id=optimization_job_id,
         )
-        await self._update_module_bundle_metadata_record(
+        try:
+            bundle_root = worktree_path / github_subpath if github_subpath else worktree_path
+            writeback = self._write_optimized_bundle_to_root(
+                bundle_root,
+                source_module=source_module,
+                optimization_job_id=optimization_job_id,
+                artifact_path=artifact_path,
+                bundle_name=bundle_name,
+                bundle_version=bundle_version,
+                request_config=self._json_dict(job.get("request_config")),
+                normalized_config=self._json_dict(job.get("normalized_config")),
+            )
+            report = writeback["report"]
+            commit_sha = await self._commit_and_push_checkout(
+                worktree_path,
+                message=commit_message or f"Apply optimization output {optimization_job_id}",
+                expected_branch=branch_name,
+            )
+        finally:
+            await self._remove_optimization_worktree(repo_root, worktree_path)
+
+        revision_id = await self._create_noncurrent_bundle_revision(
             module_id,
+            commit_sha=commit_sha,
+            checkout_path=str((repo_root / github_subpath) if github_subpath else repo_root),
             bundle_name=report.metadata.get("name") if isinstance(report.metadata.get("name"), str) else optimized_bundle_name,
             bundle_version=report.metadata.get("version") if isinstance(report.metadata.get("version"), str) else optimized_bundle_version,
+            source_event="optimization_branch",
         )
-        status = "passed" if report.passed else "failed"
-        await self._set_module_sync_state(
-            module_id,
-            current_commit_sha=commit_sha,
-            upstream_commit_sha=commit_sha,
-            sync_status="synced",
-            last_sync_error=None,
-            synced_now=True,
-            source_event="optimization_writeback",
-            bundle_name=optimized_bundle_name,
-            bundle_version=optimized_bundle_version,
-            checkout_path=str(source_root),
-        )
-        updated_module = await self.get_module(module_id)
-        revision_id = None
-        if updated_module is not None:
-            revision_id = str(updated_module.get("current_revision_id") or "").strip() or None
-        await self.set_validation_status(
-            module_id,
-            status,
-            report.diagnostics,
-            revision_id=revision_id,
-            commit_sha=commit_sha,
-            bundle_version=optimized_bundle_version,
-        )
-        return await self.get_module(module_id)
+        module_payload = await self.get_module(module_id)
+        if module_payload is None:
+            return None
+        return {
+            **module_payload,
+            "resulting_bundle_branch": branch_name,
+            "resulting_bundle_revision_id": revision_id,
+            "resulting_bundle_commit_sha": commit_sha,
+            "resulting_bundle_version": report.metadata.get("version") if isinstance(report.metadata.get("version"), str) else optimized_bundle_version,
+        }
 
     async def materialize_optimized_bundle(
         self,
@@ -2210,13 +2376,13 @@ class AppServices:
                   bundle_revision_id, bundle_commit_sha, bundle_version,
                   validation_dataset_id, execution_lm_profile_id, helper_lm_profile_id, request_config,
                   normalized_config, train_inputs, val_inputs, num_threads, source_run_plan_id, generated_module_import_id, execution_log, artifact_path,
-                  artifact_metadata, telemetry_summary, comparison_summary, failure_reason, run_started_at,
+                  artifact_metadata, telemetry_summary, comparison_summary, resulting_bundle_branch, failure_reason, run_started_at,
                   finished_at, created_at, updated_at
                 )
                 values (
                   $1, 'queued', $2, $3, $4, $8, $9, $10, $5, $6, $7, $11, $12, $13, $14::jsonb,
                   $15::jsonb, $16::jsonb, $17::jsonb, $18, $19, null, $20, null, '{}'::jsonb, '{}'::jsonb, $21::jsonb,
-                  null, null, null, $22, $23
+                  null, null, null, null, $22, $23
                 )
                 """,
                 job_id,
@@ -2270,7 +2436,7 @@ class AppServices:
                 """
                 select id, status, project_id, module_import_id, bundle_path, strategy, objective, dataset_id,
                        bundle_revision_id, bundle_commit_sha, bundle_version,
-                       resulting_bundle_revision_id, resulting_bundle_commit_sha, resulting_bundle_version,
+                       resulting_bundle_revision_id, resulting_bundle_commit_sha, resulting_bundle_version, resulting_bundle_branch,
                        validation_dataset_id, execution_lm_profile_id, helper_lm_profile_id, request_config,
                        normalized_config, train_inputs, val_inputs, num_threads, source_run_plan_id, generated_module_import_id, optimized_evaluation_plan_id, optimized_eval_run_plan_id, execution_log,
                        artifact_path, artifact_metadata, telemetry_summary, comparison_summary,
@@ -2297,6 +2463,7 @@ class AppServices:
             "resulting_bundle_revision_id": self._row_value(row, "resulting_bundle_revision_id"),
             "resulting_bundle_commit_sha": self._row_value(row, "resulting_bundle_commit_sha"),
             "resulting_bundle_version": self._row_value(row, "resulting_bundle_version"),
+            "resulting_bundle_branch": self._row_value(row, "resulting_bundle_branch"),
             "strategy": row["strategy"],
             "objective": row["objective"],
             "dataset_id": row["dataset_id"],
@@ -2982,9 +3149,10 @@ class AppServices:
             )
             if materialized_bundle is None:
                 raise RuntimeError("optimized bundle could not be finalized")
-            resulting_bundle_revision_id = str(materialized_bundle.get("current_revision_id") or "").strip() or None
-            resulting_bundle_commit_sha = str(materialized_bundle.get("current_commit_sha") or "").strip() or None
-            resulting_bundle_version = str(materialized_bundle.get("bundle_version") or "").strip() or planned_resulting_bundle_version
+            resulting_bundle_revision_id = str(materialized_bundle.get("resulting_bundle_revision_id") or materialized_bundle.get("current_revision_id") or "").strip() or None
+            resulting_bundle_commit_sha = str(materialized_bundle.get("resulting_bundle_commit_sha") or materialized_bundle.get("current_commit_sha") or "").strip() or None
+            resulting_bundle_version = str(materialized_bundle.get("resulting_bundle_version") or materialized_bundle.get("bundle_version") or "").strip() or planned_resulting_bundle_version
+            resulting_bundle_branch = str(materialized_bundle.get("resulting_bundle_branch") or "").strip() or None
 
             emit("status=succeeded")
             emit(f"artifact_path={optimization_result['artifact_path']}")
@@ -3010,9 +3178,10 @@ class AppServices:
                         resulting_bundle_revision_id=$10,
                         resulting_bundle_commit_sha=$11,
                         resulting_bundle_version=$12,
+                        resulting_bundle_branch=$13,
                         failure_reason=null,
-                        finished_at=$13,
-                        updated_at=$13
+                        finished_at=$14,
+                        updated_at=$14
                     where id=$1
                     """,
                     optimization_job_id,
@@ -3027,6 +3196,7 @@ class AppServices:
                     resulting_bundle_revision_id,
                     resulting_bundle_commit_sha,
                     resulting_bundle_version,
+                    resulting_bundle_branch,
                     now2,
                 )
         except OptimizationJobCanceled as exc:

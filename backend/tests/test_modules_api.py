@@ -40,6 +40,7 @@ async def fake_create_module_import(self, source, source_ref, version_hash, **kw
         "version_hash": version_hash,
         "github_repo_url": kwargs.get("github_repo_url"),
         "github_branch": kwargs.get("github_branch"),
+        "github_subpath": kwargs.get("github_subpath"),
         "checkout_path": kwargs.get("checkout_path") or source_ref,
         "current_commit_sha": kwargs.get("current_commit_sha") or version_hash,
         "upstream_commit_sha": kwargs.get("upstream_commit_sha") or kwargs.get("current_commit_sha") or version_hash,
@@ -124,7 +125,7 @@ async def fake_list_module_revisions(self, module_id):
     ]
 
 
-async def fake_import_github_module(self, github_repo_url, github_branch):
+async def fake_import_github_module(self, github_repo_url, github_branch, github_subpath=None):
     module_id = "mod-1"
     STORE[module_id] = {
         "id": module_id,
@@ -133,10 +134,11 @@ async def fake_import_github_module(self, github_repo_url, github_branch):
         "smoke_status": "pending",
         "diagnostics": [],
         "source": "github",
-        "source_ref": "/tmp/dspy-trainer/checkouts/mod-1",
+        "source_ref": "/tmp/dspy-trainer/checkouts/mod-1/bundles/support",
         "version_hash": "abc123",
         "github_repo_url": github_repo_url,
         "github_branch": github_branch,
+        "github_subpath": github_subpath,
         "checkout_path": "/tmp/dspy-trainer/checkouts/mod-1",
         "current_commit_sha": "abc123",
         "upstream_commit_sha": "abc123",
@@ -145,7 +147,7 @@ async def fake_import_github_module(self, github_repo_url, github_branch):
         "current_revision": {
             "id": "rev-1",
             "commit_sha": "abc123",
-            "checkout_path": "/tmp/dspy-trainer/checkouts/mod-1",
+            "checkout_path": "/tmp/dspy-trainer/checkouts/mod-1/bundles/support",
             "bundle_name": "demo-bundle",
             "bundle_version": "1.2.3",
             "source_event": "import",
@@ -330,6 +332,7 @@ def test_module_import_and_list_include_git_revision_metadata(monkeypatch):
                 "source": "github",
                 "github_repo_url": "https://github.com/example/demo-bundle",
                 "github_branch": "main",
+                "github_subpath": "bundles/support",
             },
         )
         assert created.status_code == 200
@@ -339,6 +342,7 @@ def test_module_import_and_list_include_git_revision_metadata(monkeypatch):
         payload = listed.json()[0]
         assert payload["github_repo_url"] == "https://github.com/example/demo-bundle"
         assert payload["github_branch"] == "main"
+        assert payload["github_subpath"] == "bundles/support"
         assert payload["checkout_path"] == "/tmp/dspy-trainer/checkouts/mod-1"
         assert payload["current_commit_sha"] == "abc123"
         assert payload["upstream_commit_sha"] == "abc123"
@@ -352,8 +356,8 @@ def test_github_import_validation_error_returns_400(monkeypatch):
     STORE.clear()
     _patch_services(monkeypatch)
 
-    async def fake_invalid_import(self, github_repo_url, github_branch):
-        del self, github_repo_url, github_branch
+    async def fake_invalid_import(self, github_repo_url, github_branch, github_subpath=None):
+        del self, github_repo_url, github_branch, github_subpath
         raise ValueError("Validation failed with 1 error.")
 
     monkeypatch.setattr(main_mod.AppServices, "import_github_module", fake_invalid_import)

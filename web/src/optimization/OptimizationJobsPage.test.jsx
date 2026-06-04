@@ -72,6 +72,7 @@ describe("OptimizationJobsPage", () => {
             generated_module_import_id: "mod-2",
             optimized_evaluation_plan_id: "eval-plan-1",
             optimized_eval_run_plan_id: "run-plan-1",
+            resulting_bundle_branch: "optimization-opt-job",
             created_at: "2026-01-01T00:00:00+00:00",
             run_started_at: "2026-01-01T00:01:00+00:00",
             finished_at: "2026-01-01T00:05:00+00:00",
@@ -138,6 +139,7 @@ describe("OptimizationJobsPage", () => {
     expect(await screen.findByText("Echo optimized")).toBeInTheDocument();
     expect(await screen.findByText("eval-plan-1")).toBeInTheDocument();
     expect(await screen.findByText("run-plan-1")).toBeInTheDocument();
+    expect(await screen.findByText("optimization-opt-job")).toBeInTheDocument();
     expect(await screen.findByText("Process log")).toBeInTheDocument();
     expect(await screen.findByText(/job=opt-job-001/i)).toBeInTheDocument();
 
