@@ -33,6 +33,9 @@ describe("OptimizationJobsPage", () => {
       if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
       }
+      if (String(url).endsWith("/workers") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ items: [{ worker_id: "worker-1", status: "listening", task_id: null, last_seen: "2026-01-01T00:00:00+00:00" }], total_workers: 8, reported_workers: 1, available_workers: 1, busy_workers: 0 }) });
+      }
       return Promise.reject(new Error(`Unexpected URL ${url}`));
     });
 
@@ -47,6 +50,8 @@ describe("OptimizationJobsPage", () => {
     expect(await screen.findByText("Optimization Jobs")).toBeInTheDocument();
     expect(await screen.findByText("miprov2")).toBeInTheDocument();
     expect(await screen.findByText("opt-job-00")).toBeInTheDocument();
+    expect(await screen.findByText("Workers")).toBeInTheDocument();
+    expect(await screen.findByText("worker-1")).toBeInTheDocument();
 
     const row = await screen.findByRole("row", { name: /opt-job-00/ });
     expect(row).toBeTruthy();

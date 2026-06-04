@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { NavLink, useLocation } from "react-router-dom";
+import { NavLink } from "react-router-dom";
 import { Icon } from "../components/Icon";
 
 const PRIMARY_NAV = [
@@ -13,16 +13,6 @@ const PRIMARY_NAV = [
 ];
 
 const SECONDARY_NAV = [];
-
-const BREADCRUMB_LABELS = {
-  "/dashboard": "Overview",
-  "/bundles": "Module Bundles",
-  "/plans": "Evaluation Plans",
-  "/lm-profiles": "LM Profiles",
-  "/optimization": "Optimization",
-  "/optimization/jobs": "Optimization Jobs",
-  "/runs": "Eval Runs",
-};
 
 function NavSection({ items, hasActiveRun }) {
   return items.map((item) => (
@@ -43,25 +33,10 @@ function NavSection({ items, hasActiveRun }) {
   ));
 }
 
-function Breadcrumbs({ orgName }) {
-  const { pathname } = useLocation();
-  const section = BREADCRUMB_LABELS[pathname];
-  const crumbs = section ? [orgName, section] : [orgName];
-
-  return (
-    <nav aria-label="Breadcrumb" className="row gap-2 shell-crumbs">
-      {crumbs.map((crumb, index) => (
-        <span key={`${crumb}-${index}`} className="row gap-2">
-          {index > 0 ? <Icon name="chevR" size={13} className="faint" /> : null}
-          <span className={index === crumbs.length - 1 ? "shell-crumb-active" : "muted"}>{crumb}</span>
-        </span>
-      ))}
-    </nav>
-  );
-}
-
-export function AppShell({ children, orgName = "Operator" }) {
+export function AppShell({ children }) {
   const apiBase = useMemo(() => (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, ""), []);
+  const mlflowBase = useMemo(() => (import.meta.env.VITE_MLFLOW_BASE_URL || "http://localhost:5001").replace(/\/$/, ""), []);
+  const litellmBase = useMemo(() => (import.meta.env.VITE_LITELLM_BASE_URL || "http://localhost:4000").replace(/\/$/, ""), []);
   const [hasActiveRun, setHasActiveRun] = useState(false);
 
   useEffect(() => {
@@ -106,28 +81,27 @@ export function AppShell({ children, orgName = "Operator" }) {
           <div className="shell-logo center">
             <Icon name="bolt" size={14} />
           </div>
-          <div className="col gap-1">
-            <span className="shell-org-name">{orgName}</span>
-            <span className="t-label">dspy-trainer</span>
-          </div>
-          <Icon name="chevD" size={13} className="faint" />
+          <span className="shell-org-name">dspy-trainer</span>
         </div>
 
         <div className="col shell-nav-wrap">
           <NavSection items={PRIMARY_NAV} hasActiveRun={hasActiveRun} />
-          {SECONDARY_NAV.length ? (
-            <>
-              <hr className="hr shell-divider" />
-              <NavSection items={SECONDARY_NAV} hasActiveRun={false} />
-            </>
-          ) : null}
+          <hr className="hr shell-divider" />
+          {SECONDARY_NAV.length ? <NavSection items={SECONDARY_NAV} hasActiveRun={false} /> : null}
+          <div className="col shell-external-links">
+            <a className="shell-nav-item" href={mlflowBase} target="_blank" rel="noreferrer">
+              <Icon className="shell-nav-icon" name="external" size={16} />
+              <span>MLFlow</span>
+            </a>
+            <a className="shell-nav-item" href={litellmBase} target="_blank" rel="noreferrer">
+              <Icon className="shell-nav-icon" name="external" size={16} />
+              <span>LiteLLM Proxy</span>
+            </a>
+          </div>
         </div>
       </aside>
 
       <main className="shell-main col">
-        <header className="shell-topbar row between">
-          <Breadcrumbs orgName={orgName} />
-        </header>
         <section className="shell-content">{children}</section>
       </main>
     </div>

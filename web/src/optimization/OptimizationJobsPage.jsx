@@ -20,6 +20,8 @@ export function OptimizationJobsPage() {
   const [cancelingJobId, setCancelingJobId] = useState("");
   const [deletingJobId, setDeletingJobId] = useState("");
   const [error, setError] = useState("");
+  const [workersData, setWorkersData] = useState({ items: [], total_workers: 0, reported_workers: 0, available_workers: 0, busy_workers: 0 });
+  const [workersError, setWorkersError] = useState("");
   const [moduleNames, setModuleNames] = useState({});
   const [moduleVersions, setModuleVersions] = useState({});
   const [profileNames, setProfileNames] = useState({});
@@ -69,6 +71,27 @@ export function OptimizationJobsPage() {
 
     loadModules();
     loadProfiles();
+  }, [apiBase]);
+
+  useEffect(() => {
+    const loadWorkers = async () => {
+      try {
+        const workersResp = await fetch(`${apiBase}/workers`, { method: "GET" });
+        if (!workersResp.ok) {
+          throw new Error(`Could not load workers (${workersResp.status})`);
+        }
+        const workersPayload = await workersResp.json();
+        setWorkersData(normalizeWorkersPayload(workersPayload));
+        setWorkersError("");
+      } catch (err) {
+        setWorkersError(err instanceof Error ? err.message : "Could not load workers");
+        setWorkersData({ items: [], total_workers: 0, reported_workers: 0, available_workers: 0, busy_workers: 0 });
+      }
+    };
+
+    loadWorkers();
+    const interval = setInterval(loadWorkers, JOBS_POLL_MS);
+    return () => clearInterval(interval);
   }, [apiBase]);
 
   const loadJobs = async () => {
@@ -272,6 +295,8 @@ export function OptimizationJobsPage() {
               <EmptyState title="No optimization jobs yet" description="Launch an optimization job first to see entries here." />
             )
           ) : null}
+
+          <WorkersSection workersData={workersData} workersError={workersError} />
         </div>
       </section>
     );
@@ -403,6 +428,8 @@ export function OptimizationJobsPage() {
                 <pre className="optimization-request-config-preview"><code>{job.execution_log || "No execution log captured yet."}</code></pre>
               </div>
             </section>
+
+            <WorkersSection workersData={workersData} workersError={workersError} />
           </div>
         ) : null}
       </div>
@@ -540,4 +567,97 @@ function canCancelJob(status) {
 
 function canDeleteJob(status) {
   return status === "succeeded" || status === "failed" || status === "canceled";
+}
+
+function WorkersSection({ workersData, workersError }) {
+  const workers = Array.isArray(workersData?.items) ? workersData.items : [];
+  const totalWorkers = Number(workersData?.total_workers || 0);
+  const availableWorkers = Number(workersData?.available_workers || 0);
+  const busyWorkers = Number(workersData?.busy_workers || 0);
+  const missingWorkers = Math.max(0, totalWorkers - Number(workersData?.reported_workers || workers.length));
+
+  return (
+    <section className="panel card-pad runs-workers-section">
+      <div className="row between" style={{ gap: 12, marginBottom: 10, alignItems: "flex-start" }}>
+        <div>
+          <h3 className="t-h2" style={{ marginBottom: 6 }}>Workers</h3>
+          <p className="muted t-sm">
+            {availableWorkers} available of {totalWorkers || workers.length} total
+            {busyWorkers ? ` · ${busyWorkers} busy` : ""}
+            {missingWorkers ? ` · ${missingWorkers} not reporting` : ""}
+          </p>
+        </div>
+      </div>
+      {workersError ? <p className="cap" style={{ marginBottom: 6 }}>Worker refresh issue: {workersError}</p> : null}
+      {!workers.length ? (
+        <div className="dashboard-zero">No workers reported yet.</div>
+      ) : (
+        <div className="runs-workers-grid">
+          {workers.map((worker) => (
+            <article key={worker.worker_id} className="runs-worker-card">
+              <div className="row between" style={{ gap: 10, alignItems: "center" }}>
+                <div className="col gap-1" style={{ minWidth: 0 }}>
+                  <div className="mono cap" style={{ overflowWrap: "anywhere" }}>{worker.worker_id}</div>
+                  <div className="muted t-xs">Last seen {worker.last_seen ? formatTimeAgo(worker.last_seen) : "unknown"}</div>
+                </div>
+                <StatusPill status={worker.status} />
+              </div>
+              <dl className="runs-worker-meta">
+                <div>
+                  <dt>Task</dt>
+                  <dd className="mono">{worker.task_id ? shortId(worker.task_id) : "Idle"}</dd>
+                </div>
+                <div>
+                  <dt>State</dt>
+                  <dd>{describeWorkerState(worker.status, worker.task_id)}</dd>
+                </div>
+              </dl>
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function normalizeWorkersPayload(payload) {
+  if (Array.isArray(payload)) {
+    const availableWorkers = payload.filter((worker) => worker?.status === "listening").length;
+    return {
+      items: payload,
+      total_workers: payload.length,
+      reported_workers: payload.length,
+      available_workers: availableWorkers,
+      busy_workers: Math.max(0, payload.length - availableWorkers),
+    };
+  }
+  const items = Array.isArray(payload?.items) ? payload.items : [];
+  return {
+    items,
+    total_workers: Number(payload?.total_workers || items.length),
+    reported_workers: Number(payload?.reported_workers || items.length),
+    available_workers: Number(payload?.available_workers || 0),
+    busy_workers: Number(payload?.busy_workers || 0),
+  };
+}
+
+function describeWorkerState(status, taskId) {
+  if (status === "listening") return "Ready for the next task";
+  if (status === "running") return taskId ? "Actively processing work" : "Busy";
+  return "Heartbeat reported";
+}
+
+function formatTimeAgo(value) {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return "-";
+  }
+  const deltaMs = Date.now() - parsed.getTime();
+  const mins = Math.max(0, Math.floor(deltaMs / 60000));
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
 }

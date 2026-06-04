@@ -20,6 +20,8 @@ describe("App", () => {
     );
 
     expect(await screen.findByRole("link", { name: "Overview" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "MLFlow" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "LiteLLM Proxy" })).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Settings" })).not.toBeInTheDocument();
     expect(screen.queryByText("Sign in to your workspace")).not.toBeInTheDocument();
 

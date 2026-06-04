@@ -15,6 +15,7 @@ const ICONS = {
   microsoft: "M3 3h8v8H3zM13 3h8v8h-8zM3 13h8v8H3zM13 13h8v8h-8z",
   shield: "M12 3l8 4v5c0 5.25-3.5 9.5-8 10-4.5-.5-8-4.75-8-10V7l8-4z",
   info: "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zM12 17v-5M12 8h.01",
+  external: "M14 3h7v7M10 14L21 3M19 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h5",
 };
 
 export function Icon({ name, size = 16, className = "", active = false }) {

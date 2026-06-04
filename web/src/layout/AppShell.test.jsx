@@ -65,7 +65,7 @@ describe("AppShell", () => {
     vi.unstubAllGlobals();
   });
 
-  it("renders breadcrumb trail for route", () => {
+  it("renders external utility links", () => {
     stubPlansFetch([]);
     render(
       <MemoryRouter initialEntries={["/plans"]}>
@@ -75,42 +75,9 @@ describe("AppShell", () => {
       </MemoryRouter>,
     );
 
-    const breadcrumbNav = screen.getByRole("navigation", { name: "Breadcrumb" });
-    expect(breadcrumbNav).toBeInTheDocument();
-    expect(breadcrumbNav).toHaveTextContent("Operator");
-    expect(breadcrumbNav).toHaveTextContent("Evaluation Plans");
-    vi.unstubAllGlobals();
-  });
-
-  it("renders optimization breadcrumb trail", async () => {
-    stubPlansFetch([]);
-    render(
-      <MemoryRouter initialEntries={["/optimization"]}>
-        <AppShell>
-          <div>content</div>
-        </AppShell>
-      </MemoryRouter>,
-    );
-
-    const breadcrumbNav = screen.getByRole("navigation", { name: "Breadcrumb" });
-    expect(breadcrumbNav).toHaveTextContent("Operator");
-    expect(breadcrumbNav).toHaveTextContent("Optimization");
-    vi.unstubAllGlobals();
-  });
-
-  it("renders optimization jobs breadcrumb trail", async () => {
-    stubPlansFetch([]);
-    render(
-      <MemoryRouter initialEntries={["/optimization/jobs"]}>
-        <AppShell>
-          <div>content</div>
-        </AppShell>
-      </MemoryRouter>,
-    );
-
-    const breadcrumbNav = screen.getByRole("navigation", { name: "Breadcrumb" });
-    expect(breadcrumbNav).toHaveTextContent("Operator");
-    expect(breadcrumbNav).toHaveTextContent("Optimization Jobs");
+    expect(screen.getByRole("link", { name: "MLFlow" })).toHaveAttribute("href", "http://localhost:5001");
+    expect(screen.getByRole("link", { name: "LiteLLM Proxy" })).toHaveAttribute("href", "http://localhost:4000");
+    expect(screen.queryByText("Operator")).not.toBeInTheDocument();
     vi.unstubAllGlobals();
   });
 

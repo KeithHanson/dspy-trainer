@@ -522,9 +522,8 @@ function SavedBundlesPanel({ modulesUrl }) {
                 <span className="t-sm">{bundle.bundle_name || bundle.github_repo_url || bundle.source_ref || bundle.id}</span>
                 <span className="cap"><span className="mono">{bundle.validation_status}</span> · {bundle.status}</span>
                 {bundle.bundle_version ? <span className="cap">v{bundle.bundle_version}</span> : null}
-                {bundle.sync_status ? <span className="cap mono">Sync {bundle.sync_status}</span> : null}
                 {bundle.github_branch ? <span className="cap mono">Branch {bundle.github_branch}</span> : null}
-                {bundle.github_subpath ? <span className="cap mono">Subfolder {bundle.github_subpath}</span> : null}
+                {bundle.github_subpath ? <span className="cap mono">Subfolder: {bundle.github_subpath}</span> : null}
                 {bundle.current_commit_sha ? <span className="cap mono">Commit {bundle.current_commit_sha.slice(0, 8)}</span> : null}
                 {bundle.created_at ? <span className="cap mono">Imported {formatDateTime(bundle.created_at)}</span> : null}
               </div>
@@ -532,7 +531,6 @@ function SavedBundlesPanel({ modulesUrl }) {
                 setActiveFileName("module.py");
                 setSelectedBundle(bundle);
               }}>View files</Button>
-              <Button size="sm" onClick={() => setMetadataModalBundle(bundle)}>Edit</Button>
               <Button size="sm" className="bundles-delete-btn" onClick={() => deleteBundle(bundle.id)}>Delete</Button>
             </div>
           ))}

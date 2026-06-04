@@ -66,15 +66,7 @@ button { font-family: inherit; }
 .d-live { background: var(--accent); box-shadow: 0 0 0 0 var(--accent); animation: pulse 1.6s infinite; }
 
 .shell-divider { border: 0; height: 1px; background: var(--border-soft); margin: 10px 8px; }
-.shell-user { padding: 10px 12px; border-top: 1px solid var(--border-soft); }
-.shell-user-meta { min-width: 0; flex: 1; }
-.shell-user-name, .shell-user-meta .faint { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.shell-user-name { font-size: 12.5px; font-weight: 500; }
-.avatar { width: 28px; height: 28px; border-radius: 999px; background: var(--panel-2); display: grid; place-items: center; font-size: 11px; font-family: var(--mono); }
-
-.shell-topbar { height: var(--topbar-h); flex: none; padding: 0 18px; border-bottom: 1px solid var(--border-soft); background: var(--bg); }
-.shell-crumbs { font-size: 13px; }
-.shell-crumb-active { color: var(--text); font-weight: 500; }
+.shell-external-links { gap: 2px; }
 
 .shell-content { flex: 1; min-height: 0; overflow: hidden; }
 .page { height: 100%; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
