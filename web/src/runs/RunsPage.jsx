@@ -350,7 +350,7 @@ export function RunsPage() {
                     </div>
                     <div className="runs-drawer-stat">
                       <span className="runs-drawer-stat-label">Eval</span>
-                      <span className="runs-drawer-stat-value mono">{selectedTask.status === "succeeded" ? (selectedTask.eval_pass ? "pass" : "fail") : "-"}</span>
+                      <span className="runs-drawer-stat-value mono">{selectedTask.status === "succeeded" ? (selectedTask.eval_pass ? "✅" : "❌") : "-"}</span>
                     </div>
                     <div className="runs-drawer-stat">
                       <span className="runs-drawer-stat-label">Worker</span>
