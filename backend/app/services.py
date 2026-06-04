@@ -1683,7 +1683,30 @@ class AppServices:
         suffix = "" if not content.endswith("\n") else ""
         return f"{content}{suffix}\n{line}\n" if content else f"{line}\n"
 
-    async def _materialize_optimized_bundle_from_job(
+    async def _update_module_bundle_metadata_record(
+        self,
+        module_id: str,
+        *,
+        bundle_name: str | None,
+        bundle_version: str | None,
+    ) -> None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            await conn.execute(
+                """
+                update module_imports
+                set bundle_name = coalesce($2, bundle_name),
+                    bundle_version = coalesce($3, bundle_version),
+                    updated_at = now()
+                where id = $1
+                """,
+                module_id,
+                bundle_name,
+                bundle_version,
+            )
+
+    async def _apply_optimized_bundle_writeback(
         self,
         job: dict[str, Any],
         *,
@@ -1715,9 +1738,17 @@ class AppServices:
 
         base_bundle_name = str(source_module.get("bundle_name") or source_root.name or "module-bundle").strip() or "module-bundle"
         base_bundle_version = str(source_module.get("bundle_version") or "").strip() or "0.1.0"
-        default_optimized_bundle_name = f"{base_bundle_name}-optimized-{optimization_job_id}"
-        optimized_bundle_name = str(bundle_name or "").strip() or default_optimized_bundle_name
+        request_config = self._json_dict(job.get("request_config"))
+        normalized_config = self._json_dict(job.get("normalized_config"))
+        requested_target_version = str(
+            request_config.get("target_bundle_version")
+            or normalized_config.get("target_bundle_version")
+            or ""
+        ).strip()
+        optimized_bundle_name = base_bundle_name
         optimized_bundle_version = str(bundle_version or "").strip() or base_bundle_version
+        if not str(bundle_version or "").strip() and requested_target_version:
+            optimized_bundle_version = requested_target_version
         artifact_target_name = artifact_path.name or "program.json"
         shutil.copy2(artifact_path, source_root / artifact_target_name)
 
@@ -1729,16 +1760,49 @@ class AppServices:
         bundle_toml = self._upsert_toml_string_key(bundle_toml, "source_optimization_job_id", optimization_job_id)
         bundle_toml_path.write_text(bundle_toml, encoding="utf-8")
 
+        report = validate_bundle(str(source_root))
+        return {
+            "module_id": module_id,
+            "optimization_job_id": optimization_job_id,
+            "source_root": str(source_root),
+            "optimized_bundle_name": optimized_bundle_name,
+            "optimized_bundle_version": optimized_bundle_version,
+            "report": report,
+            "expected_branch": str(source_module.get("github_branch") or "").strip() or None,
+        }
+
+    async def _materialize_optimized_bundle_from_job(
+        self,
+        job: dict[str, Any],
+        *,
+        bundle_name: str | None = None,
+        bundle_version: str | None = None,
+        commit_message: str | None = None,
+    ) -> dict[str, Any] | None:
+        prepared = await self._apply_optimized_bundle_writeback(
+            job,
+            bundle_name=bundle_name,
+            bundle_version=bundle_version,
+        )
+        if prepared is None:
+            return None
+        module_id = str(prepared["module_id"])
+        optimization_job_id = str(prepared["optimization_job_id"])
+        source_root = Path(str(prepared["source_root"]))
+        optimized_bundle_name = str(prepared["optimized_bundle_name"])
+        optimized_bundle_version = str(prepared["optimized_bundle_version"])
+        report = prepared["report"]
+        expected_branch = prepared["expected_branch"]
+
         commit_sha = await self._commit_and_push_checkout(
             source_root,
-            message=f"Apply optimization output {optimization_job_id}",
-            expected_branch=str(source_module.get("github_branch") or "").strip() or None,
+            message=commit_message or f"Apply optimization output {optimization_job_id}",
+            expected_branch=expected_branch,
         )
-        report = validate_bundle(str(source_root))
-        await self.set_module_bundle_metadata(
+        await self._update_module_bundle_metadata_record(
             module_id,
-            report.metadata.get("name") if isinstance(report.metadata.get("name"), str) else optimized_bundle_name,
-            report.metadata.get("version") if isinstance(report.metadata.get("version"), str) else optimized_bundle_version,
+            bundle_name=report.metadata.get("name") if isinstance(report.metadata.get("name"), str) else optimized_bundle_name,
+            bundle_version=report.metadata.get("version") if isinstance(report.metadata.get("version"), str) else optimized_bundle_version,
         )
         status = "passed" if report.passed else "failed"
         await self._set_module_sync_state(
@@ -2832,30 +2896,27 @@ class AppServices:
                     },
                 }
 
-            materialized_bundle = await self._materialize_optimized_bundle_from_job(
+            prepared_writeback = await self._apply_optimized_bundle_writeback(
                 {
                     **job,
                     "id": optimization_job_id,
                     "artifact_path": optimization_result["artifact_path"],
                 }
             )
-            if materialized_bundle is None:
+            if prepared_writeback is None:
                 raise RuntimeError("optimized bundle could not be materialized")
-            generated_module_import_id = str(materialized_bundle.get("id") or "").strip() or None
+            generated_module_import_id = str(prepared_writeback.get("module_id") or "").strip() or None
             if generated_module_import_id is None:
                 raise RuntimeError("materialized optimized bundle returned no module id")
-            resulting_bundle_revision_id = str(materialized_bundle.get("current_revision_id") or "").strip() or None
-            resulting_bundle_commit_sha = str(materialized_bundle.get("current_commit_sha") or "").strip() or None
-            resulting_bundle_version = str(materialized_bundle.get("bundle_version") or "").strip() or None
+            generated_bundle_path = str(prepared_writeback.get("source_root") or "").strip()
+            if not generated_bundle_path:
+                raise RuntimeError("generated optimized bundle has no runnable source path")
+            planned_resulting_bundle_version = str(prepared_writeback.get("optimized_bundle_version") or "").strip() or None
 
             source_run_plan_id = str(job.get("source_run_plan_id") or "").strip()
             if not source_run_plan_id:
                 raise RuntimeError("optimization job is missing required source_run_plan_id")
 
-            generated_module = await self.get_module(generated_module_import_id)
-            generated_bundle_path = str(generated_module.get("source_ref") or "").strip() if generated_module else ""
-            if not generated_bundle_path:
-                raise RuntimeError("generated optimized bundle has no runnable source path")
             followup_eval_plan, followup_run_plan = await self._create_followup_eval_plan_and_run(
                 source_run_plan_id=source_run_plan_id,
                 module_import_id=generated_module_import_id,
@@ -2888,6 +2949,31 @@ class AppServices:
                 "baseline_item_count": int(baseline_item_count) if baseline_item_count is not None else None,
                 "optimized_item_count": optimized_item_count,
             }
+
+            baseline_label = (
+                f"{float(baseline_score_pct):.1f}%" if isinstance(baseline_score_pct, (int, float)) else "pending"
+            )
+            optimized_label = (
+                f"{float(optimized_score_pct):.1f}%" if isinstance(optimized_score_pct, (int, float)) else "pending"
+            )
+            commit_message = (
+                f"Apply optimization output {optimization_job_id}: baseline {baseline_label} -> optimized {optimized_label}"
+            )
+            materialized_bundle = await self._materialize_optimized_bundle_from_job(
+                {
+                    **job,
+                    "id": optimization_job_id,
+                    "artifact_path": optimization_result["artifact_path"],
+                },
+                bundle_name=str(prepared_writeback.get("optimized_bundle_name") or "").strip() or None,
+                bundle_version=planned_resulting_bundle_version,
+                commit_message=commit_message,
+            )
+            if materialized_bundle is None:
+                raise RuntimeError("optimized bundle could not be finalized")
+            resulting_bundle_revision_id = str(materialized_bundle.get("current_revision_id") or "").strip() or None
+            resulting_bundle_commit_sha = str(materialized_bundle.get("current_commit_sha") or "").strip() or None
+            resulting_bundle_version = str(materialized_bundle.get("bundle_version") or "").strip() or planned_resulting_bundle_version
 
             emit("status=succeeded")
             emit(f"artifact_path={optimization_result['artifact_path']}")

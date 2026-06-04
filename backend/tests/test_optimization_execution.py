@@ -498,10 +498,21 @@ def test_run_optimization_job_persists_artifact_and_summaries(monkeypatch):
             "telemetry_summary": {"strategy": "bootstrap_fewshot", "selected_demos": [{"demo_count": 1}]},
         }
 
-    async def fake_materialize_from_job(job_payload, *, bundle_name=None, bundle_version=None):
+    async def fake_apply_writeback(job_payload, *, bundle_name=None, bundle_version=None):
         del bundle_name, bundle_version
         assert job_payload["artifact_path"].endswith("/opt-1/program.json")
-        return {"id": "mod-opt-1"}
+        return {
+            "module_id": "mod-opt-1",
+            "source_root": str(FIXTURES / "valid_bundle"),
+            "optimized_bundle_name": "Echo",
+            "optimized_bundle_version": "0.1.0",
+            "report": type("Report", (), {"passed": True, "diagnostics": [], "metadata": {"name": "Echo", "version": "0.1.0"}})(),
+            "expected_branch": "main",
+        }
+
+    async def fake_materialize_from_job(job_payload, *, bundle_name=None, bundle_version=None, commit_message=None):
+        del job_payload, bundle_name, bundle_version, commit_message
+        return {"id": "mod-opt-1", "current_revision_id": "rev-opt-1", "current_commit_sha": "commit-opt-1", "bundle_version": "0.1.0"}
     async def fake_get_module(module_id):
         if module_id == "mod-opt-1":
             return {"id": module_id, "source_ref": str(FIXTURES / "valid_bundle")}
@@ -529,6 +540,7 @@ def test_run_optimization_job_persists_artifact_and_summaries(monkeypatch):
 
     monkeypatch.setattr(services, "append_optimization_process_log", fake_append_optimization_process_log)
     monkeypatch.setattr(services, "get_lm_profile", fake_get_lm_profile)
+    monkeypatch.setattr(services, "_apply_optimized_bundle_writeback", fake_apply_writeback)
     monkeypatch.setattr(services, "_materialize_optimized_bundle_from_job", fake_materialize_from_job)
     monkeypatch.setattr(services, "get_module", fake_get_module)
     monkeypatch.setattr(services, "_create_followup_eval_plan_and_run", fake_create_followup_eval_plan_and_run)
@@ -630,9 +642,20 @@ def test_run_optimization_job_gepa_calls_bundle_optimization(monkeypatch):
     async def fake_get_lm_profile(lm_profile_id):
         return None
 
-    async def fake_materialize_from_job(job_payload, *, bundle_name=None, bundle_version=None):
+    async def fake_apply_writeback(job_payload, *, bundle_name=None, bundle_version=None):
         del job_payload, bundle_name, bundle_version
-        return {"id": "mod-opt-2"}
+        return {
+            "module_id": "mod-opt-2",
+            "source_root": str(FIXTURES / "valid_bundle"),
+            "optimized_bundle_name": "Echo",
+            "optimized_bundle_version": "0.1.0",
+            "report": type("Report", (), {"passed": True, "diagnostics": [], "metadata": {"name": "Echo", "version": "0.1.0"}})(),
+            "expected_branch": "main",
+        }
+
+    async def fake_materialize_from_job(job_payload, *, bundle_name=None, bundle_version=None, commit_message=None):
+        del job_payload, bundle_name, bundle_version, commit_message
+        return {"id": "mod-opt-2", "current_revision_id": "rev-opt-2", "current_commit_sha": "commit-opt-2", "bundle_version": "0.1.0"}
     async def fake_get_module(module_id):
         if module_id == "mod-opt-2":
             return {"id": module_id, "source_ref": str(FIXTURES / "valid_bundle")}
@@ -652,6 +675,7 @@ def test_run_optimization_job_gepa_calls_bundle_optimization(monkeypatch):
 
     monkeypatch.setattr(services, "append_optimization_process_log", fake_append_optimization_process_log)
     monkeypatch.setattr(services, "get_lm_profile", fake_get_lm_profile)
+    monkeypatch.setattr(services, "_apply_optimized_bundle_writeback", fake_apply_writeback)
     monkeypatch.setattr(services, "_materialize_optimized_bundle_from_job", fake_materialize_from_job)
     monkeypatch.setattr(services, "get_module", fake_get_module)
     monkeypatch.setattr(services, "_create_followup_eval_plan_and_run", fake_create_followup_eval_plan_and_run)
@@ -739,9 +763,20 @@ def test_run_optimization_job_derives_records_from_source_run_plan(monkeypatch):
             "source_run_plan_id": "plan-1",
         }
         return {"score_pct": 90.0, "item_count": 2}
-    async def fake_materialize_from_job(job_payload, *, bundle_name=None, bundle_version=None):
+    async def fake_apply_writeback(job_payload, *, bundle_name=None, bundle_version=None):
         del job_payload, bundle_name, bundle_version
-        return {"id": "mod-opt-derive"}
+        return {
+            "module_id": "mod-opt-derive",
+            "source_root": str(FIXTURES / "valid_bundle"),
+            "optimized_bundle_name": "Echo",
+            "optimized_bundle_version": "0.1.0",
+            "report": type("Report", (), {"passed": True, "diagnostics": [], "metadata": {"name": "Echo", "version": "0.1.0"}})(),
+            "expected_branch": "main",
+        }
+
+    async def fake_materialize_from_job(job_payload, *, bundle_name=None, bundle_version=None, commit_message=None):
+        del job_payload, bundle_name, bundle_version, commit_message
+        return {"id": "mod-opt-derive", "current_revision_id": "rev-opt-derive", "current_commit_sha": "commit-opt-derive", "bundle_version": "0.1.0"}
     async def fake_create_followup_eval_plan_and_run(**kwargs):
         assert kwargs["source_run_plan_id"] == "plan-1"
         assert kwargs["module_import_id"] == "mod-opt-derive"
@@ -764,6 +799,7 @@ def test_run_optimization_job_derives_records_from_source_run_plan(monkeypatch):
     async def fake_append_optimization_process_log(job_id, additions):
         return None
     monkeypatch.setattr(services, "append_optimization_process_log", fake_append_optimization_process_log)
+    monkeypatch.setattr(services, "_apply_optimized_bundle_writeback", fake_apply_writeback)
     monkeypatch.setattr(services, "_materialize_optimized_bundle_from_job", fake_materialize_from_job)
     monkeypatch.setattr(services, "_create_followup_eval_plan_and_run", fake_create_followup_eval_plan_and_run)
     monkeypatch.setattr(services, "enqueue_agent_run_plan", fake_enqueue_agent_run_plan)
@@ -917,9 +953,20 @@ def test_run_optimization_job_flushes_live_log_updates(monkeypatch):
             "telemetry_summary": {"strategy": "bootstrap_fewshot"},
         }
 
-    async def fake_materialize_from_job(job_payload, *, bundle_name=None, bundle_version=None):
+    async def fake_apply_writeback(job_payload, *, bundle_name=None, bundle_version=None):
         del job_payload, bundle_name, bundle_version
-        return {"id": "mod-opt-live"}
+        return {
+            "module_id": "mod-opt-live",
+            "source_root": str(FIXTURES / "valid_bundle"),
+            "optimized_bundle_name": "Echo",
+            "optimized_bundle_version": "0.1.0",
+            "report": type("Report", (), {"passed": True, "diagnostics": [], "metadata": {"name": "Echo", "version": "0.1.0"}})(),
+            "expected_branch": "main",
+        }
+
+    async def fake_materialize_from_job(job_payload, *, bundle_name=None, bundle_version=None, commit_message=None):
+        del job_payload, bundle_name, bundle_version, commit_message
+        return {"id": "mod-opt-live", "current_revision_id": "rev-opt-live", "current_commit_sha": "commit-opt-live", "bundle_version": "0.1.0"}
     async def fake_get_module(module_id):
         if module_id == "mod-opt-live":
             return {"id": module_id, "source_ref": str(FIXTURES / "valid_bundle")}
@@ -940,6 +987,7 @@ def test_run_optimization_job_flushes_live_log_updates(monkeypatch):
     monkeypatch.setattr(services, "get_optimization_job", fake_get_optimization_job)
     monkeypatch.setattr(services, "_get_source_run_plan_baseline", fake_get_source_run_plan_baseline)
     monkeypatch.setattr(services, "append_optimization_process_log", fake_append_optimization_process_log)
+    monkeypatch.setattr(services, "_apply_optimized_bundle_writeback", fake_apply_writeback)
     monkeypatch.setattr(services, "_materialize_optimized_bundle_from_job", fake_materialize_from_job)
     monkeypatch.setattr(services, "get_module", fake_get_module)
     monkeypatch.setattr(services, "_create_followup_eval_plan_and_run", fake_create_followup_eval_plan_and_run)
@@ -1171,9 +1219,22 @@ def test_optimization_job_json_fields_persist_through_service_db_roundtrip(monke
             },
         }
 
-    async def fake_materialize_from_job(job_payload, *, bundle_name=None, bundle_version=None):
+    async def fake_apply_writeback(job_payload, *, bundle_name=None, bundle_version=None):
         del bundle_name, bundle_version
         assert job_payload["artifact_path"].endswith(f"/{created['id']}/program.json")
+        return {
+            "module_id": "mod-opt-roundtrip",
+            "source_root": str(FIXTURES / "valid_bundle"),
+            "optimized_bundle_name": "valid-bundle",
+            "optimized_bundle_version": "2.0.0",
+            "report": type("Report", (), {"passed": True, "diagnostics": [], "metadata": {"name": "valid-bundle", "version": "2.0.0"}})(),
+            "expected_branch": "main",
+        }
+
+    async def fake_materialize_from_job(job_payload, *, bundle_name=None, bundle_version=None, commit_message=None):
+        del bundle_name, bundle_version
+        assert job_payload["artifact_path"].endswith(f"/{created['id']}/program.json")
+        assert commit_message and "baseline 75.0% -> optimized 91.0%" in commit_message
         return {
             "id": "mod-opt-roundtrip",
             "current_revision_id": "rev-opt-roundtrip",
@@ -1204,6 +1265,7 @@ def test_optimization_job_json_fields_persist_through_service_db_roundtrip(monke
         return None
 
     monkeypatch.setattr("app.executor.module_runner.run_bundle_optimization", fake_run_bundle_optimization)
+    monkeypatch.setattr(services, "_apply_optimized_bundle_writeback", fake_apply_writeback)
     monkeypatch.setattr(services, "_materialize_optimized_bundle_from_job", fake_materialize_from_job)
     monkeypatch.setattr(services, "_create_followup_eval_plan_and_run", fake_create_followup_eval_plan_and_run)
     monkeypatch.setattr(services, "enqueue_agent_run_plan", fake_enqueue_agent_run_plan)
@@ -1309,9 +1371,9 @@ def test_materialize_optimized_bundle_updates_existing_checkout(tmp_path, monkey
             }
         return None
 
-    async def fake_set_module_bundle_metadata(module_id, bundle_name, bundle_version):
+    async def fake_update_module_bundle_metadata_record(module_id, *, bundle_name, bundle_version):
         assert module_id == "mod-1"
-        assert bundle_name == "custom-bundle"
+        assert bundle_name == "echo-bundle"
         assert bundle_version == "2.0.0"
 
     async def fake_set_validation_status(module_id, status, diagnostics, **kwargs):
@@ -1340,7 +1402,7 @@ def test_materialize_optimized_bundle_updates_existing_checkout(tmp_path, monkey
             "source_ref": str(source_bundle),
             "checkout_path": str(source_bundle),
             "github_branch": "main",
-            "bundle_name": "custom-bundle",
+            "bundle_name": "echo-bundle",
             "bundle_version": "2.0.0",
             "validation_status": "passed",
             "smoke_status": "pending",
@@ -1350,7 +1412,7 @@ def test_materialize_optimized_bundle_updates_existing_checkout(tmp_path, monkey
 
     monkeypatch.setattr(services, "get_optimization_job", fake_get_optimization_job)
     monkeypatch.setattr(services, "get_module", fake_get_updated_module)
-    monkeypatch.setattr(services, "set_module_bundle_metadata", fake_set_module_bundle_metadata)
+    monkeypatch.setattr(services, "_update_module_bundle_metadata_record", fake_update_module_bundle_metadata_record)
     monkeypatch.setattr(services, "set_validation_status", fake_set_validation_status)
     monkeypatch.setattr(services, "_set_module_sync_state", fake_set_module_sync_state)
     monkeypatch.setattr(services, "_run_git_command", fake_run_git_command)
@@ -1363,11 +1425,11 @@ def test_materialize_optimized_bundle_updates_existing_checkout(tmp_path, monkey
     result = asyncio.run(services.materialize_optimized_bundle("opt-123", bundle_name="custom-bundle", bundle_version="2.0.0"))
 
     assert result is not None
-    assert result["bundle_name"] == "custom-bundle"
+    assert result["bundle_name"] == "echo-bundle"
     materialized_root = Path(source_bundle)
     assert materialized_root.joinpath("program.json").exists()
     bundle_toml = materialized_root.joinpath("bundle.toml").read_text(encoding="utf-8")
-    assert 'name = "custom-bundle"' in bundle_toml
+    assert 'name = "echo-bundle"' in bundle_toml
     assert 'version = "2.0.0"' in bundle_toml
     assert 'optimized_program_state = "program.json"' in bundle_toml
     assert 'source_optimization_job_id = "opt-123"' in bundle_toml
@@ -1420,7 +1482,7 @@ def test_run_optimization_job_fails_when_writeback_preflight_blocks(monkeypatch)
     async def fake_append_optimization_process_log(job_id, additions):
         return None
 
-    async def fake_materialize_from_job(job_payload, *, bundle_name=None, bundle_version=None):
+    async def fake_apply_writeback(job_payload, *, bundle_name=None, bundle_version=None):
         raise ModuleSyncError("module has upstream changes that must be synced before mutation", sync_state={"sync_status": "behind"})
 
     def fake_run_bundle_optimization(**kwargs):
@@ -1433,7 +1495,7 @@ def test_run_optimization_job_fails_when_writeback_preflight_blocks(monkeypatch)
     monkeypatch.setattr(services, "get_optimization_job", fake_get_optimization_job)
     monkeypatch.setattr(services, "_get_source_run_plan_baseline", fake_get_source_run_plan_baseline)
     monkeypatch.setattr(services, "append_optimization_process_log", fake_append_optimization_process_log)
-    monkeypatch.setattr(services, "_materialize_optimized_bundle_from_job", fake_materialize_from_job)
+    monkeypatch.setattr(services, "_apply_optimized_bundle_writeback", fake_apply_writeback)
     monkeypatch.setattr("app.executor.module_runner.run_bundle_optimization", fake_run_bundle_optimization)
 
     result = asyncio.run(services.run_optimization_job("opt-blocked"))
