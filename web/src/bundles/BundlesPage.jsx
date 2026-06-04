@@ -607,10 +607,16 @@ function GitHubImportPanel({ modulesUrl, onBack, onCreatePlan }) {
       </div>
       <p className="cap" style={{ marginBottom: 14 }}>Import a GitHub repo root that already matches the bundle contract. GitHub access is configured server-side only.</p>
       {githubConfigMessage ? (
-        <div className="field-help row gap-2" role="status" style={{ marginBottom: 14 }}>
-          <Icon name="info" size={13} className="field-help-icon" />
-          <span className="cap field-help-copy">{githubConfigMessage}</span>
-        </div>
+        githubConfigured ? (
+          <div className="field-help row gap-2" role="status" style={{ marginBottom: 14 }}>
+            <Icon name="info" size={13} className="field-help-icon" />
+            <span className="cap field-help-copy">{githubConfigMessage}</span>
+          </div>
+        ) : (
+          <div style={{ marginBottom: 14 }}>
+            <ErrorState title="GitHub access not configured" description={githubConfigMessage} />
+          </div>
+        )
       ) : null}
 
       <form className="bundles-form col gap-2" onSubmit={onSubmit}>
