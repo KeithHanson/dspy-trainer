@@ -104,6 +104,38 @@ async def fake_list_modules(self):
     return list(STORE.values())
 
 
+async def fake_import_github_module(self, github_repo_url, github_branch, github_pat):
+    module_id = "mod-1"
+    STORE[module_id] = {
+        "id": module_id,
+        "status": "validated",
+        "validation_status": "passed",
+        "smoke_status": "pending",
+        "diagnostics": [],
+        "source": "github",
+        "source_ref": "/tmp/dspy-trainer/checkouts/mod-1",
+        "version_hash": "abc123",
+        "github_repo_url": github_repo_url,
+        "github_branch": github_branch,
+        "checkout_path": "/tmp/dspy-trainer/checkouts/mod-1",
+        "current_commit_sha": "abc123",
+        "upstream_commit_sha": "abc123",
+        "sync_status": "synced",
+        "current_revision_id": "rev-1",
+        "current_revision": {
+            "id": "rev-1",
+            "commit_sha": "abc123",
+            "checkout_path": "/tmp/dspy-trainer/checkouts/mod-1",
+            "bundle_name": "demo-bundle",
+            "bundle_version": "1.2.3",
+            "source_event": "import",
+            "created_at": None,
+        },
+    }
+    assert github_pat == "ghp_test_secret"
+    return {"id": module_id, "status": "validated"}
+
+
 def _patch_services(monkeypatch):
     monkeypatch.setenv("DSPY_TRAINER_POSTGRES_DSN", "postgresql://postgres:postgres@localhost:5432/dspy_trainer")
     monkeypatch.setattr(main_mod.AppServices, "connect", fake_connect)
@@ -115,6 +147,7 @@ def _patch_services(monkeypatch):
     monkeypatch.setattr(main_mod.AppServices, "get_diagnostics", fake_get_diagnostics)
     monkeypatch.setattr(main_mod.AppServices, "get_module", fake_get_module)
     monkeypatch.setattr(main_mod.AppServices, "list_modules", fake_list_modules)
+    monkeypatch.setattr(main_mod.AppServices, "import_github_module", fake_import_github_module)
     monkeypatch.setattr(main_mod.AppServices, "set_module_bundle_metadata", fake_set_module_bundle_metadata)
     monkeypatch.setattr(main_mod.AppServices, "set_module_source_ref", fake_set_module_source_ref)
 
@@ -235,14 +268,9 @@ def test_module_import_and_list_include_git_revision_metadata(monkeypatch):
             "/modules/import",
             json={
                 "source": "github",
-                "source_ref": "https://github.com/example/demo-bundle",
-                "version_hash": "abc123",
                 "github_repo_url": "https://github.com/example/demo-bundle",
                 "github_branch": "main",
-                "checkout_path": "/tmp/dspy-trainer/checkouts/mod-1",
-                "current_commit_sha": "abc123",
-                "upstream_commit_sha": "abc123",
-                "sync_status": "synced",
+                "github_pat": "ghp_test_secret",
             },
         )
         assert created.status_code == 200
@@ -258,6 +286,32 @@ def test_module_import_and_list_include_git_revision_metadata(monkeypatch):
         assert payload["sync_status"] == "synced"
         assert payload["current_revision"]["id"] == "rev-1"
         assert payload["current_revision"]["commit_sha"] == "abc123"
+        assert "github_pat" not in payload
+
+
+def test_github_import_validation_error_returns_400(monkeypatch):
+    STORE.clear()
+    _patch_services(monkeypatch)
+
+    async def fake_invalid_import(self, github_repo_url, github_branch, github_pat):
+        del self, github_repo_url, github_branch, github_pat
+        raise ValueError("Validation failed with 1 error.")
+
+    monkeypatch.setattr(main_mod.AppServices, "import_github_module", fake_invalid_import)
+
+    with TestClient(main_mod.app) as client:
+        response = client.post(
+            "/modules/import",
+            json={
+                "source": "github",
+                "github_repo_url": "https://github.com/example/not-a-bundle",
+                "github_branch": "main",
+                "github_pat": "ghp_test_secret",
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "Validation failed with 1 error."
 
 
 def test_smoke_test_rerun_overwrites_status(monkeypatch):

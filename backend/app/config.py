@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     total_workers: int = Field(default=8)
 
     postgres_dsn: str = Field(default="")
+    checkout_root: str = Field(default="/tmp/dspy-trainer/checkouts")
 
     mlflow_tracking_uri: str = Field(default="http://localhost:5001")
     litellm_base_url: str = Field(default="http://localhost:4000")

@@ -11,9 +11,11 @@ from queue import Empty, Queue
 import random
 import re
 import shutil
+import subprocess
 import tomllib
 import traceback
 from typing import Any
+from urllib.parse import urlparse, urlunparse
 from uuid import uuid4
 
 import asyncpg
@@ -54,6 +56,33 @@ def _default_sync_status(
             return "pending_sync"
         return "import_pending"
     return "legacy"
+
+
+def _normalize_github_repo_url(repo_url: str) -> str:
+    raw = repo_url.strip()
+    if not raw:
+        raise ValueError("github_repo_url is required")
+    if raw.startswith("git@github.com:"):
+        path = raw.split(":", 1)[1]
+        normalized_path = path[:-4] if path.endswith(".git") else path
+        return f"https://github.com/{normalized_path}"
+    if raw.startswith("github.com/"):
+        raw = f"https://{raw}"
+    parsed = urlparse(raw)
+    if parsed.scheme != "https" or parsed.netloc != "github.com":
+        raise ValueError("github_repo_url must point to https://github.com/<owner>/<repo>")
+    normalized_path = parsed.path.rstrip("/")
+    if normalized_path.endswith(".git"):
+        normalized_path = normalized_path[:-4]
+    parts = [part for part in normalized_path.split("/") if part]
+    if len(parts) != 2:
+        raise ValueError("github_repo_url must point to a repository root")
+    return f"https://github.com/{parts[0]}/{parts[1]}"
+
+
+def _github_clone_url(repo_url: str, pat: str) -> str:
+    parsed = urlparse(repo_url)
+    return urlunparse(parsed._replace(netloc=f"x-access-token:{pat}@{parsed.netloc}"))
 
 
 def _run_bundle_optimization_subprocess(
@@ -788,22 +817,95 @@ class AppServices:
         )
         return revision_id
 
+    async def _run_git_command(self, args: list[str], *, cwd: Path | None = None) -> str:
+        def run() -> str:
+            completed = subprocess.run(
+                args,
+                cwd=str(cwd) if cwd is not None else None,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if completed.returncode != 0:
+                stderr = (completed.stderr or "").strip()
+                stdout = (completed.stdout or "").strip()
+                detail = stderr or stdout or "git command failed"
+                raise RuntimeError(detail)
+            return (completed.stdout or "").strip()
+
+        return await asyncio.to_thread(run)
+
+    async def import_github_module(self, github_repo_url: str, github_branch: str, github_pat: str) -> dict[str, Any]:
+        normalized_repo_url = _normalize_github_repo_url(github_repo_url)
+        normalized_branch = str(github_branch or "").strip()
+        normalized_pat = str(github_pat or "").strip()
+        if not normalized_branch:
+            raise ValueError("github_branch is required")
+        if not normalized_pat:
+            raise ValueError("github_pat is required")
+
+        module_id = str(uuid4())
+        checkout_root = Path(self.settings.checkout_root).expanduser().resolve()
+        checkout_root.mkdir(parents=True, exist_ok=True)
+        checkout_path = checkout_root / module_id
+        clone_url = _github_clone_url(normalized_repo_url, normalized_pat)
+        try:
+            await self._run_git_command(
+                ["git", "clone", "--depth", "1", "--branch", normalized_branch, clone_url, str(checkout_path)]
+            )
+            current_commit_sha = await self._run_git_command(["git", "rev-parse", "HEAD"], cwd=checkout_path)
+            report = validate_bundle(str(checkout_path))
+            if not report.passed:
+                raise ValueError(report.summary)
+
+            created = await self.create_module_import(
+                "github",
+                str(checkout_path),
+                current_commit_sha,
+                module_id=module_id,
+                github_repo_url=normalized_repo_url,
+                github_branch=normalized_branch,
+                checkout_path=str(checkout_path),
+                current_commit_sha=current_commit_sha,
+                upstream_commit_sha=current_commit_sha,
+                sync_status="synced",
+                bundle_name=report.metadata.get("name") if isinstance(report.metadata.get("name"), str) else None,
+                bundle_version=report.metadata.get("version") if isinstance(report.metadata.get("version"), str) else None,
+            )
+            found = await self.set_validation_status(module_id, "passed", report.diagnostics)
+            if not found:
+                raise RuntimeError("imported module could not be marked validated")
+            created["validation_status"] = "passed"
+            created["diagnostics"] = report.diagnostics
+            created["checkout_path"] = str(checkout_path)
+            created["github_repo_url"] = normalized_repo_url
+            created["github_branch"] = normalized_branch
+            created["current_commit_sha"] = current_commit_sha
+            return created
+        except Exception:
+            if checkout_path.exists():
+                shutil.rmtree(checkout_path, ignore_errors=True)
+            raise
+
     async def create_module_import(
         self,
         source: str,
         source_ref: str | None,
         version_hash: str | None,
         *,
+        module_id: str | None = None,
         github_repo_url: str | None = None,
         github_branch: str | None = None,
         checkout_path: str | None = None,
         current_commit_sha: str | None = None,
         upstream_commit_sha: str | None = None,
         sync_status: str | None = None,
+        bundle_name: str | None = None,
+        bundle_version: str | None = None,
     ) -> dict[str, Any]:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
-        module_id = str(uuid4())
+        module_id = str(module_id or uuid4())
         now = datetime.now(timezone.utc)
         normalized_source_ref = _clean_optional_text(source_ref)
         normalized_checkout_path = _clean_optional_text(checkout_path) or normalized_source_ref
@@ -823,6 +925,8 @@ class AppServices:
                   source,
                   source_ref,
                   version_hash,
+                  bundle_name,
+                  bundle_version,
                   github_repo_url,
                   github_branch,
                   checkout_path,
@@ -834,12 +938,14 @@ class AppServices:
                   created_at,
                   updated_at
                 )
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
                 """,
                 module_id,
                 source,
                 normalized_source_ref,
                 version_hash,
+                _clean_optional_text(bundle_name),
+                _clean_optional_text(bundle_version),
                 _clean_optional_text(github_repo_url),
                 _clean_optional_text(github_branch),
                 normalized_checkout_path,
@@ -867,8 +973,8 @@ class AppServices:
                 module_id,
                 commit_sha=normalized_current_commit_sha,
                 checkout_path=normalized_checkout_path,
-                bundle_name=None,
-                bundle_version=None,
+                bundle_name=bundle_name,
+                bundle_version=bundle_version,
                 source_event="import",
             )
         return {"id": module_id, "status": "imported", "current_revision_id": current_revision_id}

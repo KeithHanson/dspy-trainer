@@ -75,6 +75,7 @@ class ModuleImportRequest(BaseModel):
     version_hash: str | None = None
     github_repo_url: str | None = None
     github_branch: str | None = None
+    github_pat: str | None = None
     checkout_path: str | None = None
     current_commit_sha: str | None = None
     upstream_commit_sha: str | None = None
@@ -267,6 +268,19 @@ async def download_module_bundle_sample():
 @app.post("/modules/import")
 async def import_module(request: Request, payload: ModuleImportRequest):
     services: AppServices = request.app.state.services
+    if payload.source == "github":
+        try:
+            result = await services.import_github_module(
+                payload.github_repo_url or payload.source_ref or "",
+                payload.github_branch or "",
+                payload.github_pat or "",
+            )
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"error": str(exc)})
+        except RuntimeError as exc:
+            return JSONResponse(status_code=400, content={"error": str(exc)})
+        return {"id": result["id"], "status": result["status"]}
+
     result = await services.create_module_import(
         payload.source,
         payload.source_ref,

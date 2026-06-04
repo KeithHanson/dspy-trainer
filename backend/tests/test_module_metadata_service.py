@@ -154,3 +154,116 @@ def test_build_module_payload_includes_github_and_revision_metadata():
         "source_event": "sync",
         "created_at": None,
     }
+
+
+def test_import_github_module_clones_valid_bundle_and_persists_checkout(tmp_path):
+    services = AppServices(
+        Settings(
+            postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer",
+            checkout_root=str(tmp_path / "checkouts"),
+        )
+    )
+    captured: dict[str, Any] = {}
+
+    async def fake_run_git_command(args, *, cwd=None):
+        if args[:2] == ["git", "clone"]:
+            clone_target = Path(args[-1])
+            clone_target.mkdir(parents=True, exist_ok=True)
+            (clone_target / "module.py").write_text(
+                "import dspy\nclass Sig(dspy.Signature):\n  q=dspy.InputField()\n  a=dspy.OutputField()\n"
+                "class Agent(dspy.Module):\n  def forward(self, q: str):\n    return dspy.Prediction(a='x')\n"
+                "def build_program():\n  return Agent()\n",
+                encoding="utf-8",
+            )
+            (clone_target / "metric.py").write_text(
+                "def judge_metric(example, prediction, trace=None):\n  return True\n",
+                encoding="utf-8",
+            )
+            (clone_target / "bundle.toml").write_text(
+                "name='git-bundle'\nversion='1.2.3'\nscore_pass_threshold=0.8\n",
+                encoding="utf-8",
+            )
+            captured["clone_args"] = args
+            return ""
+        assert args[:3] == ["git", "rev-parse", "HEAD"]
+        assert cwd is not None
+        captured["rev_parse_cwd"] = str(cwd)
+        return "abc123"
+
+    async def fake_create_module_import(source, source_ref, version_hash, **kwargs):
+        captured["create_module_import"] = {
+            "source": source,
+            "source_ref": source_ref,
+            "version_hash": version_hash,
+            **kwargs,
+        }
+        return {"id": kwargs["module_id"], "status": "imported", "current_revision_id": "rev-1"}
+
+    async def fake_set_validation_status(module_id, status, diagnostics):
+        captured["validation"] = {
+            "module_id": module_id,
+            "status": status,
+            "diagnostics": diagnostics,
+        }
+        return True
+
+    services._run_git_command = fake_run_git_command  # type: ignore[method-assign]
+    services.create_module_import = fake_create_module_import  # type: ignore[method-assign]
+    services.set_validation_status = fake_set_validation_status  # type: ignore[method-assign]
+
+    result = asyncio.run(
+        services.import_github_module(
+            "https://github.com/example/demo-bundle.git",
+            "main",
+            "ghp_secret_value",
+        )
+    )
+
+    assert result["status"] == "imported"
+    assert result["validation_status"] == "passed"
+    assert result["github_repo_url"] == "https://github.com/example/demo-bundle"
+    assert result["github_branch"] == "main"
+    assert result["current_commit_sha"] == "abc123"
+    assert captured["create_module_import"]["source"] == "github"
+    assert captured["create_module_import"]["github_repo_url"] == "https://github.com/example/demo-bundle"
+    assert captured["create_module_import"]["bundle_name"] == "git-bundle"
+    assert captured["create_module_import"]["bundle_version"] == "1.2.3"
+    assert captured["validation"]["status"] == "passed"
+    assert "ghp_secret_value" in captured["clone_args"][6]
+    assert result.get("github_pat") is None
+
+
+def test_import_github_module_rejects_invalid_repo_root_and_cleans_checkout(tmp_path):
+    services = AppServices(
+        Settings(
+            postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer",
+            checkout_root=str(tmp_path / "checkouts"),
+        )
+    )
+
+    async def fake_run_git_command(args, *, cwd=None):
+        del cwd
+        if args[:2] == ["git", "clone"]:
+            clone_target = Path(args[-1])
+            clone_target.mkdir(parents=True, exist_ok=True)
+            (clone_target / "README.md").write_text("not a bundle", encoding="utf-8")
+            return ""
+        return "abc123"
+
+    services._run_git_command = fake_run_git_command  # type: ignore[method-assign]
+
+    try:
+        asyncio.run(
+            services.import_github_module(
+                "https://github.com/example/not-a-bundle",
+                "main",
+                "ghp_secret_value",
+            )
+        )
+    except ValueError as exc:
+        assert str(exc) == "Validation failed with 3 errors."
+    else:
+        raise AssertionError("expected import_github_module to reject invalid bundle root")
+
+    checkout_root = tmp_path / "checkouts"
+    assert list(checkout_root.glob("*")) == []
