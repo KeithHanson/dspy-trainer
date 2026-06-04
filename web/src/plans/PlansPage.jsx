@@ -165,7 +165,7 @@ function PlansList({ onCreate, onEdit, onRunNavigate, showSavedNotice }) {
         <header className="row between plans-head">
           <div className="col gap-1">
             <h1 className="t-display" style={{ fontSize: 22 }}>Evaluation Plans</h1>
-            <p className="muted t-sm">Question sets + expected answers for reusable agent checks.</p>
+            <p className="muted t-sm">Question sets + expected responses for reusable agent checks.</p>
           </div>
           <div className="row gap-2">
             <Button onClick={loadPlans} disabled={isLoading}>{isLoading ? "Refreshing..." : "Refresh"}</Button>
@@ -432,7 +432,7 @@ function PlanBuilder({ onBack, planId }) {
       return;
     }
     if (!filledRows.length) {
-      setValidationError("Add at least one question and expected answer.");
+      setValidationError("Add at least one question and expected response.");
       return;
     }
 
@@ -504,7 +504,7 @@ function PlanBuilder({ onBack, planId }) {
       <header className="page-head row between plans-builder-head">
         <div className="col gap-1">
           <h1 className="t-h1">{isEditing ? "Edit plan" : "New evaluation plan"}</h1>
-          <p className="cap">Define questions and expected answers, then tune stress configuration.</p>
+          <p className="cap">Define questions and expected responses, then tune stress configuration.</p>
         </div>
         <div className="row gap-2">
           <Button onClick={onBack}>Cancel</Button>
@@ -574,7 +574,7 @@ function PlanBuilder({ onBack, planId }) {
 
           <section className="panel card-pad plans-form-block">
             <div className="row between" style={{ marginBottom: 10 }}>
-              <div className="row gap-2"><h2 className="t-h2">Questions</h2><span className="plans-count">{filledRows.length}</span></div>
+              <div className="row gap-2"><h2 className="t-h2">Dataset</h2><span className="plans-count">{filledRows.length}</span></div>
               <div className="row gap-2">
                 <Button size="sm" onClick={() => setRows(SAMPLE_ROWS.map((row, idx) => ({ id: `sample-${idx}`, ...row })))}>Load sample set</Button>
                 <Button size="sm" variant="primary" onClick={() => setIsGeneratorOpen(true)}>Generate with LLM</Button>
@@ -585,14 +585,14 @@ function PlanBuilder({ onBack, planId }) {
               <div className="plans-row-head">
                 <span className="t-label">#</span>
                 <span className="t-label">Input prompt</span>
-                <span className="t-label">Expected answer</span>
+                <span className="t-label">Expected response</span>
                 <span />
               </div>
               {rows.map((row, index) => (
                 <div key={row.id} className="plans-row-edit">
                   <span className="cap mono">{index + 1}</span>
                   <textarea className="plans-textarea" rows={2} value={row.input} onChange={(event) => updateRow(row.id, "input", event.target.value)} placeholder="Input prompt" />
-                  <textarea className="plans-textarea" rows={2} value={row.expected} onChange={(event) => updateRow(row.id, "expected", event.target.value)} placeholder="Expected answer" />
+                  <textarea className="plans-textarea" rows={2} value={row.expected} onChange={(event) => updateRow(row.id, "expected", event.target.value)} placeholder="Expected response" />
                   <Button size="sm" variant="danger" onClick={() => deleteRow(row.id)}>Delete</Button>
                 </div>
               ))}
@@ -607,7 +607,7 @@ function PlanBuilder({ onBack, planId }) {
             <StepControl label="Max workers" value={workers} min={1} max={24} setValue={setWorkers} />
             <hr className="hr" />
             <div className="panel card-pad col gap-2">
-              <div className="row between"><span className="muted">Questions</span><span className="mono">{filledRows.length}</span></div>
+              <div className="row between"><span className="muted">Dataset</span><span className="mono">{filledRows.length}</span></div>
               <div className="row between"><span className="muted">x Runs per question</span><span className="mono">{runs}</span></div>
               <hr className="hr" />
               <div className="row between"><span>Total tasks</span><span className="mono">{totalTasks}</span></div>
@@ -643,7 +643,7 @@ function PlanBuilder({ onBack, planId }) {
 
             <label className="col gap-1" style={{ marginBottom: 12 }}>
               <span className="t-label">What data do you need?</span>
-              <textarea className="plans-textarea" rows={5} value={generatorPrompt} onChange={(event) => setGeneratorPrompt(event.target.value)} placeholder="Explain the kinds of questions and expected answers you want generated." />
+              <textarea className="plans-textarea" rows={5} value={generatorPrompt} onChange={(event) => setGeneratorPrompt(event.target.value)} placeholder="Explain the kinds of questions and expected responses you want generated." />
             </label>
 
             <div className="row gap-2" style={{ marginBottom: 12 }}>
@@ -659,7 +659,7 @@ function PlanBuilder({ onBack, planId }) {
                 <div className="plans-row-head">
                   <span className="t-label">#</span>
                   <span className="t-label">Input prompt</span>
-                  <span className="t-label">Expected answer</span>
+                  <span className="t-label">Expected response</span>
                 </div>
                 <div className="plans-generated-preview-scroll">
                   {generatedRowsPreview.map((row, index) => (

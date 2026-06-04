@@ -76,7 +76,7 @@ describe("PlansPage", () => {
     await userEvent.type(await screen.findByLabelText("Plan name"), "Triage v4");
     await userEvent.selectOptions(screen.getByLabelText("Runtime model profile"), "lm-1");
     await userEvent.type(screen.getByPlaceholderText("Input prompt"), "What is the refund policy?");
-    await userEvent.type(screen.getByPlaceholderText("Expected answer"), "Provide refund window details");
+    await userEvent.type(screen.getByPlaceholderText("Expected response"), "Provide refund window details");
     await userEvent.click(screen.getByRole("button", { name: "Save & run" }));
 
     expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/evaluation-plans$/), expect.objectContaining({ method: "POST" }));
@@ -152,7 +152,7 @@ describe("PlansPage", () => {
 
     await userEvent.type(await screen.findByLabelText("Plan name"), "No LM Profile");
     await userEvent.type(screen.getByPlaceholderText("Input prompt"), "Question?");
-    await userEvent.type(screen.getByPlaceholderText("Expected answer"), "Answer");
+    await userEvent.type(screen.getByPlaceholderText("Expected response"), "Answer");
     await userEvent.click(screen.getByRole("button", { name: "Save" }));
 
     expect(await screen.findByText("Select an LM profile.")).toBeInTheDocument();
