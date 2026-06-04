@@ -407,6 +407,14 @@ button { font-family: inherit; }
   font-family: var(--mono);
   resize: vertical;
 }
+.plans-generated-preview-wrap { min-height: 0; }
+.plans-generated-preview-scroll {
+  max-height: 420px;
+  overflow: auto;
+  display: grid;
+  gap: 8px;
+  padding-right: 4px;
+}
 .plans-rail {
   width: 312px;
   flex: none;

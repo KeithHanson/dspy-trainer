@@ -387,7 +387,7 @@ function PlanBuilder({ onBack, planId }) {
           lm_profile_id: generatorLmProfileId,
           operator_prompt: generatorPrompt,
           existing_rows: filledRows.map((row) => ({ input: { question: row.input }, label: { expected: row.expected } })),
-          max_rows: 5,
+          max_rows: 25,
         }),
       });
       if (!response.ok) {
@@ -654,20 +654,22 @@ function PlanBuilder({ onBack, planId }) {
             {generationError ? <div className="plans-validation-alert" role="alert"><p className="plans-validation-copy">{generationError}</p></div> : null}
 
             {generatedRowsPreview.length ? (
-              <div className="col gap-2">
+              <div className="col gap-2 plans-generated-preview-wrap">
                 <div className="t-h2">Preview</div>
                 <div className="plans-row-head">
                   <span className="t-label">#</span>
                   <span className="t-label">Input prompt</span>
                   <span className="t-label">Expected answer</span>
                 </div>
-                {generatedRowsPreview.map((row, index) => (
-                  <div key={row.id} className="plans-row-edit">
-                    <span className="cap mono">{index + 1}</span>
-                    <textarea className="plans-textarea" rows={2} value={row.input} readOnly />
-                    <textarea className="plans-textarea" rows={2} value={row.expected} readOnly />
-                  </div>
-                ))}
+                <div className="plans-generated-preview-scroll">
+                  {generatedRowsPreview.map((row, index) => (
+                    <div key={row.id} className="plans-row-edit">
+                      <span className="cap mono">{index + 1}</span>
+                      <textarea className="plans-textarea" rows={2} value={row.input} readOnly />
+                      <textarea className="plans-textarea" rows={2} value={row.expected} readOnly />
+                    </div>
+                  ))}
+                </div>
               </div>
             ) : null}
           </div>
