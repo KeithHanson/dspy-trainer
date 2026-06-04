@@ -110,7 +110,7 @@ async def fake_list_modules(self):
     return list(STORE.values())
 
 
-async def fake_import_github_module(self, github_repo_url, github_branch, github_pat):
+async def fake_import_github_module(self, github_repo_url, github_branch):
     module_id = "mod-1"
     STORE[module_id] = {
         "id": module_id,
@@ -138,12 +138,10 @@ async def fake_import_github_module(self, github_repo_url, github_branch, github
             "created_at": None,
         },
     }
-    assert github_pat == "ghp_test_secret"
     return {"id": module_id, "status": "validated"}
 
 
-async def fake_refresh_module_sync_status(self, module_id, github_pat):
-    assert github_pat == "ghp_test_secret"
+async def fake_refresh_module_sync_status(self, module_id):
     module = STORE.get(module_id)
     if module is None:
         raise ValueError("module not found")
@@ -158,8 +156,8 @@ async def fake_refresh_module_sync_status(self, module_id, github_pat):
     }
 
 
-async def fake_sync_module(self, module_id, github_pat):
-    state = await fake_refresh_module_sync_status(self, module_id, github_pat)
+async def fake_sync_module(self, module_id):
+    state = await fake_refresh_module_sync_status(self, module_id)
     module = STORE[module_id]
     if state["sync_status"] != "behind":
         raise ModuleSyncError("module is not eligible for fast-forward sync", sync_state=state)
@@ -173,8 +171,8 @@ async def fake_sync_module(self, module_id, github_pat):
     }
 
 
-async def fake_ensure_module_mutation_allowed(self, module_id, github_pat):
-    state = await fake_refresh_module_sync_status(self, module_id, github_pat)
+async def fake_ensure_module_mutation_allowed(self, module_id):
+    state = await fake_refresh_module_sync_status(self, module_id)
     if state["sync_status"] in {"behind", "diverged", "sync_error"}:
         raise ModuleSyncError("module has upstream changes that must be synced before mutation", sync_state=state)
     return state
@@ -317,7 +315,6 @@ def test_module_import_and_list_include_git_revision_metadata(monkeypatch):
                 "source": "github",
                 "github_repo_url": "https://github.com/example/demo-bundle",
                 "github_branch": "main",
-                "github_pat": "ghp_test_secret",
             },
         )
         assert created.status_code == 200
@@ -340,8 +337,8 @@ def test_github_import_validation_error_returns_400(monkeypatch):
     STORE.clear()
     _patch_services(monkeypatch)
 
-    async def fake_invalid_import(self, github_repo_url, github_branch, github_pat):
-        del self, github_repo_url, github_branch, github_pat
+    async def fake_invalid_import(self, github_repo_url, github_branch):
+        del self, github_repo_url, github_branch
         raise ValueError("Validation failed with 1 error.")
 
     monkeypatch.setattr(main_mod.AppServices, "import_github_module", fake_invalid_import)
@@ -353,7 +350,6 @@ def test_github_import_validation_error_returns_400(monkeypatch):
                 "source": "github",
                 "github_repo_url": "https://github.com/example/not-a-bundle",
                 "github_branch": "main",
-                "github_pat": "ghp_test_secret",
             },
         )
 
@@ -380,12 +376,12 @@ def test_module_sync_status_refresh_and_sync(monkeypatch):
         assert cached.status_code == 200
         assert cached.json()["sync_status"] == "behind"
 
-        refreshed = client.post("/modules/mod-1/sync-status", json={"github_pat": "ghp_test_secret"})
+        refreshed = client.post("/modules/mod-1/sync-status", json={})
         assert refreshed.status_code == 200
         assert refreshed.json()["sync_status"] == "behind"
         assert refreshed.json()["upstream_commit_sha"] == "def456"
 
-        synced = client.post("/modules/mod-1/sync", json={"github_pat": "ghp_test_secret"})
+        synced = client.post("/modules/mod-1/sync", json={})
         assert synced.status_code == 200
         assert synced.json()["sync_status"] == "synced"
         assert synced.json()["current_commit_sha"] == "def456"
@@ -416,7 +412,7 @@ def test_github_module_metadata_update_is_blocked_when_behind(monkeypatch):
     with TestClient(main_mod.app) as client:
         response = client.patch(
             "/modules/mod-1",
-            json={"bundle_name": "after-name", "bundle_version": "2.0.0", "github_pat": "ghp_test_secret"},
+            json={"bundle_name": "after-name", "bundle_version": "2.0.0"},
         )
 
     assert response.status_code == 409

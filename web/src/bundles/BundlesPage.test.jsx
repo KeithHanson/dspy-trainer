@@ -5,7 +5,8 @@ import { vi } from "vitest";
 import { BundlesPage } from "./BundlesPage";
 
 describe("BundlesPage", () => {
-  it("shows github import panel when import query is present", () => {
+  it("shows github import panel when import query is present", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ github: { configured: true } }) })));
     render(
       <MemoryRouter initialEntries={["/bundles?import=1"]}>
         <BundlesPage />
@@ -15,10 +16,16 @@ describe("BundlesPage", () => {
     expect(screen.getByText("Step 2: Import and validate GitHub bundle")).toBeInTheDocument();
     expect(screen.queryByText("Example bundle")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Bundle zip")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("GitHub personal access token")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText(/GitHub access is configured/)).toBeInTheDocument());
+    vi.unstubAllGlobals();
   });
 
   it("submits github import flow and renders diagnostics", async () => {
     const fetchMock = vi.fn((url) => {
+      if (String(url).endsWith("/ready")) {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ github: { configured: true } }) });
+      }
       if (String(url).endsWith("/modules/import")) {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ id: "mod-1", status: "imported" }) });
       }
@@ -50,7 +57,6 @@ describe("BundlesPage", () => {
     await userEvent.type(screen.getByLabelText("GitHub repository URL"), "https://github.com/example/repo-bundle");
     await userEvent.clear(screen.getByLabelText("Branch"));
     await userEvent.type(screen.getByLabelText("Branch"), "main");
-    await userEvent.type(screen.getByLabelText("GitHub personal access token"), "ghp_test_secret");
     fireEvent.submit(screen.getByRole("button", { name: "Import + validate" }).closest("form"));
 
     await waitFor(() => expect(screen.getByText("Validation result")).toBeInTheDocument());
@@ -62,6 +68,9 @@ describe("BundlesPage", () => {
 
   it("renders github import validation errors", async () => {
     const fetchMock = vi.fn((url, init) => {
+      if (String(url).endsWith("/ready")) {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ github: { configured: true } }) });
+      }
       if (String(url).endsWith("/modules") && (!init || init.method === "GET")) {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
       }
@@ -81,7 +90,6 @@ describe("BundlesPage", () => {
     await userEvent.type(screen.getByLabelText("GitHub repository URL"), "https://github.com/example/not-a-bundle");
     await userEvent.clear(screen.getByLabelText("Branch"));
     await userEvent.type(screen.getByLabelText("Branch"), "main");
-    await userEvent.type(screen.getByLabelText("GitHub personal access token"), "ghp_test_secret");
     fireEvent.submit(screen.getByRole("button", { name: "Import + validate" }).closest("form"));
 
     await waitFor(() => expect(screen.getByText("Import failed")).toBeInTheDocument());
@@ -90,8 +98,35 @@ describe("BundlesPage", () => {
     vi.unstubAllGlobals();
   });
 
+  it("shows missing github configuration message", async () => {
+    const fetchMock = vi.fn((url) => {
+      if (String(url).endsWith("/ready")) {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ github: { configured: false } }) });
+      }
+      if (String(url).endsWith("/modules")) {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter initialEntries={["/bundles?import=1"]}>
+        <BundlesPage />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByText(/GitHub access is not configured/)).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Import + validate" })).toBeDisabled();
+
+    vi.unstubAllGlobals();
+  });
+
   it("handles non-array diagnostics when viewing saved bundle", async () => {
     const fetchMock = vi.fn((url) => {
+      if (String(url).endsWith("/ready")) {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ github: { configured: true } }) });
+      }
       if (String(url).endsWith("/modules")) {
         return Promise.resolve({
           ok: true,
@@ -124,6 +159,9 @@ describe("BundlesPage", () => {
 
   it("updates bundle name and version from bundle edit modal", async () => {
     const fetchMock = vi.fn((url, init) => {
+      if (String(url).endsWith("/ready")) {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ github: { configured: true } }) });
+      }
       if (String(url).endsWith("/modules") && (!init || init.method === "GET")) {
         return Promise.resolve({
           ok: true,
@@ -182,6 +220,9 @@ describe("BundlesPage", () => {
   it("reloads bundle files when a file button is clicked", async () => {
     let fileFetchCount = 0;
     const fetchMock = vi.fn((url, init) => {
+      if (String(url).endsWith("/ready")) {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ github: { configured: true } }) });
+      }
       if (String(url).endsWith("/modules") && (!init || init.method === "GET")) {
         return Promise.resolve({
           ok: true,

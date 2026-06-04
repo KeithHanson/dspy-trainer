@@ -90,6 +90,7 @@ services:
       DSPY_TRAINER_MLFLOW_TRACKING_URI: http://mlflow:5000
       DSPY_TRAINER_LITELLM_BASE_URL: http://litellm-proxy:4000
       DSPY_TRAINER_LITELLM_API_KEY: ${LITELLM_MASTER_KEY:-sk-local-dev-master-key}
+      DSPY_TRAINER_GITHUB_PAT: ${GITHUB_PAT:-}
       DSPY_TRAINER_BACKEND_HOST: 0.0.0.0
       DSPY_TRAINER_BACKEND_PORT: 8000
     depends_on:
@@ -142,6 +143,7 @@ services:
       DSPY_TRAINER_MLFLOW_TRACKING_URI: http://mlflow:5000
       DSPY_TRAINER_LITELLM_BASE_URL: http://litellm-proxy:4000
       DSPY_TRAINER_LITELLM_API_KEY: ${LITELLM_MASTER_KEY:-sk-local-dev-master-key}
+      DSPY_TRAINER_GITHUB_PAT: ${GITHUB_PAT:-}
     depends_on:
       postgres:
         condition: service_healthy

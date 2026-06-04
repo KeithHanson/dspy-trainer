@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import json
 import logging
 import multiprocessing
+import os
 from pathlib import Path
 from queue import Empty, Queue
 import random
@@ -875,6 +876,15 @@ class AppServices:
 
         return await asyncio.to_thread(run)
 
+    def github_pat_configured(self) -> bool:
+        return bool(str(os.getenv("DSPY_TRAINER_GITHUB_PAT") or self.settings.github_pat or os.getenv("GITHUB_PAT") or "").strip())
+
+    def _require_github_pat(self) -> str:
+        configured = str(os.getenv("DSPY_TRAINER_GITHUB_PAT") or self.settings.github_pat or os.getenv("GITHUB_PAT") or "").strip()
+        if not configured:
+            raise ValueError("GitHub access is not configured. Set DSPY_TRAINER_GITHUB_PAT or GITHUB_PAT in the container environment and restart backend/worker.")
+        return configured
+
     async def _get_module_source_record(self, module_id: str) -> dict[str, Any] | None:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
@@ -962,14 +972,12 @@ class AppServices:
             "bundle_name": str(module.get("bundle_name") or current_revision.get("bundle_name") or "").strip() or None,
         }
 
-    async def import_github_module(self, github_repo_url: str, github_branch: str, github_pat: str) -> dict[str, Any]:
+    async def import_github_module(self, github_repo_url: str, github_branch: str) -> dict[str, Any]:
         normalized_repo_url = _normalize_github_repo_url(github_repo_url)
         normalized_branch = str(github_branch or "").strip()
-        normalized_pat = str(github_pat or "").strip()
+        normalized_pat = self._require_github_pat()
         if not normalized_branch:
             raise ValueError("github_branch is required")
-        if not normalized_pat:
-            raise ValueError("github_pat is required")
 
         module_id = str(uuid4())
         checkout_root = Path(self.settings.checkout_root).expanduser().resolve()
@@ -1014,7 +1022,7 @@ class AppServices:
                 shutil.rmtree(checkout_path, ignore_errors=True)
             raise
 
-    async def refresh_module_sync_status(self, module_id: str, github_pat: str) -> dict[str, Any]:
+    async def refresh_module_sync_status(self, module_id: str) -> dict[str, Any]:
         module = await self._get_module_source_record(module_id)
         if module is None:
             raise ValueError("module not found")
@@ -1029,9 +1037,7 @@ class AppServices:
                 "last_sync_error": module.get("last_sync_error"),
             }
 
-        normalized_pat = str(github_pat or "").strip()
-        if not normalized_pat:
-            raise ValueError("github_pat is required")
+        normalized_pat = self._require_github_pat()
 
         repo_url = str(module.get("github_repo_url") or "").strip()
         branch = str(module.get("github_branch") or "").strip()
@@ -1085,8 +1091,8 @@ class AppServices:
                 },
             )
 
-    async def sync_module(self, module_id: str, github_pat: str) -> dict[str, Any]:
-        sync_state = await self.refresh_module_sync_status(module_id, github_pat)
+    async def sync_module(self, module_id: str) -> dict[str, Any]:
+        sync_state = await self.refresh_module_sync_status(module_id)
         module = await self._get_module_source_record(module_id)
         if module is None:
             raise ValueError("module not found")
@@ -1100,7 +1106,7 @@ class AppServices:
                 sync_state=sync_state,
             )
 
-        normalized_pat = str(github_pat or "").strip()
+        normalized_pat = self._require_github_pat()
         repo_url = str(module.get("github_repo_url") or "").strip()
         branch = str(module.get("github_branch") or "").strip()
         checkout_path = Path(str(module.get("checkout_path") or "").strip()).expanduser().resolve()
@@ -1162,8 +1168,8 @@ class AppServices:
                 },
             )
 
-    async def ensure_module_mutation_allowed(self, module_id: str, github_pat: str) -> dict[str, Any]:
-        sync_state = await self.refresh_module_sync_status(module_id, github_pat)
+    async def ensure_module_mutation_allowed(self, module_id: str) -> dict[str, Any]:
+        sync_state = await self.refresh_module_sync_status(module_id)
         if sync_state["sync_status"] in {"behind", "diverged", "sync_error"}:
             raise ModuleSyncError(
                 "module has upstream changes that must be synced before mutation",

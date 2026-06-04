@@ -1,4 +1,5 @@
 import asyncio
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -157,6 +158,8 @@ def test_build_module_payload_includes_github_and_revision_metadata():
 
 
 def test_import_github_module_clones_valid_bundle_and_persists_checkout(tmp_path):
+    previous_github_pat = os.environ.get("GITHUB_PAT")
+    os.environ["GITHUB_PAT"] = "ghp_secret_value"
     services = AppServices(
         Settings(
             postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer",
@@ -211,13 +214,18 @@ def test_import_github_module_clones_valid_bundle_and_persists_checkout(tmp_path
     services.create_module_import = fake_create_module_import  # type: ignore[method-assign]
     services.set_validation_status = fake_set_validation_status  # type: ignore[method-assign]
 
-    result = asyncio.run(
-        services.import_github_module(
-            "https://github.com/example/demo-bundle.git",
-            "main",
-            "ghp_secret_value",
+    try:
+        result = asyncio.run(
+            services.import_github_module(
+                "https://github.com/example/demo-bundle.git",
+                "main",
+            )
         )
-    )
+    finally:
+        if previous_github_pat is None:
+            os.environ.pop("GITHUB_PAT", None)
+        else:
+            os.environ["GITHUB_PAT"] = previous_github_pat
 
     assert result["status"] == "imported"
     assert result["validation_status"] == "passed"
@@ -229,11 +237,13 @@ def test_import_github_module_clones_valid_bundle_and_persists_checkout(tmp_path
     assert captured["create_module_import"]["bundle_name"] == "git-bundle"
     assert captured["create_module_import"]["bundle_version"] == "1.2.3"
     assert captured["validation"]["status"] == "passed"
-    assert "ghp_secret_value" in captured["clone_args"][6]
+    assert "x-access-token:" in captured["clone_args"][6]
     assert result.get("github_pat") is None
 
 
 def test_import_github_module_rejects_invalid_repo_root_and_cleans_checkout(tmp_path):
+    previous_github_pat = os.environ.get("GITHUB_PAT")
+    os.environ["GITHUB_PAT"] = "ghp_secret_value"
     services = AppServices(
         Settings(
             postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer",
@@ -253,17 +263,22 @@ def test_import_github_module_rejects_invalid_repo_root_and_cleans_checkout(tmp_
     services._run_git_command = fake_run_git_command  # type: ignore[method-assign]
 
     try:
-        asyncio.run(
-            services.import_github_module(
-                "https://github.com/example/not-a-bundle",
-                "main",
-                "ghp_secret_value",
+        try:
+            asyncio.run(
+                services.import_github_module(
+                    "https://github.com/example/not-a-bundle",
+                    "main",
+                )
             )
-        )
-    except ValueError as exc:
-        assert str(exc) == "Validation failed with 3 errors."
-    else:
-        raise AssertionError("expected import_github_module to reject invalid bundle root")
+        except ValueError as exc:
+            assert str(exc) == "Validation failed with 3 errors."
+        else:
+            raise AssertionError("expected import_github_module to reject invalid bundle root")
+    finally:
+        if previous_github_pat is None:
+            os.environ.pop("GITHUB_PAT", None)
+        else:
+            os.environ["GITHUB_PAT"] = previous_github_pat
 
     checkout_root = tmp_path / "checkouts"
     assert list(checkout_root.glob("*")) == []

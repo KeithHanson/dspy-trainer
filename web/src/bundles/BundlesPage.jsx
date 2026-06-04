@@ -160,7 +160,7 @@ function buildApiUrl(path) {
 const IMPORT_GUIDANCE = [
   "Repository root must contain module.py, metric.py, and bundle.toml.",
   "The configured branch is cloned exactly as-is; subdirectories are not supported.",
-  "The PAT is used only for this request so the backend can clone and validate the repo.",
+  "GitHub access is provided by the backend environment; the browser never collects the token.",
   "Import fails immediately if the repo root does not satisfy the bundle contract.",
 ];
 
@@ -512,17 +512,51 @@ async function parseError(response, fallback) {
 function GitHubImportPanel({ modulesUrl, onBack, onCreatePlan }) {
   const [githubRepoUrl, setGithubRepoUrl] = useState("");
   const [githubBranch, setGithubBranch] = useState("main");
-  const [githubPat, setGithubPat] = useState("");
+  const [githubConfigured, setGithubConfigured] = useState(null);
+  const [githubConfigMessage, setGithubConfigMessage] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState("");
   const [result, setResult] = useState(null);
   const [activeHelpCheck, setActiveHelpCheck] = useState(null);
   const [copied, setCopied] = useState(false);
 
+  useEffect(() => {
+    let cancelled = false;
+    const loadReadyState = async () => {
+      try {
+        const response = await fetch(buildApiUrl("/ready"), { method: "GET" });
+        const payload = await response.json();
+        if (cancelled) {
+          return;
+        }
+        const configured = Boolean(payload?.github?.configured);
+        setGithubConfigured(configured);
+        setGithubConfigMessage(
+          configured
+            ? "GitHub access is configured in the backend environment."
+            : "GitHub access is not configured. Set GITHUB_PAT or DSPY_TRAINER_GITHUB_PAT in .env, then restart backend and worker containers.",
+        );
+      } catch {
+        if (!cancelled) {
+          setGithubConfigured(false);
+          setGithubConfigMessage("Could not verify GitHub access configuration from the backend.");
+        }
+      }
+    };
+    loadReadyState();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const onSubmit = async (event) => {
     event.preventDefault();
-    if (!githubRepoUrl.trim() || !githubBranch.trim() || !githubPat.trim()) {
-      setSubmitError("Repository URL, branch, and PAT are required.");
+    if (!githubConfigured) {
+      setSubmitError("GitHub access is not configured in the backend environment.");
+      return;
+    }
+    if (!githubRepoUrl.trim() || !githubBranch.trim()) {
+      setSubmitError("Repository URL and branch are required.");
       return;
     }
     setIsSubmitting(true);
@@ -536,7 +570,6 @@ function GitHubImportPanel({ modulesUrl, onBack, onCreatePlan }) {
           source: "github",
           github_repo_url: githubRepoUrl.trim(),
           github_branch: githubBranch.trim(),
-          github_pat: githubPat,
         }),
       });
       if (!importResp.ok) {
@@ -572,7 +605,13 @@ function GitHubImportPanel({ modulesUrl, onBack, onCreatePlan }) {
         <h2 className="t-h2">Step 2: Import and validate GitHub bundle</h2>
         <Button variant="ghost" size="sm" onClick={onBack}>Back</Button>
       </div>
-      <p className="cap" style={{ marginBottom: 14 }}>Import a GitHub repo root that already matches the bundle contract. The PAT is used for this request only.</p>
+      <p className="cap" style={{ marginBottom: 14 }}>Import a GitHub repo root that already matches the bundle contract. GitHub access is configured server-side only.</p>
+      {githubConfigMessage ? (
+        <div className="field-help row gap-2" role="status" style={{ marginBottom: 14 }}>
+          <Icon name="info" size={13} className="field-help-icon" />
+          <span className="cap field-help-copy">{githubConfigMessage}</span>
+        </div>
+      ) : null}
 
       <form className="bundles-form col gap-2" onSubmit={onSubmit}>
         <label className="bundles-label" htmlFor="github-repo-url">GitHub repository URL</label>
@@ -597,19 +636,8 @@ function GitHubImportPanel({ modulesUrl, onBack, onCreatePlan }) {
           required
         />
 
-        <label className="bundles-label" htmlFor="github-pat">GitHub personal access token</label>
-        <input
-          id="github-pat"
-          className="bundles-file-input"
-          type="password"
-          placeholder="ghp_..."
-          value={githubPat}
-          onChange={(event) => setGithubPat(event.target.value)}
-          required
-        />
-
         <div className="row" style={{ marginTop: 8 }}>
-          <button className="btn btn-primary" type="submit" disabled={isSubmitting || !githubRepoUrl.trim() || !githubBranch.trim() || !githubPat.trim()}>{isSubmitting ? "Importing..." : "Import + validate"}</button>
+          <button className="btn btn-primary" type="submit" disabled={isSubmitting || !githubConfigured || !githubRepoUrl.trim() || !githubBranch.trim()}>{isSubmitting ? "Importing..." : "Import + validate"}</button>
         </div>
       </form>
 

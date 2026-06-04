@@ -272,8 +272,7 @@ async def fake_get_module(self, module_id):
     return MODULE_DETAILS.get(module_id)
 
 
-async def fake_ensure_module_mutation_allowed(self, module_id, github_pat):
-    assert github_pat == "ghp_test_secret"
+async def fake_ensure_module_mutation_allowed(self, module_id):
     module = MODULE_DETAILS.get(module_id)
     if module is None:
         raise ValueError("module not found")
@@ -458,7 +457,7 @@ def test_optimization_job_create_get_run_cancel(monkeypatch):
 
         materialized = client.post(
             f"/optimization/jobs/{job_id}/materialize-bundle",
-            json={"bundle_name": "Echo-optimized-opt-1", "bundle_version": "2.0.0", "github_pat": "ghp_test_secret"},
+            json={"bundle_name": "Echo-optimized-opt-1", "bundle_version": "2.0.0"},
         )
         assert materialized.status_code == 200
         assert materialized.json()["bundle_name"] == f"Echo-optimized-{job_id}"
@@ -602,7 +601,7 @@ def test_materialize_bundle_rejects_github_module_when_behind(monkeypatch):
     with TestClient(main_mod.app) as client:
         response = client.post(
             "/optimization/jobs/opt-succeeded/materialize-bundle",
-            json={"bundle_name": "x", "github_pat": "ghp_test_secret"},
+            json={"bundle_name": "x"},
         )
 
     assert response.status_code == 409

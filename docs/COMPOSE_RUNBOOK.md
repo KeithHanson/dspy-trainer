@@ -24,6 +24,8 @@ Named volumes:
 
 ## Developer Bootstrap
 
+Before starting the stack, ensure `.env` contains `GITHUB_PAT` if you want to import, sync, or push GitHub-backed bundles. Backend and worker read that variable server-side; the web UI only reports whether GitHub access is configured.
+
 Run from repository root:
 
 ```bash
@@ -112,6 +114,7 @@ curl -fsS -H "Authorization: Bearer ${LITELLM_MASTER_KEY:-sk-local-dev-master-ke
 docker compose exec -T backend python -c "import os, redis; redis.Redis.from_url(os.environ['DSPY_TRAINER_REDIS_URL']).ping(); print('redis ok')"
 docker compose exec -T backend python -c "import os, urllib.request; urllib.request.urlopen(os.environ['DSPY_TRAINER_MLFLOW_TRACKING_URI'], timeout=5); print('mlflow ok')"
 docker compose exec -T backend python -c "import os, urllib.request; req=urllib.request.Request(os.environ['DSPY_TRAINER_LITELLM_BASE_URL'] + '/health', headers={'Authorization':'Bearer ' + os.environ['DSPY_TRAINER_LITELLM_API_KEY']}); urllib.request.urlopen(req, timeout=5); print('litellm ok')"
+docker compose exec -T backend python -c "import os; print('github ok' if (os.environ.get('DSPY_TRAINER_GITHUB_PAT') or os.environ.get('GITHUB_PAT')) else 'github missing')"
 ```
 
 ## Troubleshooting
@@ -183,6 +186,27 @@ docker compose restart backend
 
 ```bash
 docker compose build --pull backend worker
+docker compose up -d --force-recreate backend worker
+```
+
+### GitHub Bundle Access Not Configured
+
+Symptoms:
+- Bundles page says GitHub access is not configured.
+- `POST /modules/import` for `source=github` fails with a GitHub access configuration error.
+
+Checks:
+
+```bash
+docker compose exec -T backend python -c "import os; print(bool(os.environ.get('DSPY_TRAINER_GITHUB_PAT') or os.environ.get('GITHUB_PAT')))"
+docker compose exec -T worker python -c "import os; print(bool(os.environ.get('DSPY_TRAINER_GITHUB_PAT') or os.environ.get('GITHUB_PAT')))"
+```
+
+Remediation:
+- Add `GITHUB_PAT` to `.env`.
+- Recreate backend and worker so they pick up the new env:
+
+```bash
 docker compose up -d --force-recreate backend worker
 ```
 

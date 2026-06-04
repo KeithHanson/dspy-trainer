@@ -75,7 +75,6 @@ class ModuleImportRequest(BaseModel):
     version_hash: str | None = None
     github_repo_url: str | None = None
     github_branch: str | None = None
-    github_pat: str | None = None
     checkout_path: str | None = None
     current_commit_sha: str | None = None
     upstream_commit_sha: str | None = None
@@ -95,11 +94,10 @@ class SmokeTestRequest(BaseModel):
 class ModuleMetadataUpdateRequest(BaseModel):
     bundle_name: str | None = None
     bundle_version: str | None = None
-    github_pat: str | None = None
 
 
 class ModuleSyncRequest(BaseModel):
-    github_pat: str
+    force: bool | None = None
 
 
 class OptimizationJobCreateRequest(BaseModel):
@@ -151,7 +149,6 @@ class OptimizationDatasetDeriveRequest(BaseModel):
 class MaterializeOptimizedBundleRequest(BaseModel):
     bundle_name: str | None = None
     bundle_version: str | None = None
-    github_pat: str | None = None
 
 
 class AgentRunPlanCreateRequest(BaseModel):
@@ -244,6 +241,9 @@ async def ready(request: Request):
             "mlflow": status.mlflow,
             "litellm": status.litellm,
         },
+        "github": {
+            "configured": services.github_pat_configured(),
+        },
     }
     if status.ok:
         return payload
@@ -279,7 +279,6 @@ async def import_module(request: Request, payload: ModuleImportRequest):
             result = await services.import_github_module(
                 payload.github_repo_url or payload.source_ref or "",
                 payload.github_branch or "",
-                payload.github_pat or "",
             )
         except ValueError as exc:
             return JSONResponse(status_code=400, content={"error": str(exc)})
@@ -324,7 +323,7 @@ async def update_module(module_id: str, request: Request, payload: ModuleMetadat
         return JSONResponse(status_code=404, content={"error": "module not found"})
     if current.get("source") == "github":
         try:
-            await services.ensure_module_mutation_allowed(module_id, payload.github_pat or "")
+            await services.ensure_module_mutation_allowed(module_id)
         except ValueError as exc:
             return JSONResponse(status_code=400, content={"error": str(exc)})
         except ModuleSyncError as exc:
@@ -364,7 +363,7 @@ async def get_module_sync_status(module_id: str, request: Request):
 async def refresh_module_sync_status(module_id: str, request: Request, payload: ModuleSyncRequest):
     services: AppServices = request.app.state.services
     try:
-        return await services.refresh_module_sync_status(module_id, payload.github_pat)
+        return await services.refresh_module_sync_status(module_id)
     except ValueError as exc:
         status_code = 404 if str(exc) == "module not found" else 400
         return JSONResponse(status_code=status_code, content={"error": str(exc)})
@@ -376,7 +375,7 @@ async def refresh_module_sync_status(module_id: str, request: Request, payload: 
 async def sync_module(module_id: str, request: Request, payload: ModuleSyncRequest):
     services: AppServices = request.app.state.services
     try:
-        return await services.sync_module(module_id, payload.github_pat)
+        return await services.sync_module(module_id)
     except ValueError as exc:
         status_code = 404 if str(exc) == "module not found" else 400
         return JSONResponse(status_code=status_code, content={"error": str(exc)})
@@ -639,7 +638,7 @@ async def materialize_optimized_bundle(
         source_module = await services.get_module(module_id)
         if source_module is not None and source_module.get("source") == "github":
             try:
-                await services.ensure_module_mutation_allowed(module_id, payload.github_pat or "")
+                await services.ensure_module_mutation_allowed(module_id)
             except ValueError as exc:
                 return JSONResponse(status_code=400, content={"error": str(exc)})
             except ModuleSyncError as exc:
