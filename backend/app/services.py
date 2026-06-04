@@ -860,6 +860,17 @@ class AppServices:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
         async with self.postgres_pool.acquire() as conn:
+            row = await conn.fetchrow("select source_ref from module_imports where id = $1", module_id)
+            source_ref = str(row["source_ref"] or "").strip() if row else ""
+            bundle_root = Path(source_ref).expanduser().resolve() if source_ref else None
+            bundle_toml_path = bundle_root / "bundle.toml" if bundle_root is not None else None
+            if bundle_toml_path is not None and bundle_toml_path.exists() and bundle_toml_path.is_file():
+                bundle_toml = bundle_toml_path.read_text(encoding="utf-8")
+                if bundle_name is not None:
+                    bundle_toml = self._upsert_toml_string_key(bundle_toml, "name", bundle_name)
+                if bundle_version is not None:
+                    bundle_toml = self._upsert_toml_string_key(bundle_toml, "version", bundle_version)
+                bundle_toml_path.write_text(bundle_toml, encoding="utf-8")
             await conn.execute(
                 """
                 update module_imports
