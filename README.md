@@ -8,7 +8,7 @@ Developer bootstrap and day-2 operations are documented in `docs/COMPOSE_RUNBOOK
 
 1. Copy `.env.sample` to `.env` and fill in at least:
    - `GITHUB_PAT`
-   - Azure / LiteLLM upstream settings for the model you want to use
+   - LiteLLM upstream settings for the model provider you want to use
 2. Start the stack from repo root:
 
 ```bash
@@ -373,3 +373,4 @@ Optional `bundle.toml` fields currently used by DSPy Trainer:
 - GitHub access is configured server-side through `GITHUB_PAT` / `DSPY_TRAINER_GITHUB_PAT`.
 - The web UI never collects or stores the PAT.
 - Sample bundle bootstrap and local runner examples live under `backend/sample_bundles/example-bundle/`.
+- The repo does not ship a default LiteLLM upstream provider configuration; you must supply your own model name, upstream model identifier, and provider credentials in `.env`.

@@ -26,6 +26,10 @@ Named volumes:
 
 Before starting the stack, ensure `.env` contains `GITHUB_PAT` if you want to import, sync, or push GitHub-backed bundles. Backend and worker read that variable server-side; the web UI only reports whether GitHub access is configured. GitHub imports may target either the repo root or a configured bundle subfolder. Optimization writeback now pushes to an `optimization-<job-prefix>` branch for manual merge, so also set `GIT_COMMIT_NAME` and `GIT_COMMIT_EMAIL` (defaults are provided if omitted).
 
+LiteLLM upstream note:
+- The repo does not ship a default upstream provider configuration.
+- You must set `LITELLM_MODEL_NAME`, `LITELLM_UPSTREAM_MODEL`, `LITELLM_UPSTREAM_API_KEY`, and any provider-specific base/version values required by your upstream.
+
 Bundle runtime note:
 - If a tracked bundle contains `requirements.txt`, backend and worker install those dependencies automatically before executing the bundle.
 
@@ -153,11 +157,11 @@ Checks:
 
 ```bash
 docker compose logs --tail=200 litellm-proxy
-docker compose exec -T litellm-proxy python -c "import os; print(os.environ.get('AZURE_OPENAI_API_BASE')); print(os.environ.get('AZURE_OPENAI_API_VERSION')); print(os.environ.get('OPENAI_DEPLOYMENT_NAME'))"
+docker compose exec -T litellm-proxy python -c "import os; print(os.environ.get('LITELLM_MODEL_NAME')); print(os.environ.get('LITELLM_UPSTREAM_MODEL')); print(os.environ.get('LITELLM_UPSTREAM_API_BASE')); print(os.environ.get('LITELLM_UPSTREAM_API_VERSION'))"
 ```
 
 Remediation:
-- Verify provider env vars used by `ops/litellm-proxy/config.yaml` are set correctly.
+- Verify the upstream provider env vars used by `ops/litellm-proxy/config.yaml` are set correctly.
 - Confirm the configured deployment/model exists and is reachable.
 - Recreate proxy after env/config changes:
 
