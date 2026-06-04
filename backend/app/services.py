@@ -2108,9 +2108,9 @@ class AppServices:
                   finished_at, created_at, updated_at
                 )
                 values (
-                  $1, 'queued', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb,
-                  $14::jsonb, $15::jsonb, $16, $17, null, $18, null, '{}'::jsonb, '{}'::jsonb, $19::jsonb,
-                  null, null, null, $20, $21
+                  $1, 'queued', $2, $3, $4, $8, $9, $10, $5, $6, $7, $11, $12, $13, $14::jsonb,
+                  $15::jsonb, $16::jsonb, $17::jsonb, $18, $19, null, $20, null, '{}'::jsonb, '{}'::jsonb, $21::jsonb,
+                  null, null, null, $22, $23
                 )
                 """,
                 job_id,
