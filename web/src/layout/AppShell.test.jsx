@@ -77,7 +77,7 @@ describe("AppShell", () => {
 
     const breadcrumbNav = screen.getByRole("navigation", { name: "Breadcrumb" });
     expect(breadcrumbNav).toBeInTheDocument();
-    expect(breadcrumbNav).toHaveTextContent("Default");
+    expect(breadcrumbNav).toHaveTextContent("Operator");
     expect(breadcrumbNav).toHaveTextContent("Evaluation Plans");
     vi.unstubAllGlobals();
   });
@@ -93,7 +93,7 @@ describe("AppShell", () => {
     );
 
     const breadcrumbNav = screen.getByRole("navigation", { name: "Breadcrumb" });
-    expect(breadcrumbNav).toHaveTextContent("Default");
+    expect(breadcrumbNav).toHaveTextContent("Operator");
     expect(breadcrumbNav).toHaveTextContent("Optimization");
     vi.unstubAllGlobals();
   });
@@ -109,7 +109,7 @@ describe("AppShell", () => {
     );
 
     const breadcrumbNav = screen.getByRole("navigation", { name: "Breadcrumb" });
-    expect(breadcrumbNav).toHaveTextContent("Default");
+    expect(breadcrumbNav).toHaveTextContent("Operator");
     expect(breadcrumbNav).toHaveTextContent("Optimization Jobs");
     vi.unstubAllGlobals();
   });

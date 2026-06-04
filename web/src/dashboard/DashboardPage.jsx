@@ -14,9 +14,9 @@ function statusLabel(status) {
 
 function greetingForLocalTime() {
   const hour = new Date().getHours();
-  if (hour < 12) return "Good morning";
-  if (hour < 18) return "Good afternoon";
-  return "Good evening";
+  if (hour < 12) return "Good Morning";
+  if (hour < 18) return "Good Afternoon";
+  return "Good Evening";
 }
 
 function shortId(value) {
@@ -24,7 +24,7 @@ function shortId(value) {
   return text.length > 10 ? `${text.slice(0, 8)}...` : text;
 }
 
-export function DashboardPage({ adapter, onOpenRun, user }) {
+export function DashboardPage({ adapter, onOpenRun }) {
   const navigate = useNavigate();
   const { isLoading, error, data } = useDashboardOverview(adapter);
 
@@ -44,8 +44,6 @@ export function DashboardPage({ adapter, onOpenRun, user }) {
     navigate(`/runs?plan=${encodeURIComponent(runId)}`);
   };
 
-  const greetingName = user?.name?.split(" ")[0] || data.greetingName;
-
   const openLiveFromKeyboard = (event, runId) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
@@ -64,7 +62,7 @@ export function DashboardPage({ adapter, onOpenRun, user }) {
       <div className="page-body dashboard-wrap">
         <header className="row between dashboard-head">
           <div className="col gap-1">
-            <h1 className="t-display">{greetingForLocalTime()}, {greetingName}</h1>
+            <h1 className="t-display">{greetingForLocalTime()}, Operator</h1>
             <p className="muted t-sm">{data.summaryLine}</p>
           </div>
           <div className="row gap-2">

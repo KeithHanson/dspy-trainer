@@ -56,6 +56,7 @@ describe("DashboardPage", () => {
       </MemoryRouter>,
     );
 
+    expect(await screen.findByText(/Operator/)).toBeInTheDocument();
     expect(await screen.findByText("No recent jobs")).toBeInTheDocument();
   });
 

@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import { Icon } from "../components/Icon";
-import { Button } from "../components/primitives/Button";
 
 const PRIMARY_NAV = [
   { to: "/dashboard", label: "Overview", icon: "grid" },
@@ -13,10 +12,7 @@ const PRIMARY_NAV = [
   { to: "/optimization/jobs", label: "Optimization Jobs", icon: "activity" },
 ];
 
-const SECONDARY_NAV = [
-  { to: "/team", label: "Team", icon: "users" },
-  { to: "/settings", label: "Settings", icon: "settings" },
-];
+const SECONDARY_NAV = [];
 
 const BREADCRUMB_LABELS = {
   "/dashboard": "Overview",
@@ -26,8 +22,6 @@ const BREADCRUMB_LABELS = {
   "/optimization": "Optimization",
   "/optimization/jobs": "Optimization Jobs",
   "/runs": "Eval Runs",
-  "/team": "Team",
-  "/settings": "Settings",
 };
 
 function NavSection({ items, hasActiveRun }) {
@@ -66,17 +60,9 @@ function Breadcrumbs({ orgName }) {
   );
 }
 
-export function AppShell({ children, onSignOut, user, orgName = "Default" }) {
+export function AppShell({ children, orgName = "Operator" }) {
   const apiBase = useMemo(() => (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, ""), []);
   const [hasActiveRun, setHasActiveRun] = useState(false);
-  const name = user?.name ?? "Authenticated User";
-  const email = user?.email ?? "";
-  const initials = name
-    .split(" ")
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part[0]?.toUpperCase())
-    .join("") || "AU";
 
   useEffect(() => {
     let isMounted = true;
@@ -129,18 +115,13 @@ export function AppShell({ children, onSignOut, user, orgName = "Default" }) {
 
         <div className="col shell-nav-wrap">
           <NavSection items={PRIMARY_NAV} hasActiveRun={hasActiveRun} />
-          <hr className="hr shell-divider" />
-          <NavSection items={SECONDARY_NAV} hasActiveRun={false} />
+          {SECONDARY_NAV.length ? (
+            <>
+              <hr className="hr shell-divider" />
+              <NavSection items={SECONDARY_NAV} hasActiveRun={false} />
+            </>
+          ) : null}
         </div>
-
-        <footer className="row gap-3 shell-user">
-          <div className="avatar">{initials}</div>
-          <div className="col shell-user-meta">
-            <span className="shell-user-name">{name}</span>
-            <span className="faint">{email}</span>
-          </div>
-          <Button aria-label="Sign out" onClick={onSignOut} variant="ghost" size="sm" icon="logout" />
-        </footer>
       </aside>
 
       <main className="shell-main col">
