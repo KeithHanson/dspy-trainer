@@ -1347,5 +1347,5 @@ def test_materialize_optimized_bundle_updates_existing_checkout(tmp_path, monkey
     assert validation_calls == [("mod-1", "passed")]
     assert sync_state_calls[0]["module_id"] == "mod-1"
     assert sync_state_calls[0]["source_event"] == "optimization_writeback"
-    assert any(call[0][:3] == ["git", "commit", "-m"] for call in git_calls)
+    assert any(call[0][0] == "git" and "commit" in call[0] and "-m" in call[0] for call in git_calls)
     assert any(call[0][:2] == ["git", "push"] for call in git_calls)

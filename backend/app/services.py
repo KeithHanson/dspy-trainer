@@ -885,7 +885,19 @@ class AppServices:
         await self._run_git_command(["git", "status", "--short"], cwd=checkout_path)
         await self._run_git_command(["git", "add", "bundle.toml"], cwd=checkout_path)
         await self._run_git_command(["git", "add", "."], cwd=checkout_path)
-        await self._run_git_command(["git", "commit", "-m", message], cwd=checkout_path)
+        await self._run_git_command(
+            [
+                "git",
+                "-c",
+                f"user.name={self.settings.git_commit_name}",
+                "-c",
+                f"user.email={self.settings.git_commit_email}",
+                "commit",
+                "-m",
+                message,
+            ],
+            cwd=checkout_path,
+        )
         await self._run_git_command(["git", "push"], cwd=checkout_path)
         return await self._run_git_command(["git", "rev-parse", "HEAD"], cwd=checkout_path)
 

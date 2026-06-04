@@ -24,7 +24,7 @@ Named volumes:
 
 ## Developer Bootstrap
 
-Before starting the stack, ensure `.env` contains `GITHUB_PAT` if you want to import, sync, or push GitHub-backed bundles. Backend and worker read that variable server-side; the web UI only reports whether GitHub access is configured.
+Before starting the stack, ensure `.env` contains `GITHUB_PAT` if you want to import, sync, or push GitHub-backed bundles. Backend and worker read that variable server-side; the web UI only reports whether GitHub access is configured. If optimization writeback will commit directly to the tracked branch, also set `GIT_COMMIT_NAME` and `GIT_COMMIT_EMAIL` (defaults are provided if omitted).
 
 Run from repository root:
 
@@ -115,6 +115,7 @@ docker compose exec -T backend python -c "import os, redis; redis.Redis.from_url
 docker compose exec -T backend python -c "import os, urllib.request; urllib.request.urlopen(os.environ['DSPY_TRAINER_MLFLOW_TRACKING_URI'], timeout=5); print('mlflow ok')"
 docker compose exec -T backend python -c "import os, urllib.request; req=urllib.request.Request(os.environ['DSPY_TRAINER_LITELLM_BASE_URL'] + '/health', headers={'Authorization':'Bearer ' + os.environ['DSPY_TRAINER_LITELLM_API_KEY']}); urllib.request.urlopen(req, timeout=5); print('litellm ok')"
 docker compose exec -T backend python -c "import os; print('github ok' if (os.environ.get('DSPY_TRAINER_GITHUB_PAT') or os.environ.get('GITHUB_PAT')) else 'github missing')"
+docker compose exec -T backend python -c "import os; print(os.environ.get('DSPY_TRAINER_GIT_COMMIT_NAME', '')); print(os.environ.get('DSPY_TRAINER_GIT_COMMIT_EMAIL', ''))"
 ```
 
 ## Troubleshooting
@@ -205,6 +206,25 @@ docker compose exec -T worker python -c "import os; print(bool(os.environ.get('D
 Remediation:
 - Add `GITHUB_PAT` to `.env`.
 - Recreate backend and worker so they pick up the new env:
+
+```bash
+docker compose up -d --force-recreate backend worker
+```
+
+### Git Commit Identity Missing For Optimization Writeback
+
+Symptoms:
+- Optimization job reaches writeback and fails with `Author identity unknown`.
+
+Checks:
+
+```bash
+docker compose exec -T backend python -c "import os; print(os.environ.get('DSPY_TRAINER_GIT_COMMIT_NAME')); print(os.environ.get('DSPY_TRAINER_GIT_COMMIT_EMAIL'))"
+```
+
+Remediation:
+- Add `GIT_COMMIT_NAME` and `GIT_COMMIT_EMAIL` to `.env` if you want identities other than the defaults.
+- Recreate backend and worker:
 
 ```bash
 docker compose up -d --force-recreate backend worker

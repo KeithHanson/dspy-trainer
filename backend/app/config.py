@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     postgres_dsn: str = Field(default="")
     checkout_root: str = Field(default="/tmp/dspy-trainer/checkouts")
     github_pat: str = Field(default="", alias="GITHUB_PAT")
+    git_commit_name: str = Field(default="DSPy Trainer", alias="GIT_COMMIT_NAME")
+    git_commit_email: str = Field(default="dspy-trainer@local", alias="GIT_COMMIT_EMAIL")
 
     mlflow_tracking_uri: str = Field(default="http://localhost:5001")
     litellm_base_url: str = Field(default="http://localhost:4000")
