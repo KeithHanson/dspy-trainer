@@ -881,8 +881,15 @@ class AppServices:
         checkout_path: Path,
         *,
         message: str,
+        expected_branch: str | None = None,
     ) -> str:
         await self._run_git_command(["git", "status", "--short"], cwd=checkout_path)
+        if expected_branch:
+            current_branch = await self._run_git_command(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=checkout_path)
+            if current_branch.strip() != expected_branch.strip():
+                raise RuntimeError(
+                    f"checkout is on branch '{current_branch.strip()}' but expected '{expected_branch.strip()}' for direct writeback"
+                )
         await self._run_git_command(["git", "add", "bundle.toml"], cwd=checkout_path)
         await self._run_git_command(["git", "add", "."], cwd=checkout_path)
         await self._run_git_command(
@@ -898,7 +905,10 @@ class AppServices:
             ],
             cwd=checkout_path,
         )
-        await self._run_git_command(["git", "push"], cwd=checkout_path)
+        if expected_branch:
+            await self._run_git_command(["git", "push", "origin", expected_branch], cwd=checkout_path)
+        else:
+            await self._run_git_command(["git", "push"], cwd=checkout_path)
         return await self._run_git_command(["git", "rev-parse", "HEAD"], cwd=checkout_path)
 
     def github_pat_configured(self) -> bool:
@@ -1681,6 +1691,8 @@ class AppServices:
         source_module = await self.get_module(module_id)
         if source_module is None:
             return None
+        if str(source_module.get("source") or "") == "github":
+            await self.ensure_module_mutation_allowed(module_id)
         source_root_value = str(source_module.get("checkout_path") or source_module.get("source_ref") or "").strip()
         if not source_root_value:
             return None
@@ -1714,6 +1726,7 @@ class AppServices:
         commit_sha = await self._commit_and_push_checkout(
             source_root,
             message=f"Apply optimization output {optimization_job_id}",
+            expected_branch=str(source_module.get("github_branch") or "").strip() or None,
         )
         report = validate_bundle(str(source_root))
         await self.set_module_bundle_metadata(

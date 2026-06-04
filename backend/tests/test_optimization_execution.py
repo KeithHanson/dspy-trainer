@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import Settings
 from app.executor import module_runner
-from app.services import AppServices, OptimizationJobCanceled
+from app.services import AppServices, ModuleSyncError, OptimizationJobCanceled
 
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "module_bundles"
@@ -1286,6 +1286,7 @@ def test_materialize_optimized_bundle_updates_existing_checkout(tmp_path, monkey
                 "bundle_version": "0.1.0",
                 "source_ref": str(source_bundle),
                 "checkout_path": str(source_bundle),
+                "github_branch": "main",
                 "current_revision_id": "rev-before",
             }
         return None
@@ -1306,6 +1307,8 @@ def test_materialize_optimized_bundle_updates_existing_checkout(tmp_path, monkey
 
     async def fake_run_git_command(args, *, cwd=None):
         git_calls.append((args, str(cwd) if cwd is not None else None))
+        if args[:4] == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            return "main"
         if args[:3] == ["git", "rev-parse", "HEAD"]:
             return "commit-after"
         return ""
@@ -1318,6 +1321,7 @@ def test_materialize_optimized_bundle_updates_existing_checkout(tmp_path, monkey
             "source": "github",
             "source_ref": str(source_bundle),
             "checkout_path": str(source_bundle),
+            "github_branch": "main",
             "bundle_name": "custom-bundle",
             "bundle_version": "2.0.0",
             "validation_status": "passed",
@@ -1332,6 +1336,11 @@ def test_materialize_optimized_bundle_updates_existing_checkout(tmp_path, monkey
     monkeypatch.setattr(services, "set_validation_status", fake_set_validation_status)
     monkeypatch.setattr(services, "_set_module_sync_state", fake_set_module_sync_state)
     monkeypatch.setattr(services, "_run_git_command", fake_run_git_command)
+    async def fake_ensure_module_mutation_allowed(module_id):
+        assert module_id == "mod-1"
+        return {"sync_status": "synced"}
+
+    monkeypatch.setattr(services, "ensure_module_mutation_allowed", fake_ensure_module_mutation_allowed)
 
     result = asyncio.run(services.materialize_optimized_bundle("opt-123", bundle_name="custom-bundle", bundle_version="2.0.0"))
 
@@ -1348,4 +1357,69 @@ def test_materialize_optimized_bundle_updates_existing_checkout(tmp_path, monkey
     assert sync_state_calls[0]["module_id"] == "mod-1"
     assert sync_state_calls[0]["source_event"] == "optimization_writeback"
     assert any(call[0][0] == "git" and "commit" in call[0] and "-m" in call[0] for call in git_calls)
-    assert any(call[0][:2] == ["git", "push"] for call in git_calls)
+    assert any(call[0][:4] == ["git", "push", "origin", "main"] for call in git_calls)
+
+
+def test_run_optimization_job_fails_when_writeback_preflight_blocks(monkeypatch):
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+    state = {
+        "job": {
+            "id": "opt-blocked",
+            "status": "queued",
+            "project_id": "proj-1",
+            "module_import_id": "mod-1",
+            "bundle_path": str(FIXTURES / "valid_bundle"),
+            "strategy": "bootstrap_fewshot",
+            "dataset_id": None,
+            "validation_dataset_id": None,
+            "execution_lm_profile_id": None,
+            "helper_lm_profile_id": None,
+            "normalized_config": {"dspy_config": {}},
+            "train_inputs": [
+                {"input": {"question": "France capital?"}, "label": {"expected": "Paris"}, "prediction": {"answer": "Paris"}}
+            ],
+            "val_inputs": [],
+            "num_threads": 1,
+            "source_run_plan_id": "plan-1",
+            "artifact_path": None,
+            "artifact_metadata": {},
+            "telemetry_summary": {},
+            "comparison_summary": {},
+            "failure_reason": None,
+            "run_started_at": None,
+            "finished_at": None,
+        }
+    }
+    setattr(services, "postgres_pool", FakePool(state))
+
+    async def fake_get_optimization_job(job_id):
+        assert job_id == "opt-blocked"
+        return dict(state["job"])
+
+    async def fake_get_source_run_plan_baseline(**kwargs):
+        return None
+
+    async def fake_append_optimization_process_log(job_id, additions):
+        return None
+
+    async def fake_materialize_from_job(job_payload, *, bundle_name=None, bundle_version=None):
+        raise ModuleSyncError("module has upstream changes that must be synced before mutation", sync_state={"sync_status": "behind"})
+
+    def fake_run_bundle_optimization(**kwargs):
+        return {
+            "artifact_path": "/tmp/dspy-trainer/optimization_artifacts/opt-blocked/program.json",
+            "artifact_metadata": {"artifact_type": "dspy_program_state"},
+            "telemetry_summary": {"strategy": "bootstrap_fewshot"},
+        }
+
+    monkeypatch.setattr(services, "get_optimization_job", fake_get_optimization_job)
+    monkeypatch.setattr(services, "_get_source_run_plan_baseline", fake_get_source_run_plan_baseline)
+    monkeypatch.setattr(services, "append_optimization_process_log", fake_append_optimization_process_log)
+    monkeypatch.setattr(services, "_materialize_optimized_bundle_from_job", fake_materialize_from_job)
+    monkeypatch.setattr("app.executor.module_runner.run_bundle_optimization", fake_run_bundle_optimization)
+
+    result = asyncio.run(services.run_optimization_job("opt-blocked"))
+
+    assert result is not None
+    assert result["status"] == "failed"
+    assert "module has upstream changes that must be synced before mutation" in result["failure_reason"]
