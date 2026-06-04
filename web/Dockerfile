@@ -1,5 +1,13 @@
 FROM node:20-alpine AS build
 
+ARG VITE_API_BASE_URL=http://localhost:8000
+ARG VITE_MLFLOW_BASE_URL=http://localhost:5001
+ARG VITE_LITELLM_BASE_URL=http://localhost:4000
+
+ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
+ENV VITE_MLFLOW_BASE_URL=${VITE_MLFLOW_BASE_URL}
+ENV VITE_LITELLM_BASE_URL=${VITE_LITELLM_BASE_URL}
+
 WORKDIR /app
 COPY web/package.json ./package.json
 RUN npm install
