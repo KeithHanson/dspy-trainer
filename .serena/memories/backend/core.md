@@ -1,12 +1,10 @@
-- Entry points: `backend/app/main.py` defines the FastAPI app and almost all HTTP endpoints; `backend/worker.py` is the Redis queue worker loop.
-- Central pattern: `backend/app/services.py` contains a large `AppServices` class that owns DB setup, Redis/HTTP clients, MLflow/LiteLLM integration, CRUD, queue orchestration, optimization execution, and worker registry. Expect most backend changes to land there, not in many small service files.
+- Entry points: `backend/app/main.py` defines the FastAPI app and nearly all HTTP endpoints; `backend/worker.py` is the Redis queue worker loop.
+- Central pattern: `backend/app/services.py` contains `AppServices`, which owns DB setup, Redis/HTTP clients, MLflow/LiteLLM integration, CRUD, queue orchestration, optimization execution, and worker registry.
 - Config is Pydantic Settings in `backend/app/config.py`, env prefix `DSPY_TRAINER_`, env file `.env`; `DSPY_TRAINER_POSTGRES_DSN` is required.
-- Readiness checks verify postgres query, redis ping, MLflow HTTP reachability, and LiteLLM `/health/liveness` with bearer auth when configured.
-- Bundle contract validator: `backend/app/validator/bundle.py::validate_bundle` requires directory bundles with `module.py`, `metric.py`, `bundle.toml`; module must expose DSPy signature/module plus `build_program()`, metric must expose `judge_metric(...)`, TOML must contain `name`, `version`, `lm_target`, numeric `score_pass_threshold`.
+- Readiness checks cover postgres query, redis ping, MLflow HTTP reachability, and LiteLLM health with bearer auth when configured.
+- Bundle validator requires directory bundles with `module.py`, `metric.py`, and `bundle.toml`; validator inspects Python AST and TOML metadata.
 - Execution runtime: `backend/app/executor/module_runner.py::run_bundle_eval` loads the bundle, builds the DSPy program, optionally builds LM from bundle or LM profile, disables LM cache, and evaluates against `judge_metric`.
-- Optimization runtime is also in `module_runner.py`; supported strategy family names surfaced in UI/backend are `bootstrap_fewshot`, `miprov2`, and `gepa`.
+- Optimization runtime also lives in `module_runner.py`; surfaced strategy families are `bootstrap_fewshot`, `miprov2`, and `gepa`.
 - Worker behavior: `backend/worker.py` heartbeats worker status into Redis, BRPOPs the configured queue, and delegates payload handling to service methods.
-- Data model/storage is app-managed in Postgres with JSON-heavy payloads; API entities visible from routes/tests include module imports, evaluation plans, agent run plans/tasks, optimization jobs/datasets, LM profiles, and LiteLLM keys.
-- MLflow correlation is implemented, not just planned: agent run plans can create parent MLflow runs and UI links to MLflow run pages.
-- Tests indicate high-value backend areas: module validation, module runner, worker loop, agent run plans, evaluation plans, optimization execution/dataset derivation, LM profile + LiteLLM key APIs.
-- Sample implementation to copy from: `backend/sample_bundles/example-bundle/`.
+- App-visible entities include module imports, evaluation plans, agent run plans/tasks, optimization jobs/datasets, LM profiles, and LiteLLM keys.
+- MLflow correlation is implemented for agent run plans/optimization workflows; sample bundle to copy from is `backend/sample_bundles/example-bundle/`.

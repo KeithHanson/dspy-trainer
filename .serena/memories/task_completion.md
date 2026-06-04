@@ -1,7 +1,7 @@
-- For backend-only code changes: run `rtk pytest` from repo root.
-- For frontend-only code changes: run `npm test` and `npm run build` in `web/`.
-- For cross-cutting backend/frontend changes: run both backend and frontend verification.
-- For compose/infrastructure changes: also run `docker compose ps` and the documented health curls from `docs/COMPOSE_RUNBOOK.md`.
-- If changing bundle validation or execution flow, verify both automated backend tests and the operator workflow path: bundle upload/validation -> plan creation -> run enqueue/monitor.
-- If changing LM profile/LiteLLM/optimization behavior, verify corresponding backend tests plus the relevant web page flow because the UI posts raw payloads directly.
-- Repo process expectation from `AGENTS.md`: when actual code/files change, track work in beads first, then commit and push before ending the session.
+- Backend-only changes: run `rtk pytest` from repo root.
+- Frontend-only changes: run `npm test` and `npm run build` in `web/`.
+- Cross-cutting backend/frontend changes: run both backend and frontend verification.
+- Compose/infrastructure changes: also run `docker compose ps` and the documented health curls from `docs/COMPOSE_RUNBOOK.md`.
+- Bundle validation/execution changes: verify automated backend tests plus operator path `upload -> validate -> plan/create -> enqueue -> monitor`.
+- LM profile/LiteLLM/optimization changes: verify backend tests plus relevant web flows because pages post raw payloads directly.
+- Repo process expectation from `AGENTS.md`: if files changed, track work in beads first, then commit and push before ending the session.

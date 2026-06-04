@@ -1,9 +1,9 @@
-- Backend favors a single broad `AppServices` orchestration class over many narrowly scoped services. Search there first before adding new abstractions.
-- FastAPI route handlers in `backend/app/main.py` are thin request/response wrappers around `AppServices` methods plus request model validation.
-- Backend payloads lean on plain dict/list JSON structures for eval inputs, labels, predictions, request configs, diagnostics, and dataset records.
-- Bundle validation is AST/metadata based, not import-execution based; keep bundle contract changes synchronized with UI guidance in `web/src/bundles/BundlesPage.jsx` and validator logic.
-- Frontend conventions: function components only, page-local state, direct `fetch` calls, minimal shared state. Stable API base URLs are commonly memoized with `useMemo(() => (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, ""), [])`.
-- Frontend UX is scaffold-heavy but operational: empty/loading/error states are shared primitives reused across pages.
-- Route/page naming mirrors product nouns directly (`BundlesPage`, `PlansPage`, `RunsPage`, `OptimizationLaunchPage`, `LmProfilesPage`). Follow that style for new screens.
-- Tests are expected for new functionality; backend coverage is route/service heavy, frontend coverage is page-flow oriented.
-- Auth is mandatory in the web shell; unauthenticated users are redirected to the Auth0-backed auth screen.
+- Backend favors a single broad orchestration class: search `backend/app/services.py::AppServices` first before inventing new abstractions.
+- FastAPI handlers in `backend/app/main.py` are thin request/response wrappers around `AppServices` plus Pydantic request models.
+- Backend payloads lean on JSON-heavy dict/list structures for eval inputs, labels, predictions, diagnostics, and dataset records.
+- Bundle validation is AST + TOML metadata based, not import-execution based; keep validator changes aligned with UI guidance and sample bundles.
+- Frontend is page-centric: function components, page-local state, direct `fetch` calls, light `useMemo` for stable API base URLs; no central API client yet.
+- Route/page naming mirrors product nouns directly (`BundlesPage`, `PlansPage`, `RunsPage`, `OptimizationLaunchPage`, `LmProfilesPage`).
+- Shared frontend UX primitives cover loading/empty/error states; preserve those patterns instead of custom per-page variants.
+- Auth is mandatory in the web shell; unauthenticated users are routed through Auth0-backed flows.
+- Tests are expected for new functionality: backend route/service coverage, frontend page-flow coverage.

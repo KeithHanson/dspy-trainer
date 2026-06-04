@@ -2,8 +2,7 @@
 - Backend libs: FastAPI, Uvicorn, pydantic-settings, asyncpg, redis, httpx, dspy-ai==2.6.27, mlflow, python-multipart, botocore.
 - Frontend stack: React 18, react-router-dom 6, Vite 5, Vitest, Testing Library, Auth0 React SDK.
 - Infra/runtime: Docker Compose orchestrates postgres 16, redis 7, MLflow server, LiteLLM proxy, backend, worker replicas, and nginx-served web image.
-- Queue model: Redis list + blocking pop worker loop.
-- Persistence model: Postgres is primary app store; MLflow is tracking/artifact plane; Redis is queue/worker presence.
-- LiteLLM is the normalization layer for model/provider access; backend stores LM profiles and can provision/use LiteLLM keys/models.
-- Repo includes a `dspy/` submodule/reference tree for DSPy internals; planning docs cite files from it, but the app runtime depends on installed `dspy-ai`, not source imports from that tree.
-- Test tooling: `pytest` for backend, `vitest` for frontend. No dedicated lint script is currently defined in `web/package.json`.
+- Persistence split: Postgres = primary app store, MLflow = tracking/artifact plane, Redis = queue + worker presence.
+- LiteLLM is the model/provider abstraction layer; backend stores LM profiles and LiteLLM keys/models.
+- Repo includes a `dspy/` reference submodule/tree; runtime depends on installed `dspy-ai`, not imports from that tree.
+- Test tooling: `pytest` for backend, `vitest` for frontend. No dedicated frontend lint script is currently defined in `web/package.json`.

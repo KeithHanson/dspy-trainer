@@ -1,10 +1,10 @@
+- Preferred repo inspection in this environment: `rtk ls <path>`, `rtk read <file>`, `rtk smart <file>`, `rtk git status`, `rtk git diff`, `rtk pytest`.
 - Compose bootstrap: `docker compose pull --ignore-pull-failures`, `docker compose build --pull`, `docker compose up -d --remove-orphans`.
-- Compose health/status: `docker compose ps`, `docker compose logs -f --timestamps backend worker litellm-proxy`.
+- Compose status/logs: `docker compose ps`, `docker compose logs -f --timestamps backend worker litellm-proxy`.
 - Backend local setup: `python -m venv .venv && source .venv/bin/activate && pip install -r backend/requirements.txt`.
 - Backend local run: `uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8000`.
 - Worker local run: `python backend/worker.py`.
-- Backend tests: `rtk pytest` (project root; `pytest.ini` points at `backend/tests`).
-- Frontend install/test/build: `npm install` in `web/`, then `npm test` and `npm run build`.
-- Bundle/operator checks: `curl -fsS http://localhost:8000/health`, `curl -fsS http://localhost:8000/ready`, `curl -fsS http://localhost:3000/health`.
-- Beads workflow basics in this repo: `bd ready --json`, `bd show <id> --json`, `bd update <id> --status in_progress --json`, `bd close <id> --reason "..." --json`.
-- Token-efficient repo inspection preference in this environment: `rtk ls <path>`, `rtk read <file>`, `rtk smart <file>`, `rtk git status`, `rtk git diff`, `rtk pytest`.
+- Backend tests: `rtk pytest` from repo root.
+- Frontend install/test/build in `web/`: `npm install`, `npm test`, `npm run build`.
+- Health checks: `curl -fsS http://localhost:8000/health`, `curl -fsS http://localhost:8000/ready`, `curl -fsS http://localhost:3000/health`.
+- Beads basics: `bd ready --json`, `bd show <id> --json`, `bd update <id> --status in_progress --json`, `bd close <id> --reason "..." --json`.

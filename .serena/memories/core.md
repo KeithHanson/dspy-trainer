@@ -1,8 +1,7 @@
-- Top-level map: `backend/` FastAPI API + worker runtime, `web/` React/Vite UI, `docs/` product/ops plans, `ops/litellm-proxy/` LiteLLM config, `backend/sample_bundles/example-bundle/` canonical DSPy bundle contract example.
-- Runtime architecture is compose-first: postgres + redis + mlflow + litellm-proxy + backend + worker + web. Read `mem:backend/core` for API/runtime behavior and `mem:web/core` for UI workflow shape.
-- Product flow implemented in code: upload bundle -> validate/save bundle -> create evaluation plan -> create/enqueue agent run plan -> inspect run tasks/results -> derive/launch optimization jobs.
-- Backend API surface is broader than the root README suggests; major resources currently implemented in `backend/app/main.py`: modules, workers, agent-run-plans, evaluation-plans, optimization jobs/datasets, LM profiles, LiteLLM keys, health/ready, sample bundle download.
-- Planning docs: `docs/NAIVE_PLAN.md` is the original scope; `docs/INFORMED_PLAN.md` is the higher-fidelity architecture/spec baseline; `docs/COMPOSE_RUNBOOK.md` is the operator runbook.
-- DSPy bundle validation contract is stricter than the naive plan: accepted bundle root must contain `module.py`, `metric.py`, and `bundle.toml`; validator inspects Python AST and TOML metadata. See `mem:backend/core`.
-- Tests live under `backend/tests/` and alongside React pages in `web/src/**/**.test.jsx`.
-- Read `mem:tech_stack` for dependency/runtime choices, `mem:suggested_commands` for common commands, `mem:conventions` for implementation patterns, and `mem:task_completion` for verification expectations.
+- Top-level map: `backend/` FastAPI API + worker runtime, `web/` React/Vite UI, `docs/` product/ops plans, `ops/litellm-proxy/` LiteLLM config, `backend/sample_bundles/example-bundle/` canonical bundle example, `.beads/` issue DB.
+- Compose-first architecture: postgres + redis + mlflow + litellm-proxy + backend + worker + web. Read `mem:backend/core` for runtime/API details and `mem:web/core` for user workflow shape.
+- Implemented product flow: upload bundle -> validate bundle -> create evaluation plan -> create/enqueue agent run plan -> inspect tasks/results -> derive/launch optimization jobs.
+- Current backend surface is much broader than root `README.md`; the real route map lives in `backend/app/main.py`.
+- Planning docs: `docs/NAIVE_PLAN.md` = original baseline, `docs/INFORMED_PLAN.md` = higher-fidelity architecture/spec, `docs/COMPOSE_RUNBOOK.md` = operator bootstrap/ops.
+- Tests live in `backend/tests/` and `web/src/**/**.test.jsx`.
+- Read `mem:tech_stack` for runtime/deps, `mem:suggested_commands` for common commands, `mem:conventions` for implementation patterns, `mem:task_completion` for verification expectations.
