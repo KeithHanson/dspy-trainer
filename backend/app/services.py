@@ -3312,7 +3312,7 @@ class AppServices:
                   total_tasks, completed_tasks, failed_tasks, failure_reason,
                   created_at, updated_at
                 )
-                values ($1, 'draft', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, null, null, $12, $13, 0, 0, 0, null, $14, $15)
+                values ($1, 'draft', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, null, null, $13, $14, 0, 0, 0, null, $15, $16)
                 """,
                 plan_id,
                 project_id,
