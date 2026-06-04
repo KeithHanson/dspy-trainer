@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 
 from app.config import get_settings
 from app.executor import run_bundle_eval
-from app.services import AppServices
+from app.services import AppServices, ModuleSyncError
 from app.validator import validate_bundle
 
 
@@ -95,6 +95,11 @@ class SmokeTestRequest(BaseModel):
 class ModuleMetadataUpdateRequest(BaseModel):
     bundle_name: str | None = None
     bundle_version: str | None = None
+    github_pat: str | None = None
+
+
+class ModuleSyncRequest(BaseModel):
+    github_pat: str
 
 
 class OptimizationJobCreateRequest(BaseModel):
@@ -146,6 +151,7 @@ class OptimizationDatasetDeriveRequest(BaseModel):
 class MaterializeOptimizedBundleRequest(BaseModel):
     bundle_name: str | None = None
     bundle_version: str | None = None
+    github_pat: str | None = None
 
 
 class AgentRunPlanCreateRequest(BaseModel):
@@ -316,6 +322,13 @@ async def update_module(module_id: str, request: Request, payload: ModuleMetadat
     current = await services.get_module(module_id)
     if current is None:
         return JSONResponse(status_code=404, content={"error": "module not found"})
+    if current.get("source") == "github":
+        try:
+            await services.ensure_module_mutation_allowed(module_id, payload.github_pat or "")
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"error": str(exc)})
+        except ModuleSyncError as exc:
+            return JSONResponse(status_code=409, content={"error": str(exc), "sync_state": exc.sync_state})
     bundle_name = payload.bundle_name.strip() if isinstance(payload.bundle_name, str) else None
     bundle_version = payload.bundle_version.strip() if isinstance(payload.bundle_version, str) else None
     await services.set_module_bundle_metadata(
@@ -327,6 +340,48 @@ async def update_module(module_id: str, request: Request, payload: ModuleMetadat
     if updated is None:
         return JSONResponse(status_code=404, content={"error": "module not found"})
     return updated
+
+
+@app.get("/modules/{module_id}/sync-status")
+async def get_module_sync_status(module_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    current = await services.get_module(module_id)
+    if current is None:
+        return JSONResponse(status_code=404, content={"error": "module not found"})
+    return {
+        "module_id": module_id,
+        "sync_status": current.get("sync_status"),
+        "current_commit_sha": current.get("current_commit_sha"),
+        "upstream_commit_sha": current.get("upstream_commit_sha"),
+        "github_branch": current.get("github_branch"),
+        "github_repo_url": current.get("github_repo_url"),
+        "last_sync_error": current.get("last_sync_error"),
+        "last_synced_at": current.get("last_synced_at"),
+    }
+
+
+@app.post("/modules/{module_id}/sync-status")
+async def refresh_module_sync_status(module_id: str, request: Request, payload: ModuleSyncRequest):
+    services: AppServices = request.app.state.services
+    try:
+        return await services.refresh_module_sync_status(module_id, payload.github_pat)
+    except ValueError as exc:
+        status_code = 404 if str(exc) == "module not found" else 400
+        return JSONResponse(status_code=status_code, content={"error": str(exc)})
+    except ModuleSyncError as exc:
+        return JSONResponse(status_code=409, content={"error": str(exc), "sync_state": exc.sync_state})
+
+
+@app.post("/modules/{module_id}/sync")
+async def sync_module(module_id: str, request: Request, payload: ModuleSyncRequest):
+    services: AppServices = request.app.state.services
+    try:
+        return await services.sync_module(module_id, payload.github_pat)
+    except ValueError as exc:
+        status_code = 404 if str(exc) == "module not found" else 400
+        return JSONResponse(status_code=status_code, content={"error": str(exc)})
+    except ModuleSyncError as exc:
+        return JSONResponse(status_code=409, content={"error": str(exc), "sync_state": exc.sync_state})
 
 
 @app.get("/modules/{module_id}/files")
@@ -559,6 +614,16 @@ async def materialize_optimized_bundle(
         return JSONResponse(status_code=409, content={"error": "only succeeded optimization jobs can create optimized bundles"})
     if not str(job.get("artifact_path") or "").strip():
         return JSONResponse(status_code=409, content={"error": "optimization job has no saved artifact to materialize"})
+    module_id = str(job.get("module_import_id") or "").strip()
+    if module_id:
+        source_module = await services.get_module(module_id)
+        if source_module is not None and source_module.get("source") == "github":
+            try:
+                await services.ensure_module_mutation_allowed(module_id, payload.github_pat or "")
+            except ValueError as exc:
+                return JSONResponse(status_code=400, content={"error": str(exc)})
+            except ModuleSyncError as exc:
+                return JSONResponse(status_code=409, content={"error": str(exc), "sync_state": exc.sync_state})
     result = await services.materialize_optimized_bundle(
         optimization_job_id,
         bundle_name=payload.bundle_name,

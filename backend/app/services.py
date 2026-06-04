@@ -33,6 +33,12 @@ class OptimizationJobCanceled(RuntimeError):
     pass
 
 
+class ModuleSyncError(RuntimeError):
+    def __init__(self, message: str, *, sync_state: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.sync_state = sync_state or {}
+
+
 def _clean_optional_text(value: Any) -> str | None:
     if value is None:
         return None
@@ -83,6 +89,16 @@ def _normalize_github_repo_url(repo_url: str) -> str:
 def _github_clone_url(repo_url: str, pat: str) -> str:
     parsed = urlparse(repo_url)
     return urlunparse(parsed._replace(netloc=f"x-access-token:{pat}@{parsed.netloc}"))
+
+
+def _classify_sync_status(local_commit_sha: str, upstream_commit_sha: str, merge_base_sha: str | None) -> str:
+    if local_commit_sha == upstream_commit_sha:
+        return "synced"
+    if merge_base_sha == local_commit_sha:
+        return "behind"
+    if merge_base_sha == upstream_commit_sha:
+        return "ahead"
+    return "diverged"
 
 
 def _run_bundle_optimization_subprocess(
@@ -835,6 +851,68 @@ class AppServices:
 
         return await asyncio.to_thread(run)
 
+    async def _get_module_source_record(self, module_id: str) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                select id, source, source_ref, bundle_name, bundle_version, github_repo_url, github_branch,
+                       checkout_path, current_commit_sha, upstream_commit_sha, sync_status,
+                       last_synced_at, last_sync_error, current_revision_id, deleted_at
+                from module_imports
+                where id = $1 and deleted_at is null
+                """,
+                module_id,
+            )
+        return dict(row) if row is not None else None
+
+    async def _set_module_sync_state(
+        self,
+        module_id: str,
+        *,
+        current_commit_sha: str,
+        upstream_commit_sha: str,
+        sync_status: str,
+        last_sync_error: str | None = None,
+        synced_now: bool = False,
+        source_event: str | None = None,
+        bundle_name: str | None = None,
+        bundle_version: str | None = None,
+        checkout_path: str | None = None,
+    ) -> None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            await conn.execute(
+                """
+                update module_imports
+                set current_commit_sha = $2,
+                    upstream_commit_sha = $3,
+                    sync_status = $4,
+                    last_sync_error = $5,
+                    last_synced_at = case when $6 then now() else last_synced_at end,
+                    updated_at = now()
+                where id = $1
+                """,
+                module_id,
+                _clean_optional_text(current_commit_sha),
+                _clean_optional_text(upstream_commit_sha),
+                sync_status,
+                _clean_optional_text(last_sync_error),
+                synced_now,
+            )
+            if source_event:
+                await self._create_bundle_revision(
+                    conn,
+                    module_id,
+                    commit_sha=current_commit_sha,
+                    checkout_path=checkout_path,
+                    bundle_name=bundle_name,
+                    bundle_version=bundle_version,
+                    source_event=source_event,
+                )
+
     async def import_github_module(self, github_repo_url: str, github_branch: str, github_pat: str) -> dict[str, Any]:
         normalized_repo_url = _normalize_github_repo_url(github_repo_url)
         normalized_branch = str(github_branch or "").strip()
@@ -886,6 +964,163 @@ class AppServices:
             if checkout_path.exists():
                 shutil.rmtree(checkout_path, ignore_errors=True)
             raise
+
+    async def refresh_module_sync_status(self, module_id: str, github_pat: str) -> dict[str, Any]:
+        module = await self._get_module_source_record(module_id)
+        if module is None:
+            raise ValueError("module not found")
+        if str(module.get("source") or "") != "github":
+            return {
+                "module_id": module_id,
+                "sync_status": str(module.get("sync_status") or "legacy"),
+                "current_commit_sha": str(module.get("current_commit_sha") or "") or None,
+                "upstream_commit_sha": str(module.get("upstream_commit_sha") or "") or None,
+                "github_branch": module.get("github_branch"),
+                "github_repo_url": module.get("github_repo_url"),
+                "last_sync_error": module.get("last_sync_error"),
+            }
+
+        normalized_pat = str(github_pat or "").strip()
+        if not normalized_pat:
+            raise ValueError("github_pat is required")
+
+        repo_url = str(module.get("github_repo_url") or "").strip()
+        branch = str(module.get("github_branch") or "").strip()
+        checkout_path = Path(str(module.get("checkout_path") or "").strip()).expanduser().resolve()
+        if not repo_url or not branch or not checkout_path.exists() or not checkout_path.is_dir():
+            raise RuntimeError("module checkout is not available")
+
+        clone_url = _github_clone_url(repo_url, normalized_pat)
+        try:
+            await self._run_git_command(["git", "fetch", clone_url, branch], cwd=checkout_path)
+            local_commit_sha = await self._run_git_command(["git", "rev-parse", "HEAD"], cwd=checkout_path)
+            upstream_commit_sha = await self._run_git_command(["git", "rev-parse", "FETCH_HEAD"], cwd=checkout_path)
+            merge_base_sha = await self._run_git_command(["git", "merge-base", "HEAD", "FETCH_HEAD"], cwd=checkout_path)
+            sync_status = _classify_sync_status(local_commit_sha, upstream_commit_sha, merge_base_sha)
+            await self._set_module_sync_state(
+                module_id,
+                current_commit_sha=local_commit_sha,
+                upstream_commit_sha=upstream_commit_sha,
+                sync_status=sync_status,
+                last_sync_error=None,
+            )
+            return {
+                "module_id": module_id,
+                "sync_status": sync_status,
+                "current_commit_sha": local_commit_sha,
+                "upstream_commit_sha": upstream_commit_sha,
+                "github_branch": branch,
+                "github_repo_url": repo_url,
+                "last_sync_error": None,
+            }
+        except Exception as exc:
+            current_commit_sha = str(module.get("current_commit_sha") or "").strip()
+            upstream_commit_sha = str(module.get("upstream_commit_sha") or "").strip()
+            await self._set_module_sync_state(
+                module_id,
+                current_commit_sha=current_commit_sha,
+                upstream_commit_sha=upstream_commit_sha or current_commit_sha,
+                sync_status="sync_error",
+                last_sync_error=str(exc),
+            )
+            raise ModuleSyncError(
+                str(exc),
+                sync_state={
+                    "module_id": module_id,
+                    "sync_status": "sync_error",
+                    "current_commit_sha": current_commit_sha or None,
+                    "upstream_commit_sha": upstream_commit_sha or None,
+                    "github_branch": branch,
+                    "github_repo_url": repo_url,
+                    "last_sync_error": str(exc),
+                },
+            )
+
+    async def sync_module(self, module_id: str, github_pat: str) -> dict[str, Any]:
+        sync_state = await self.refresh_module_sync_status(module_id, github_pat)
+        module = await self._get_module_source_record(module_id)
+        if module is None:
+            raise ValueError("module not found")
+        sync_status = str(sync_state.get("sync_status") or "")
+        if sync_status == "synced":
+            sync_state["synced"] = False
+            return sync_state
+        if sync_status != "behind":
+            raise ModuleSyncError(
+                "module is not eligible for fast-forward sync",
+                sync_state=sync_state,
+            )
+
+        normalized_pat = str(github_pat or "").strip()
+        repo_url = str(module.get("github_repo_url") or "").strip()
+        branch = str(module.get("github_branch") or "").strip()
+        checkout_path = Path(str(module.get("checkout_path") or "").strip()).expanduser().resolve()
+        clone_url = _github_clone_url(repo_url, normalized_pat)
+
+        try:
+            await self._run_git_command(["git", "fetch", clone_url, branch], cwd=checkout_path)
+            await self._run_git_command(["git", "merge", "--ff-only", "FETCH_HEAD"], cwd=checkout_path)
+            current_commit_sha = await self._run_git_command(["git", "rev-parse", "HEAD"], cwd=checkout_path)
+            report = validate_bundle(str(checkout_path))
+            if not report.passed:
+                raise RuntimeError(report.summary)
+            await self.set_module_bundle_metadata(
+                module_id,
+                report.metadata.get("name") if isinstance(report.metadata.get("name"), str) else None,
+                report.metadata.get("version") if isinstance(report.metadata.get("version"), str) else None,
+            )
+            found = await self.set_validation_status(module_id, "passed", report.diagnostics)
+            if not found:
+                raise RuntimeError("module not found")
+            await self._set_module_sync_state(
+                module_id,
+                current_commit_sha=current_commit_sha,
+                upstream_commit_sha=current_commit_sha,
+                sync_status="synced",
+                last_sync_error=None,
+                synced_now=True,
+                source_event="sync",
+                bundle_name=report.metadata.get("name") if isinstance(report.metadata.get("name"), str) else None,
+                bundle_version=report.metadata.get("version") if isinstance(report.metadata.get("version"), str) else None,
+                checkout_path=str(checkout_path),
+            )
+            return {
+                "module_id": module_id,
+                "sync_status": "synced",
+                "current_commit_sha": current_commit_sha,
+                "upstream_commit_sha": current_commit_sha,
+                "github_branch": branch,
+                "github_repo_url": repo_url,
+                "last_sync_error": None,
+                "synced": True,
+            }
+        except ModuleSyncError:
+            raise
+        except Exception as exc:
+            await self._set_module_sync_state(
+                module_id,
+                current_commit_sha=str(module.get("current_commit_sha") or "").strip(),
+                upstream_commit_sha=str(sync_state.get("upstream_commit_sha") or module.get("upstream_commit_sha") or "").strip(),
+                sync_status="sync_error",
+                last_sync_error=str(exc),
+            )
+            raise ModuleSyncError(
+                str(exc),
+                sync_state={
+                    **sync_state,
+                    "sync_status": "sync_error",
+                    "last_sync_error": str(exc),
+                },
+            )
+
+    async def ensure_module_mutation_allowed(self, module_id: str, github_pat: str) -> dict[str, Any]:
+        sync_state = await self.refresh_module_sync_status(module_id, github_pat)
+        if sync_state["sync_status"] in {"behind", "diverged", "sync_error"}:
+            raise ModuleSyncError(
+                "module has upstream changes that must be synced before mutation",
+                sync_state=sync_state,
+            )
+        return sync_state
 
     async def create_module_import(
         self,

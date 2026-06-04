@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import main as main_mod
+from app.services import ModuleSyncError
 
 
 MODULES = {"mod-1"}
@@ -15,6 +16,18 @@ DATASETS: dict[str, dict] = {}
 NEXT_JOB_ID = 1
 NEXT_DATASET_ID = 1
 ENQUEUED_JOB_IDS: list[str] = []
+MODULE_DETAILS: dict[str, dict] = {
+    "mod-1": {
+        "id": "mod-1",
+        "source": "github",
+        "github_repo_url": "https://github.com/example/demo-bundle",
+        "github_branch": "main",
+        "current_commit_sha": "abc123",
+        "upstream_commit_sha": "abc123",
+        "sync_status": "synced",
+        "last_sync_error": None,
+    }
+}
 
 
 async def fake_connect(self):
@@ -255,6 +268,39 @@ async def fake_materialize_optimized_bundle(self, optimization_job_id, bundle_na
     }
 
 
+async def fake_get_module(self, module_id):
+    return MODULE_DETAILS.get(module_id)
+
+
+async def fake_ensure_module_mutation_allowed(self, module_id, github_pat):
+    assert github_pat == "ghp_test_secret"
+    module = MODULE_DETAILS.get(module_id)
+    if module is None:
+        raise ValueError("module not found")
+    if module["sync_status"] in {"behind", "diverged", "sync_error"}:
+        raise ModuleSyncError(
+            "module has upstream changes that must be synced before mutation",
+            sync_state={
+                "module_id": module_id,
+                "sync_status": module["sync_status"],
+                "current_commit_sha": module["current_commit_sha"],
+                "upstream_commit_sha": module["upstream_commit_sha"],
+                "github_branch": module["github_branch"],
+                "github_repo_url": module["github_repo_url"],
+                "last_sync_error": module["last_sync_error"],
+            },
+        )
+    return {
+        "module_id": module_id,
+        "sync_status": module["sync_status"],
+        "current_commit_sha": module["current_commit_sha"],
+        "upstream_commit_sha": module["upstream_commit_sha"],
+        "github_branch": module["github_branch"],
+        "github_repo_url": module["github_repo_url"],
+        "last_sync_error": module["last_sync_error"],
+    }
+
+
 def _patch_services(monkeypatch):
     monkeypatch.setenv("DSPY_TRAINER_POSTGRES_DSN", "postgresql://postgres:postgres@localhost:5432/dspy_trainer")
     monkeypatch.setattr(main_mod.AppServices, "connect", fake_connect)
@@ -267,6 +313,8 @@ def _patch_services(monkeypatch):
     monkeypatch.setattr(main_mod.AppServices, "delete_optimization_job", fake_delete_optimization_job)
     monkeypatch.setattr(main_mod.AppServices, "run_optimization_job", fake_run_optimization_job)
     monkeypatch.setattr(main_mod.AppServices, "materialize_optimized_bundle", fake_materialize_optimized_bundle)
+    monkeypatch.setattr(main_mod.AppServices, "get_module", fake_get_module)
+    monkeypatch.setattr(main_mod.AppServices, "ensure_module_mutation_allowed", fake_ensure_module_mutation_allowed)
     monkeypatch.setattr(main_mod.AppServices, "create_optimization_dataset", fake_create_optimization_dataset)
     monkeypatch.setattr(main_mod.AppServices, "get_optimization_dataset", fake_get_optimization_dataset)
     monkeypatch.setattr(main_mod.AppServices, "list_optimization_datasets", fake_list_optimization_datasets)
@@ -280,6 +328,16 @@ def _reset_state():
     ENQUEUED_JOB_IDS.clear()
     NEXT_JOB_ID = 1
     NEXT_DATASET_ID = 1
+    MODULE_DETAILS["mod-1"] = {
+        "id": "mod-1",
+        "source": "github",
+        "github_repo_url": "https://github.com/example/demo-bundle",
+        "github_branch": "main",
+        "current_commit_sha": "abc123",
+        "upstream_commit_sha": "abc123",
+        "sync_status": "synced",
+        "last_sync_error": None,
+    }
 
 
 def test_optimization_job_create_get_run_cancel(monkeypatch):
@@ -398,7 +456,10 @@ def test_optimization_job_create_get_run_cancel(monkeypatch):
         assert canceled.status_code == 200
         assert canceled.json()["status"] == "succeeded"
 
-        materialized = client.post(f"/optimization/jobs/{job_id}/materialize-bundle", json={"bundle_name": "Echo-optimized-opt-1", "bundle_version": "2.0.0"})
+        materialized = client.post(
+            f"/optimization/jobs/{job_id}/materialize-bundle",
+            json={"bundle_name": "Echo-optimized-opt-1", "bundle_version": "2.0.0", "github_pat": "ghp_test_secret"},
+        )
         assert materialized.status_code == 200
         assert materialized.json()["bundle_name"] == f"Echo-optimized-{job_id}"
         assert materialized.json()["bundle_version"] == "2.0.0"
@@ -524,3 +585,25 @@ def test_materialize_bundle_rejects_non_succeeded_job(monkeypatch):
         response = client.post("/optimization/jobs/opt-canceled/materialize-bundle", json={"bundle_name": "x"})
         assert response.status_code == 409
         assert response.json()["error"] == "only succeeded optimization jobs can create optimized bundles"
+
+
+def test_materialize_bundle_rejects_github_module_when_behind(monkeypatch):
+    _reset_state()
+    _patch_services(monkeypatch)
+    MODULE_DETAILS["mod-1"]["sync_status"] = "behind"
+    MODULE_DETAILS["mod-1"]["upstream_commit_sha"] = "def456"
+    JOBS["opt-succeeded"] = {
+        "id": "opt-succeeded",
+        "status": "succeeded",
+        "module_import_id": "mod-1",
+        "artifact_path": "optimization://opt-succeeded/program.json",
+    }
+
+    with TestClient(main_mod.app) as client:
+        response = client.post(
+            "/optimization/jobs/opt-succeeded/materialize-bundle",
+            json={"bundle_name": "x", "github_pat": "ghp_test_secret"},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["sync_state"]["sync_status"] == "behind"

@@ -7,7 +7,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import Settings
-from app.services import AppServices
+from app.services import AppServices, _classify_sync_status
 
 
 class _Conn:
@@ -267,3 +267,10 @@ def test_import_github_module_rejects_invalid_repo_root_and_cleans_checkout(tmp_
 
     checkout_root = tmp_path / "checkouts"
     assert list(checkout_root.glob("*")) == []
+
+
+def test_classify_sync_status_covers_sync_relationships():
+    assert _classify_sync_status("abc", "abc", "abc") == "synced"
+    assert _classify_sync_status("abc", "def", "abc") == "behind"
+    assert _classify_sync_status("def", "abc", "abc") == "ahead"
+    assert _classify_sync_status("abc", "def", "xyz") == "diverged"

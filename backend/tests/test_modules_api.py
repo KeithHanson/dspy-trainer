@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import main as main_mod
-from app.services import ReadinessStatus
+from app.services import ModuleSyncError, ReadinessStatus
 
 
 STORE: dict[str, dict] = {}
@@ -136,6 +136,44 @@ async def fake_import_github_module(self, github_repo_url, github_branch, github
     return {"id": module_id, "status": "validated"}
 
 
+async def fake_refresh_module_sync_status(self, module_id, github_pat):
+    assert github_pat == "ghp_test_secret"
+    module = STORE.get(module_id)
+    if module is None:
+        raise ValueError("module not found")
+    return {
+        "module_id": module_id,
+        "sync_status": module.get("sync_status", "legacy"),
+        "current_commit_sha": module.get("current_commit_sha"),
+        "upstream_commit_sha": module.get("upstream_commit_sha"),
+        "github_branch": module.get("github_branch"),
+        "github_repo_url": module.get("github_repo_url"),
+        "last_sync_error": module.get("last_sync_error"),
+    }
+
+
+async def fake_sync_module(self, module_id, github_pat):
+    state = await fake_refresh_module_sync_status(self, module_id, github_pat)
+    module = STORE[module_id]
+    if state["sync_status"] != "behind":
+        raise ModuleSyncError("module is not eligible for fast-forward sync", sync_state=state)
+    module["current_commit_sha"] = module["upstream_commit_sha"]
+    module["sync_status"] = "synced"
+    return {
+        **state,
+        "sync_status": "synced",
+        "current_commit_sha": module["current_commit_sha"],
+        "synced": True,
+    }
+
+
+async def fake_ensure_module_mutation_allowed(self, module_id, github_pat):
+    state = await fake_refresh_module_sync_status(self, module_id, github_pat)
+    if state["sync_status"] in {"behind", "diverged", "sync_error"}:
+        raise ModuleSyncError("module has upstream changes that must be synced before mutation", sync_state=state)
+    return state
+
+
 def _patch_services(monkeypatch):
     monkeypatch.setenv("DSPY_TRAINER_POSTGRES_DSN", "postgresql://postgres:postgres@localhost:5432/dspy_trainer")
     monkeypatch.setattr(main_mod.AppServices, "connect", fake_connect)
@@ -148,6 +186,9 @@ def _patch_services(monkeypatch):
     monkeypatch.setattr(main_mod.AppServices, "get_module", fake_get_module)
     monkeypatch.setattr(main_mod.AppServices, "list_modules", fake_list_modules)
     monkeypatch.setattr(main_mod.AppServices, "import_github_module", fake_import_github_module)
+    monkeypatch.setattr(main_mod.AppServices, "refresh_module_sync_status", fake_refresh_module_sync_status)
+    monkeypatch.setattr(main_mod.AppServices, "sync_module", fake_sync_module)
+    monkeypatch.setattr(main_mod.AppServices, "ensure_module_mutation_allowed", fake_ensure_module_mutation_allowed)
     monkeypatch.setattr(main_mod.AppServices, "set_module_bundle_metadata", fake_set_module_bundle_metadata)
     monkeypatch.setattr(main_mod.AppServices, "set_module_source_ref", fake_set_module_source_ref)
 
@@ -312,6 +353,68 @@ def test_github_import_validation_error_returns_400(monkeypatch):
 
     assert response.status_code == 400
     assert response.json()["error"] == "Validation failed with 1 error."
+
+
+def test_module_sync_status_refresh_and_sync(monkeypatch):
+    STORE.clear()
+    _patch_services(monkeypatch)
+    STORE["mod-1"] = {
+        "id": "mod-1",
+        "source": "github",
+        "github_repo_url": "https://github.com/example/demo-bundle",
+        "github_branch": "main",
+        "current_commit_sha": "abc123",
+        "upstream_commit_sha": "def456",
+        "sync_status": "behind",
+        "last_sync_error": None,
+    }
+
+    with TestClient(main_mod.app) as client:
+        cached = client.get("/modules/mod-1/sync-status")
+        assert cached.status_code == 200
+        assert cached.json()["sync_status"] == "behind"
+
+        refreshed = client.post("/modules/mod-1/sync-status", json={"github_pat": "ghp_test_secret"})
+        assert refreshed.status_code == 200
+        assert refreshed.json()["sync_status"] == "behind"
+        assert refreshed.json()["upstream_commit_sha"] == "def456"
+
+        synced = client.post("/modules/mod-1/sync", json={"github_pat": "ghp_test_secret"})
+        assert synced.status_code == 200
+        assert synced.json()["sync_status"] == "synced"
+        assert synced.json()["current_commit_sha"] == "def456"
+
+
+def test_github_module_metadata_update_is_blocked_when_behind(monkeypatch):
+    STORE.clear()
+    _patch_services(monkeypatch)
+    STORE["mod-1"] = {
+        "id": "mod-1",
+        "status": "validated",
+        "validation_status": "passed",
+        "smoke_status": "pending",
+        "diagnostics": [],
+        "bundle_name": "before-name",
+        "bundle_version": "0.1.0",
+        "source": "github",
+        "source_ref": "/tmp/dspy-trainer/checkouts/mod-1",
+        "checkout_path": "/tmp/dspy-trainer/checkouts/mod-1",
+        "github_repo_url": "https://github.com/example/demo-bundle",
+        "github_branch": "main",
+        "current_commit_sha": "abc123",
+        "upstream_commit_sha": "def456",
+        "sync_status": "behind",
+        "last_sync_error": None,
+    }
+
+    with TestClient(main_mod.app) as client:
+        response = client.patch(
+            "/modules/mod-1",
+            json={"bundle_name": "after-name", "bundle_version": "2.0.0", "github_pat": "ghp_test_secret"},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["sync_state"]["sync_status"] == "behind"
 
 
 def test_smoke_test_rerun_overwrites_status(monkeypatch):
