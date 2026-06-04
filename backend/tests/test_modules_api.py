@@ -80,6 +80,10 @@ async def fake_set_module_source_ref(self, module_id, source_ref):
     STORE[module_id]["source_ref"] = source_ref
 
 
+async def fake_get_module(self, module_id):
+    return STORE.get(module_id)
+
+
 def _patch_services(monkeypatch):
     monkeypatch.setenv("DSPY_TRAINER_POSTGRES_DSN", "postgresql://postgres:postgres@localhost:5432/dspy_trainer")
     monkeypatch.setattr(main_mod.AppServices, "connect", fake_connect)
@@ -89,6 +93,7 @@ def _patch_services(monkeypatch):
     monkeypatch.setattr(main_mod.AppServices, "set_validation_status", fake_set_validation_status)
     monkeypatch.setattr(main_mod.AppServices, "set_smoke_status", fake_set_smoke_status)
     monkeypatch.setattr(main_mod.AppServices, "get_diagnostics", fake_get_diagnostics)
+    monkeypatch.setattr(main_mod.AppServices, "get_module", fake_get_module)
     monkeypatch.setattr(main_mod.AppServices, "set_module_bundle_metadata", fake_set_module_bundle_metadata)
     monkeypatch.setattr(main_mod.AppServices, "set_module_source_ref", fake_set_module_source_ref)
 
@@ -171,6 +176,32 @@ def test_module_not_found_paths(monkeypatch):
 
         diag_missing = client.get("/modules/missing/diagnostics")
         assert diag_missing.status_code == 404
+
+        patch_missing = client.patch("/modules/missing", json={"bundle_name": "x", "bundle_version": "1.2.3"})
+        assert patch_missing.status_code == 404
+
+
+def test_module_metadata_can_be_updated(monkeypatch):
+    STORE.clear()
+    _patch_services(monkeypatch)
+    STORE["mod-9"] = {
+        "id": "mod-9",
+        "status": "validated",
+        "validation_status": "passed",
+        "smoke_status": "pending",
+        "diagnostics": [],
+        "bundle_name": "before-name",
+        "bundle_version": "0.1.0",
+        "source": "upload",
+        "source_ref": "/tmp/bundle",
+    }
+
+    with TestClient(main_mod.app) as client:
+        response = client.patch("/modules/mod-9", json={"bundle_name": "after-name", "bundle_version": "2.0.0"})
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["bundle_name"] == "after-name"
+        assert payload["bundle_version"] == "2.0.0"
 
 
 def test_smoke_test_rerun_overwrites_status(monkeypatch):

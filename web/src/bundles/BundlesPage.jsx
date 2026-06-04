@@ -263,6 +263,10 @@ function SavedBundlesPanel({ modulesUrl }) {
   const [selectedBundle, setSelectedBundle] = useState(null);
   const [activeFileName, setActiveFileName] = useState("module.py");
   const [bundleFiles, setBundleFiles] = useState({});
+  const [editingName, setEditingName] = useState("");
+  const [editingVersion, setEditingVersion] = useState("");
+  const [isSavingMetadata, setIsSavingMetadata] = useState(false);
+  const [metadataError, setMetadataError] = useState("");
 
   const loadBundles = async () => {
     setIsLoadingBundles(true);
@@ -301,6 +305,12 @@ function SavedBundlesPanel({ modulesUrl }) {
   }, []);
 
   useEffect(() => {
+    setEditingName(selectedBundle?.bundle_name || "");
+    setEditingVersion(selectedBundle?.bundle_version || "");
+    setMetadataError("");
+  }, [selectedBundle?.id, selectedBundle?.bundle_name, selectedBundle?.bundle_version]);
+
+  useEffect(() => {
     const loadFiles = async () => {
       if (!selectedBundle?.id) {
         setBundleFiles({});
@@ -330,6 +340,34 @@ function SavedBundlesPanel({ modulesUrl }) {
       setActiveFileName(fileNames[0]);
     }
   }, [bundleFiles, activeFileName]);
+
+  const saveBundleMetadata = async () => {
+    if (!selectedBundle?.id) {
+      return;
+    }
+    setIsSavingMetadata(true);
+    setMetadataError("");
+    try {
+      const response = await fetch(`${modulesUrl}/${selectedBundle.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          bundle_name: editingName,
+          bundle_version: editingVersion,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(await parseError(response, `Could not update bundle (${response.status})`));
+      }
+      const updated = await response.json();
+      setSavedBundles((current) => current.map((bundle) => (bundle.id === updated.id ? updated : bundle)));
+      setSelectedBundle(updated);
+    } catch (error) {
+      setMetadataError(error instanceof Error ? error.message : "Could not update bundle");
+    } finally {
+      setIsSavingMetadata(false);
+    }
+  };
 
   return (
     <div className="panel card-pad bundles-validation-result">
@@ -368,6 +406,19 @@ function SavedBundlesPanel({ modulesUrl }) {
             <h4 className="t-h2">Bundle detail</h4>
           </div>
           <p className="cap" style={{ marginBottom: 8 }}>ID: <span className="faint">{selectedBundle.id}</span></p>
+          <div className="bundles-metadata-form" style={{ marginBottom: 12 }}>
+            <div className="t-h2" style={{ marginBottom: 8 }}>Bundle metadata</div>
+            <div className="bundles-metadata-grid">
+              <label className="bundles-label" htmlFor="bundle-name-input">Bundle name</label>
+              <input id="bundle-name-input" className="bundles-file-input" type="text" value={editingName} onChange={(event) => setEditingName(event.target.value)} />
+              <label className="bundles-label" htmlFor="bundle-version-input">Bundle version</label>
+              <input id="bundle-version-input" className="bundles-file-input" type="text" value={editingVersion} onChange={(event) => setEditingVersion(event.target.value)} />
+            </div>
+            <div className="row gap-2" style={{ marginTop: 10 }}>
+              <Button size="sm" onClick={saveBundleMetadata} disabled={isSavingMetadata}>{isSavingMetadata ? "Saving..." : "Save metadata"}</Button>
+            </div>
+            {metadataError ? <p className="cap" style={{ marginTop: 8 }}>{metadataError}</p> : null}
+          </div>
           <div className="bundles-check-report" style={{ marginBottom: 12 }}>
             <div className="t-h2" style={{ marginBottom: 8 }}>Validation checklist</div>
             <ul className="bundles-check-results">

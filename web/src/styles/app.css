@@ -239,6 +239,11 @@ button { font-family: inherit; }
   border-color: rgba(224, 87, 63, 1) !important;
   color: #ffe3de !important;
 }
+.bundles-metadata-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
 .bundles-info-btn {
   width: 20px;
   height: 20px;

@@ -85,6 +85,11 @@ class SmokeTestRequest(BaseModel):
     num_threads: int = 1
 
 
+class ModuleMetadataUpdateRequest(BaseModel):
+    bundle_name: str | None = None
+    bundle_version: str | None = None
+
+
 class OptimizationJobCreateRequest(BaseModel):
     project_id: str
     module_import_id: str
@@ -266,6 +271,25 @@ async def get_module(module_id: str, request: Request):
     if result is None:
         return JSONResponse(status_code=404, content={"error": "module not found"})
     return result
+
+
+@app.patch("/modules/{module_id}")
+async def update_module(module_id: str, request: Request, payload: ModuleMetadataUpdateRequest):
+    services: AppServices = request.app.state.services
+    current = await services.get_module(module_id)
+    if current is None:
+        return JSONResponse(status_code=404, content={"error": "module not found"})
+    bundle_name = payload.bundle_name.strip() if isinstance(payload.bundle_name, str) else None
+    bundle_version = payload.bundle_version.strip() if isinstance(payload.bundle_version, str) else None
+    await services.set_module_bundle_metadata(
+        module_id,
+        bundle_name if bundle_name else "",
+        bundle_version if bundle_version else "",
+    )
+    updated = await services.get_module(module_id)
+    if updated is None:
+        return JSONResponse(status_code=404, content={"error": "module not found"})
+    return updated
 
 
 @app.get("/modules/{module_id}/files")

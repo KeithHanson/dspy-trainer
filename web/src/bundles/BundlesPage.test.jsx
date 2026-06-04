@@ -122,7 +122,67 @@ describe("BundlesPage", () => {
     );
 
     await userEvent.click(await screen.findByRole("button", { name: "View files" }));
-    expect(await screen.findByText("No diagnostics")).toBeInTheDocument();
+    expect(await screen.findByText("Bundle metadata")).toBeInTheDocument();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("updates bundle name and version from bundle detail", async () => {
+    const fetchMock = vi.fn((url, init) => {
+      if (String(url).endsWith("/modules") && (!init || init.method === "GET")) {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([
+            {
+              id: "mod-2",
+              bundle_name: "support-triage-agent",
+              bundle_version: "0.1.0",
+              validation_status: "passed",
+              status: "imported",
+              diagnostics: [],
+            },
+          ]),
+        });
+      }
+      if (String(url).endsWith("/modules/mod-2/files")) {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ "module.py": "print('x')" }) });
+      }
+      if (String(url).endsWith("/modules/mod-2") && init?.method === "PATCH") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue({
+            id: "mod-2",
+            bundle_name: "renamed-bundle",
+            bundle_version: "2.1.0",
+            validation_status: "passed",
+            status: "imported",
+            diagnostics: [],
+          }),
+        });
+      }
+      if (String(url).endsWith("/samples/module-bundle")) {
+        return Promise.resolve({ ok: true, blob: vi.fn().mockResolvedValue(new Blob(["zip"])) });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter>
+        <BundlesPage />
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(await screen.findByRole("button", { name: "View files" }));
+    await userEvent.clear(screen.getByLabelText("Bundle name"));
+    await userEvent.type(screen.getByLabelText("Bundle name"), "renamed-bundle");
+    await userEvent.clear(screen.getByLabelText("Bundle version"));
+    await userEvent.type(screen.getByLabelText("Bundle version"), "2.1.0");
+    await userEvent.click(screen.getByRole("button", { name: "Save metadata" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/modules\/mod-2$/), expect.objectContaining({ method: "PATCH" })));
+    expect(await screen.findByDisplayValue("renamed-bundle")).toBeInTheDocument();
+    expect(await screen.findByDisplayValue("2.1.0")).toBeInTheDocument();
 
     vi.unstubAllGlobals();
   });
