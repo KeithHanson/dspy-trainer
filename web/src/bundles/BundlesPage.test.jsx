@@ -5,69 +5,35 @@ import { vi } from "vitest";
 import { BundlesPage } from "./BundlesPage";
 
 describe("BundlesPage", () => {
-  it("downloads sample bundle when action is clicked", async () => {
-    const blob = new Blob(["zip"], { type: "application/zip" });
-    const fetchMock = vi.fn((url) => {
-      if (String(url).endsWith("/samples/module-bundle")) {
-        return Promise.resolve({ ok: true, blob: vi.fn().mockResolvedValue(blob) });
-      }
-      if (String(url).endsWith("/modules")) {
-        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
-      }
-      return Promise.reject(new Error(`Unexpected URL ${url}`));
-    });
-    if (!URL.createObjectURL) {
-      URL.createObjectURL = vi.fn();
-    }
-    if (!URL.revokeObjectURL) {
-      URL.revokeObjectURL = vi.fn();
-    }
-    const urlMock = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:test");
-    const revokeMock = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
-    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
-
-    vi.stubGlobal("fetch", fetchMock);
-
+  it("shows github import panel when import query is present", () => {
     render(
-      <MemoryRouter>
+      <MemoryRouter initialEntries={["/bundles?import=1"]}>
         <BundlesPage />
       </MemoryRouter>,
     );
 
-    await userEvent.click(screen.getByRole("button", { name: "Example bundle" }));
-
-    expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/samples\/module-bundle$/), { method: "GET" });
-    expect(urlMock).toHaveBeenCalledTimes(1);
-    expect(anchorClick).toHaveBeenCalledTimes(1);
-    expect(revokeMock).toHaveBeenCalledWith("blob:test");
-
-    vi.unstubAllGlobals();
-    urlMock.mockRestore();
-    revokeMock.mockRestore();
-    anchorClick.mockRestore();
+    expect(screen.getByText("Step 2: Import and validate GitHub bundle")).toBeInTheDocument();
+    expect(screen.queryByText("Example bundle")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Bundle zip")).not.toBeInTheDocument();
   });
 
-  it("shows upload and validate panel when upload query is present", () => {
-    render(
-      <MemoryRouter initialEntries={["/bundles?upload=1"]}>
-        <BundlesPage />
-      </MemoryRouter>,
-    );
-
-    expect(screen.getByText("Step 2: Upload and validate bundle")).toBeInTheDocument();
-  });
-
-  it("submits import + validate flow and renders diagnostics", async () => {
+  it("submits github import flow and renders diagnostics", async () => {
     const fetchMock = vi.fn((url) => {
       if (String(url).endsWith("/modules/import")) {
-        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ id: "mod-1" }) });
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ id: "mod-1", status: "imported" }) });
       }
-      if (String(url).endsWith("/modules/mod-1/validate-upload")) {
+      if (String(url).endsWith("/modules/mod-1")) {
         return Promise.resolve({
           ok: true,
           json: vi.fn().mockResolvedValue({
+            id: "mod-1",
+            bundle_name: "repo-bundle",
+            bundle_version: "1.2.3",
+            github_repo_url: "https://github.com/example/repo-bundle",
+            github_branch: "main",
+            current_commit_sha: "abc12345",
             validation_status: "failed",
-            diagnostics: [{ level: "error", code: "module_missing", message: "module.py missing" }],
+            diagnostics: [{ severity: "error", code: "module_missing", message: "module.py missing" }],
           }),
         });
       }
@@ -76,18 +42,50 @@ describe("BundlesPage", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     render(
-      <MemoryRouter initialEntries={["/bundles?upload=1"]}>
+      <MemoryRouter initialEntries={["/bundles?import=1"]}>
         <BundlesPage />
       </MemoryRouter>,
     );
 
-    const file = new File(["zip"], "bundle.zip", { type: "application/zip" });
-    const fileInput = screen.getByLabelText("Bundle zip");
-    fireEvent.change(fileInput, { target: { files: [file] } });
-    fireEvent.submit(screen.getByRole("button", { name: "Upload + validate" }).closest("form"));
+    await userEvent.type(screen.getByLabelText("GitHub repository URL"), "https://github.com/example/repo-bundle");
+    await userEvent.clear(screen.getByLabelText("Branch"));
+    await userEvent.type(screen.getByLabelText("Branch"), "main");
+    await userEvent.type(screen.getByLabelText("GitHub personal access token"), "ghp_test_secret");
+    fireEvent.submit(screen.getByRole("button", { name: "Import + validate" }).closest("form"));
 
     await waitFor(() => expect(screen.getByText("Validation result")).toBeInTheDocument());
     expect(screen.getByText(/module_missing: module.py missing/)).toBeInTheDocument();
+    expect(screen.getByText(/https:\/\/github.com\/example\/repo-bundle/)).toBeInTheDocument();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("renders github import validation errors", async () => {
+    const fetchMock = vi.fn((url, init) => {
+      if (String(url).endsWith("/modules") && (!init || init.method === "GET")) {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
+      }
+      if (String(url).endsWith("/modules/import")) {
+        return Promise.resolve({ ok: false, json: vi.fn().mockResolvedValue({ error: "Validation failed with 1 error." }) });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter initialEntries={["/bundles?import=1"]}>
+        <BundlesPage />
+      </MemoryRouter>,
+    );
+
+    await userEvent.type(screen.getByLabelText("GitHub repository URL"), "https://github.com/example/not-a-bundle");
+    await userEvent.clear(screen.getByLabelText("Branch"));
+    await userEvent.type(screen.getByLabelText("Branch"), "main");
+    await userEvent.type(screen.getByLabelText("GitHub personal access token"), "ghp_test_secret");
+    fireEvent.submit(screen.getByRole("button", { name: "Import + validate" }).closest("form"));
+
+    await waitFor(() => expect(screen.getByText("Import failed")).toBeInTheDocument());
+    expect(screen.getByText(/Validation failed with 1 error/)).toBeInTheDocument();
 
     vi.unstubAllGlobals();
   });
@@ -107,9 +105,6 @@ describe("BundlesPage", () => {
             },
           ]),
         });
-      }
-      if (String(url).endsWith("/samples/module-bundle")) {
-        return Promise.resolve({ ok: true, blob: vi.fn().mockResolvedValue(new Blob(["zip"])) });
       }
       return Promise.reject(new Error(`Unexpected URL ${url}`));
     });
@@ -159,9 +154,6 @@ describe("BundlesPage", () => {
             diagnostics: [],
           }),
         });
-      }
-      if (String(url).endsWith("/samples/module-bundle")) {
-        return Promise.resolve({ ok: true, blob: vi.fn().mockResolvedValue(new Blob(["zip"])) });
       }
       return Promise.reject(new Error(`Unexpected URL ${url}`));
     });
@@ -214,9 +206,6 @@ describe("BundlesPage", () => {
             "metric.py": `metric_${fileFetchCount}`,
           }),
         });
-      }
-      if (String(url).endsWith("/samples/module-bundle")) {
-        return Promise.resolve({ ok: true, blob: vi.fn().mockResolvedValue(new Blob(["zip"])) });
       }
       return Promise.reject(new Error(`Unexpected URL ${url}`));
     });

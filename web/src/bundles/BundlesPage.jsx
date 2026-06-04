@@ -157,13 +157,11 @@ function buildApiUrl(path) {
   return `${base.replace(/\/$/, "")}${path}`;
 }
 
-const PREP_STEPS = [
-  "Download the sample archive and unzip it locally.",
-  "Copy the sample folder and rename it for your module.",
-  "Update module.py with your DSPy signature and module class.",
-  "Update metric.py with your evaluation contract.",
-  "Set bundle.toml name/version and score_pass_threshold.",
-  "Zip the folder root, then upload for validation.",
+const IMPORT_GUIDANCE = [
+  "Repository root must contain module.py, metric.py, and bundle.toml.",
+  "The configured branch is cloned exactly as-is; subdirectories are not supported.",
+  "The PAT is used only for this request so the backend can clone and validate the repo.",
+  "Import fails immediately if the repo root does not satisfy the bundle contract.",
 ];
 
 const BUNDLE_FILE_TEMPLATES = {
@@ -175,37 +173,9 @@ const BUNDLE_FILE_TEMPLATES = {
 export function BundlesPage() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
-  const [isDownloading, setIsDownloading] = useState(false);
-  const [downloadError, setDownloadError] = useState("");
-  const showUploadIntent = searchParams.get("upload") === "1";
-
-  const sampleUrl = useMemo(() => buildApiUrl("/samples/module-bundle"), []);
+  const showImportIntent = searchParams.get("import") === "1";
 
   const validateUrl = useMemo(() => buildApiUrl("/modules"), []);
-
-  const handleDownload = async () => {
-    setIsDownloading(true);
-    setDownloadError("");
-    try {
-      const response = await fetch(sampleUrl, { method: "GET" });
-      if (!response.ok) {
-        throw new Error(`Sample download failed (${response.status})`);
-      }
-      const blob = await response.blob();
-      const objectUrl = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = objectUrl;
-      link.download = "example-bundle.zip";
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(objectUrl);
-    } catch (error) {
-      setDownloadError(error instanceof Error ? error.message : "Could not download sample bundle");
-    } finally {
-      setIsDownloading(false);
-    }
-  };
 
   return (
     <section className="page">
@@ -213,41 +183,36 @@ export function BundlesPage() {
         <header className="row between bundles-head">
           <div className="col gap-1">
             <h1 className="t-display" style={{ fontSize: 22 }}>Module Bundles</h1>
-            <p className="muted t-sm">Agent code packages - <span className="mono">module.py</span> + <span className="mono">metric.py</span> - validated in a sandbox.</p>
+            <p className="muted t-sm">GitHub-backed DSPy bundles with root-level <span className="mono">module.py</span>, <span className="mono">metric.py</span>, and <span className="mono">bundle.toml</span>.</p>
           </div>
           <div className="row gap-2">
-            <Button onClick={handleDownload} disabled={isDownloading}>
-              {isDownloading ? "Downloading..." : "Example bundle"}
-            </Button>
-            <Button variant="primary" onClick={() => navigate("/bundles?upload=1")}>Upload bundle</Button>
+            <Button variant="primary" onClick={() => navigate("/bundles?import=1")}>Import from GitHub</Button>
           </div>
         </header>
 
-        {downloadError ? <ErrorState title="Download failed" description={downloadError} /> : null}
-
-        {showUploadIntent ? (
+        {showImportIntent ? (
           <>
             <section className="panel card-pad bundles-section">
               <div className="row between">
-                <h2 className="t-h2">Expected bundle structure</h2>
+                <h2 className="t-h2">Repository requirements</h2>
                 <span className="t-label">Required</span>
               </div>
-              <pre className="bundles-structure">{`example-bundle.zip
+              <pre className="bundles-structure">{`repo-root/
 ├── module.py   # DSPy module + build_program()
 ├── metric.py   # judge_metric(example, prediction, trace=None)
-└── bundle.toml # name, version`}</pre>
+└── bundle.toml # name, version, score_pass_threshold`}</pre>
             </section>
 
             <section className="panel card-pad bundles-section">
-              <h2 className="t-h2">Preparation checklist</h2>
+              <h2 className="t-h2">Import checklist</h2>
               <ol className="bundles-checklist">
-                {PREP_STEPS.map((step) => (
+                {IMPORT_GUIDANCE.map((step) => (
                   <li key={step}>{step}</li>
                 ))}
               </ol>
             </section>
 
-            <UploadValidatePanel modulesUrl={validateUrl} onBack={() => navigate("/bundles")} onCreatePlan={() => navigate("/plans?new=1")} />
+            <GitHubImportPanel modulesUrl={validateUrl} onBack={() => navigate("/bundles")} onCreatePlan={() => navigate("/plans?new=1")} />
           </>
         ) : <SavedBundlesPanel modulesUrl={validateUrl} />}
       </div>
@@ -400,7 +365,7 @@ function SavedBundlesPanel({ modulesUrl }) {
         <Button size="sm" onClick={loadBundles} disabled={isLoadingBundles}>{isLoadingBundles ? "Refreshing..." : "Refresh"}</Button>
       </div>
       {!savedBundles.length ? (
-        <EmptyState title="No bundles saved yet" description="Upload and validate a bundle to save it." />
+        <EmptyState title="No bundles saved yet" description="Import a GitHub repository to create your first tracked bundle." />
       ) : (
         <div className="col gap-2">
           {savedBundles.map((bundle) => (
@@ -409,10 +374,12 @@ function SavedBundlesPanel({ modulesUrl }) {
                 <Icon name="box" size={18} />
               </div>
               <div className="bundles-row-btn">
-                <span className="t-sm">{bundle.bundle_name || bundle.source_ref || bundle.id}</span>
+                <span className="t-sm">{bundle.bundle_name || bundle.github_repo_url || bundle.source_ref || bundle.id}</span>
                 <span className="cap"><span className="mono">{bundle.validation_status}</span> · {bundle.status}</span>
                 {bundle.bundle_version ? <span className="cap">v{bundle.bundle_version}</span> : null}
-                {bundle.created_at ? <span className="cap mono">Uploaded {formatDateTime(bundle.created_at)}</span> : null}
+                {bundle.github_branch ? <span className="cap mono">Branch {bundle.github_branch}</span> : null}
+                {bundle.current_commit_sha ? <span className="cap mono">Commit {bundle.current_commit_sha.slice(0, 8)}</span> : null}
+                {bundle.created_at ? <span className="cap mono">Imported {formatDateTime(bundle.created_at)}</span> : null}
               </div>
               <Button size="sm" onClick={() => {
                 setActiveFileName("module.py");
@@ -455,6 +422,14 @@ function SavedBundlesPanel({ modulesUrl }) {
             <h4 className="t-h2">Bundle detail</h4>
           </div>
           <p className="cap" style={{ marginBottom: 8 }}>ID: <span className="faint">{selectedBundle.id}</span></p>
+          {selectedBundle.github_repo_url ? (
+            <div className="col gap-1" style={{ marginBottom: 12 }}>
+              <p className="cap">Repository: <span className="faint">{selectedBundle.github_repo_url}</span></p>
+              <p className="cap">Branch: <span className="faint">{selectedBundle.github_branch || "unknown"}</span></p>
+              <p className="cap">Sync status: <span className="faint">{selectedBundle.sync_status || "unknown"}</span></p>
+              {selectedBundle.current_commit_sha ? <p className="cap">Current commit: <span className="faint mono">{selectedBundle.current_commit_sha}</span></p> : null}
+            </div>
+          ) : null}
           <div className="bundles-check-report" style={{ marginBottom: 12 }}>
             <div className="t-h2" style={{ marginBottom: 8 }}>Validation checklist</div>
             <ul className="bundles-check-results">
@@ -534,8 +509,10 @@ async function parseError(response, fallback) {
   return fallback;
 }
 
-function UploadValidatePanel({ modulesUrl, onBack, onCreatePlan }) {
-  const [bundleFile, setBundleFile] = useState(null);
+function GitHubImportPanel({ modulesUrl, onBack, onCreatePlan }) {
+  const [githubRepoUrl, setGithubRepoUrl] = useState("");
+  const [githubBranch, setGithubBranch] = useState("main");
+  const [githubPat, setGithubPat] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState("");
   const [result, setResult] = useState(null);
@@ -544,8 +521,8 @@ function UploadValidatePanel({ modulesUrl, onBack, onCreatePlan }) {
 
   const onSubmit = async (event) => {
     event.preventDefault();
-    if (!bundleFile) {
-      setSubmitError("Please choose a .zip bundle file.");
+    if (!githubRepoUrl.trim() || !githubBranch.trim() || !githubPat.trim()) {
+      setSubmitError("Repository URL, branch, and PAT are required.");
       return;
     }
     setIsSubmitting(true);
@@ -555,26 +532,35 @@ function UploadValidatePanel({ modulesUrl, onBack, onCreatePlan }) {
       const importResp = await fetch(`${modulesUrl}/import`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ source: "upload", source_ref: bundleFile.name }),
+        body: JSON.stringify({
+          source: "github",
+          github_repo_url: githubRepoUrl.trim(),
+          github_branch: githubBranch.trim(),
+          github_pat: githubPat,
+        }),
       });
       if (!importResp.ok) {
         throw new Error(await parseError(importResp, `Import failed (${importResp.status})`));
       }
       const imported = await importResp.json();
 
-      const formData = new FormData();
-      formData.append("bundle", bundleFile);
-      const validateResp = await fetch(`${modulesUrl}/${imported.id}/validate-upload`, {
-        method: "POST",
-        body: formData,
-      });
-      if (!validateResp.ok) {
-        throw new Error(await parseError(validateResp, `Validation failed (${validateResp.status})`));
+      const detailResp = await fetch(`${modulesUrl}/${imported.id}`, { method: "GET" });
+      if (!detailResp.ok) {
+        throw new Error(await parseError(detailResp, `Could not load imported bundle (${detailResp.status})`));
       }
-      const validated = await validateResp.json();
-      setResult({ moduleId: imported.id, ...validated });
+      const detail = await detailResp.json();
+      setResult({
+        moduleId: imported.id,
+        validation_status: detail.validation_status,
+        diagnostics: normalizeDiagnostics(detail.diagnostics),
+        bundle_name: detail.bundle_name,
+        bundle_version: detail.bundle_version,
+        github_repo_url: detail.github_repo_url,
+        github_branch: detail.github_branch,
+        current_commit_sha: detail.current_commit_sha,
+      });
     } catch (error) {
-      setSubmitError(error instanceof Error ? error.message : "Upload failed");
+      setSubmitError(error instanceof Error ? error.message : "Import failed");
     } finally {
       setIsSubmitting(false);
     }
@@ -583,29 +569,52 @@ function UploadValidatePanel({ modulesUrl, onBack, onCreatePlan }) {
   return (
     <section className="panel card-pad bundles-section">
       <div className="row between" style={{ marginBottom: 10 }}>
-        <h2 className="t-h2">Step 2: Upload and validate bundle</h2>
+        <h2 className="t-h2">Step 2: Import and validate GitHub bundle</h2>
         <Button variant="ghost" size="sm" onClick={onBack}>Back</Button>
       </div>
-      <p className="cap" style={{ marginBottom: 14 }}>Upload a .zip bundle and run validation directly from archive contents.</p>
+      <p className="cap" style={{ marginBottom: 14 }}>Import a GitHub repo root that already matches the bundle contract. The PAT is used for this request only.</p>
 
       <form className="bundles-form col gap-2" onSubmit={onSubmit}>
-        <label className="bundles-label" htmlFor="bundle-file">Bundle zip</label>
+        <label className="bundles-label" htmlFor="github-repo-url">GitHub repository URL</label>
         <input
-          id="bundle-file"
+          id="github-repo-url"
           className="bundles-file-input"
-          type="file"
-          accept=".zip,application/zip"
-          onChange={(event) => setBundleFile(event.target.files?.[0] || null)}
+          type="url"
+          placeholder="https://github.com/owner/repo"
+          value={githubRepoUrl}
+          onChange={(event) => setGithubRepoUrl(event.target.value)}
+          required
+        />
+
+        <label className="bundles-label" htmlFor="github-branch">Branch</label>
+        <input
+          id="github-branch"
+          className="bundles-file-input"
+          type="text"
+          placeholder="main"
+          value={githubBranch}
+          onChange={(event) => setGithubBranch(event.target.value)}
+          required
+        />
+
+        <label className="bundles-label" htmlFor="github-pat">GitHub personal access token</label>
+        <input
+          id="github-pat"
+          className="bundles-file-input"
+          type="password"
+          placeholder="ghp_..."
+          value={githubPat}
+          onChange={(event) => setGithubPat(event.target.value)}
           required
         />
 
         <div className="row" style={{ marginTop: 8 }}>
-          <button className="btn btn-primary" type="submit" disabled={isSubmitting || !bundleFile}>{isSubmitting ? "Validating..." : "Upload + validate"}</button>
+          <button className="btn btn-primary" type="submit" disabled={isSubmitting || !githubRepoUrl.trim() || !githubBranch.trim() || !githubPat.trim()}>{isSubmitting ? "Importing..." : "Import + validate"}</button>
         </div>
       </form>
 
-      {isSubmitting ? <LoadingState label="Running validation..." /> : null}
-      {submitError ? <ErrorState title="Validation failed" description={submitError} /> : null}
+      {isSubmitting ? <LoadingState label="Cloning repository and running validation..." /> : null}
+      {submitError ? <ErrorState title="Import failed" description={submitError} /> : null}
 
       {result ? (
         <div className="panel card-pad bundles-validation-result">
@@ -614,6 +623,9 @@ function UploadValidatePanel({ modulesUrl, onBack, onCreatePlan }) {
             <span className="t-label">{result.validation_status}</span>
           </div>
           <p className="cap" style={{ marginBottom: 10 }}>Module ID: <span className="faint">{result.moduleId}</span></p>
+          {result.github_repo_url ? <p className="cap" style={{ marginBottom: 6 }}>Repository: <span className="faint">{result.github_repo_url}</span></p> : null}
+          {result.github_branch ? <p className="cap" style={{ marginBottom: 6 }}>Branch: <span className="faint">{result.github_branch}</span></p> : null}
+          {result.current_commit_sha ? <p className="cap" style={{ marginBottom: 10 }}>Commit: <span className="faint mono">{result.current_commit_sha}</span></p> : null}
           <div className="bundles-check-report" style={{ marginBottom: 12 }}>
             <div className="t-label" style={{ marginBottom: 8 }}>Validation checks</div>
             <ul className="bundles-check-results">
@@ -633,7 +645,7 @@ function UploadValidatePanel({ modulesUrl, onBack, onCreatePlan }) {
             <ul className="bundles-diags">
               {result.diagnostics.map((diag, idx) => (
                 <li key={`${diag.code}-${idx}`}>
-                  <span className="t-label">{diag.level || "info"}</span> {diag.code}: {diag.message}
+                  <span className="t-label">{diag.level || diag.severity || "info"}</span> {diag.code}: {diag.message}
                 </li>
               ))}
             </ul>
