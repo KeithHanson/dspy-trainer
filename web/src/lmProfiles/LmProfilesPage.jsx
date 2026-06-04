@@ -415,7 +415,8 @@ function formatDate(value) {
 function buildCurlCommand(profile) {
   const backendBase = (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, "");
   const litellmBase = backendBase.replace(":8000", ":4000");
-  const model = String(profile?.model || "openai/gpt-4o-mini");
+  const profileId = String(profile?.id || "<lm-profile-id>");
+  const model = `lm-profile:${profileId}`;
   const virtualKey = String(profile?.virtual_key || "<virtual-key-unavailable>");
   return `curl -s ${litellmBase}/chat/completions \\
   -H "Authorization: Bearer ${virtualKey}" \\

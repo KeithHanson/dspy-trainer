@@ -42,6 +42,7 @@ describe("LmProfilesPage", () => {
     expect(within(profileCard).getByText("http://litellm:4000")).toBeInTheDocument();
     expect(within(profileCard).getByText("Test with curl")).toBeInTheDocument();
     expect(within(profileCard).getByText(/sk-very-secret-key/)).toBeInTheDocument();
+    expect(within(profileCard).getByText(/"model": "lm-profile:lm-1"/)).toBeInTheDocument();
     expect(within(profileCard).getByRole("button", { name: "Copy curl" })).toBeInTheDocument();
   });
 
