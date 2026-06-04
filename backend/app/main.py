@@ -789,6 +789,15 @@ async def delete_agent_run_plan(plan_id: str, request: Request):
     return {"id": plan_id, "deleted": True}
 
 
+@app.post("/agent-run-plans/{plan_id}/cancel")
+async def cancel_agent_run_plan(plan_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    result = await services.cancel_agent_run_plan(plan_id)
+    if result is None:
+        return JSONResponse(status_code=404, content={"error": "agent run plan not found"})
+    return result
+
+
 @app.post("/agent-run-plans/{plan_id}/enqueue")
 async def enqueue_agent_run_plan(plan_id: str, request: Request):
     services: AppServices = request.app.state.services

@@ -133,6 +133,19 @@ async def fake_delete_agent_run_plan(self, plan_id):
     return True
 
 
+async def fake_cancel_agent_run_plan(self, plan_id):
+    plan = PLANS.get(plan_id)
+    if plan is None:
+        return None
+    if plan["status"] in {"queued", "running"}:
+        plan["status"] = "canceled"
+        for task in TASKS.get(plan_id, []):
+            if task["status"] in {"pending", "queued", "running"}:
+                task["status"] = "canceled"
+                task["error"] = "eval run canceled by operator"
+    return plan
+
+
 async def fake_list_agent_run_plans_for_module(self, module_import_id, limit, offset):
     if module_import_id not in MODULES:
         return None
@@ -162,6 +175,7 @@ def _patch_services(monkeypatch):
     monkeypatch.setattr(main_mod.AppServices, "enqueue_agent_run_plan", fake_enqueue_agent_run_plan)
     monkeypatch.setattr(main_mod.AppServices, "list_agent_run_tasks", fake_list_agent_run_tasks)
     monkeypatch.setattr(main_mod.AppServices, "delete_agent_run_plan", fake_delete_agent_run_plan)
+    monkeypatch.setattr(main_mod.AppServices, "cancel_agent_run_plan", fake_cancel_agent_run_plan)
     monkeypatch.setattr(main_mod.AppServices, "list_agent_run_plans_for_module", fake_list_agent_run_plans_for_module)
 
 
@@ -231,6 +245,7 @@ def test_agent_run_plan_not_found_paths(monkeypatch):
         assert client.post("/agent-run-plans/missing/enqueue").status_code == 404
         assert client.get("/agent-run-plans/missing/tasks").status_code == 404
         assert client.delete("/agent-run-plans/missing").status_code == 404
+        assert client.post("/agent-run-plans/missing/cancel").status_code == 404
 
 
 def test_agent_run_plan_delete(monkeypatch):
@@ -259,6 +274,42 @@ def test_agent_run_plan_delete(monkeypatch):
 
         missing = client.get(f"/agent-run-plans/{plan_id}")
         assert missing.status_code == 404
+
+
+def test_agent_run_plan_cancel(monkeypatch):
+    _reset_state()
+    _patch_services(monkeypatch)
+    with TestClient(main_mod.app) as client:
+        created = client.post(
+            "/agent-run-plans",
+            json={
+                "project_id": "proj-1",
+                "module_import_id": "mod-1",
+                "scenario_id": "scn-1",
+                "dataset_version": "v1",
+                "bundle_path": "examples/module_bundles/simple_echo_agent",
+                "eval_inputs": [
+                    {"input": {"question": "q1"}, "label": {"expected": "a1"}},
+                    {"input": {"question": "q2"}, "label": {"expected": "a2"}},
+                ],
+                "runs_per_question": 1,
+                "max_workers": 1,
+            },
+        )
+        assert created.status_code == 200
+        plan_id = created.json()["id"]
+
+        enqueued = client.post(f"/agent-run-plans/{plan_id}/enqueue")
+        assert enqueued.status_code == 200
+        assert enqueued.json()["status"] == "queued"
+
+        canceled = client.post(f"/agent-run-plans/{plan_id}/cancel")
+        assert canceled.status_code == 200
+        assert canceled.json()["status"] == "canceled"
+
+        tasks = client.get(f"/agent-run-plans/{plan_id}/tasks")
+        assert tasks.status_code == 200
+        assert all(item["status"] == "canceled" for item in tasks.json()["items"])
 
 
 def test_module_agent_run_plans_list(monkeypatch):

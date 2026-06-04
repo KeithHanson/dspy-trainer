@@ -3922,6 +3922,37 @@ class AppServices:
             result = await conn.execute("delete from agent_run_plans where id = $1", plan_id)
         return str(result).startswith("DELETE 1")
 
+    async def cancel_agent_run_plan(self, plan_id: str) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        now = datetime.now(timezone.utc)
+        async with self.postgres_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                update agent_run_plans
+                set status='canceled', updated_at=$2
+                where id=$1 and status in ('queued','running')
+                returning id
+                """,
+                plan_id,
+                now,
+            )
+            if row is not None:
+                await conn.execute(
+                    """
+                    update agent_run_tasks
+                    set status='canceled', error=$2, updated_at=$3
+                    where plan_id=$1 and status in ('pending','queued')
+                    """,
+                    plan_id,
+                    "eval run canceled by operator",
+                    now,
+                )
+        if row is None:
+            return await self.get_agent_run_plan(plan_id)
+        await self._reconcile_agent_run_plan(plan_id)
+        return await self.get_agent_run_plan(plan_id)
+
     async def enqueue_agent_run_plan(self, plan_id: str) -> dict[str, Any] | None:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
@@ -4105,6 +4136,7 @@ class AppServices:
                 """
                 select t.id, t.plan_id, t.status, t.input_payload, t.label_payload,
                        p.bundle_path, p.max_workers, p.mlflow_experiment_id, p.mlflow_parent_run_id, p.project_id,
+                       p.status as plan_status,
                        p.lm_profile_id,
                        lp.model as lm_model,
                        lp.api_base as lm_api_base,
@@ -4121,6 +4153,18 @@ class AppServices:
             )
             if task is None:
                 return None
+            if task["plan_status"] == "canceled":
+                log_lines.append("status=canceled")
+                log_lines.append("reason=eval run canceled by operator")
+                await conn.execute(
+                    "update agent_run_tasks set status='canceled', error=$2, worker_log=$3, updated_at=$4 where id=$1",
+                    task_id,
+                    "eval run canceled by operator",
+                    "\n".join(log_lines),
+                    now,
+                )
+                await self._reconcile_agent_run_plan(str(task["plan_id"]))
+                return await conn.fetchrow("select id, status from agent_run_tasks where id = $1", task_id)
             if task["status"] not in {"queued", "pending"}:
                 return await conn.fetchrow("select id, status from agent_run_tasks where id = $1", task_id)
             running_count = await conn.fetchval(
@@ -4224,32 +4268,56 @@ class AppServices:
                     pass
 
             async with self.postgres_pool.acquire() as conn:
-                await conn.execute(
-                    """
-                    update agent_run_tasks
-                    set status='succeeded', prediction_payload=$2::jsonb, score=$3, eval_pass=$4, rationale=$5, error=null, worker_log=$6, updated_at=$7
-                    where id=$1
-                    """,
-                    task_id,
-                    __import__("json").dumps(item["prediction"]),
-                    score,
-                    bool(item.get("passed", False)),
-                    str(item["rationale"]),
-                    "\n".join(log_lines),
-                    datetime.now(timezone.utc),
-                )
+                plan_status = await conn.fetchval("select status from agent_run_plans where id = $1", str(task["plan_id"]))
+                if plan_status == "canceled":
+                    log_lines.append("status=canceled")
+                    log_lines.append("reason=eval run canceled by operator")
+                    await conn.execute(
+                        "update agent_run_tasks set status='canceled', error=$2, worker_log=$3, updated_at=$4 where id=$1",
+                        task_id,
+                        "eval run canceled by operator",
+                        "\n".join(log_lines),
+                        datetime.now(timezone.utc),
+                    )
+                else:
+                    await conn.execute(
+                        """
+                        update agent_run_tasks
+                        set status='succeeded', prediction_payload=$2::jsonb, score=$3, eval_pass=$4, rationale=$5, error=null, worker_log=$6, updated_at=$7
+                        where id=$1
+                        """,
+                        task_id,
+                        __import__("json").dumps(item["prediction"]),
+                        score,
+                        bool(item.get("passed", False)),
+                        str(item["rationale"]),
+                        "\n".join(log_lines),
+                        datetime.now(timezone.utc),
+                    )
         except Exception as exc:
             log_lines.append("status=failed")
             log_lines.append("traceback:")
             log_lines.append(traceback.format_exc())
             async with self.postgres_pool.acquire() as conn:
-                await conn.execute(
-                    "update agent_run_tasks set status='failed', error=$2, worker_log=$3, updated_at=$4 where id=$1",
-                    task_id,
-                    str(exc),
-                    "\n".join(log_lines),
-                    datetime.now(timezone.utc),
-                )
+                plan_status = await conn.fetchval("select status from agent_run_plans where id = $1", str(task["plan_id"]))
+                if plan_status == "canceled":
+                    log_lines.append("status=canceled")
+                    log_lines.append("reason=eval run canceled by operator")
+                    await conn.execute(
+                        "update agent_run_tasks set status='canceled', error=$2, worker_log=$3, updated_at=$4 where id=$1",
+                        task_id,
+                        "eval run canceled by operator",
+                        "\n".join(log_lines),
+                        datetime.now(timezone.utc),
+                    )
+                else:
+                    await conn.execute(
+                        "update agent_run_tasks set status='failed', error=$2, worker_log=$3, updated_at=$4 where id=$1",
+                        task_id,
+                        str(exc),
+                        "\n".join(log_lines),
+                        datetime.now(timezone.utc),
+                    )
 
         await self._reconcile_agent_run_plan(str(task["plan_id"]))
         await self._queue_more_agent_run_tasks(str(task["plan_id"]))
@@ -4271,10 +4339,10 @@ class AppServices:
                 )
                 or 0
             )
-            status = "running"
-            if pending_or_active == 0 and total > 0:
-                status = "failed" if failed > 0 else "succeeded"
             plan_row = await conn.fetchrow("select mlflow_parent_run_id, status from agent_run_plans where id = $1", plan_id)
+            status = "canceled" if plan_row and plan_row["status"] == "canceled" else "running"
+            if status != "canceled" and pending_or_active == 0 and total > 0:
+                status = "failed" if failed > 0 else "succeeded"
             await conn.execute(
                 """
                 update agent_run_plans
@@ -4288,8 +4356,8 @@ class AppServices:
                 failed,
                 now,
             )
-        if plan_row and plan_row["mlflow_parent_run_id"] and status in {"succeeded", "failed"}:
-            mlflow_status = "FINISHED" if status == "succeeded" else "FAILED"
+        if plan_row and plan_row["mlflow_parent_run_id"] and pending_or_active == 0 and status in {"succeeded", "failed", "canceled"}:
+            mlflow_status = "FINISHED" if status == "succeeded" else "FAILED" if status == "failed" else "KILLED"
             try:
                 await self.finalize_mlflow_run(str(plan_row["mlflow_parent_run_id"]), status=mlflow_status)
             except Exception:
@@ -4301,8 +4369,10 @@ class AppServices:
         now = datetime.now(timezone.utc)
         tasks_to_queue: list[str] = []
         async with self.postgres_pool.acquire() as conn:
-            plan = await conn.fetchrow("select max_workers from agent_run_plans where id = $1", plan_id)
+            plan = await conn.fetchrow("select max_workers, status from agent_run_plans where id = $1", plan_id)
             if plan is None:
+                return
+            if plan["status"] == "canceled":
                 return
             active = int(
                 await conn.fetchval(

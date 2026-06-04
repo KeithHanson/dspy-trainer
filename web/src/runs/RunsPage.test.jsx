@@ -45,6 +45,7 @@ describe("RunsPage", () => {
 
     expect(await screen.findByText("Runs")).toBeInTheDocument();
     expect(await screen.findByText("running")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Delete" })).not.toBeInTheDocument();
     vi.unstubAllGlobals();
   });
@@ -142,7 +143,111 @@ describe("RunsPage", () => {
     expect(await screen.findByText("Run summary")).toBeInTheDocument();
     expect(await screen.findByText(/LM profile: GPT-4o/)).toBeInTheDocument();
     expect(await screen.findByText("Workers")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Cancel run" })).toBeInTheDocument();
     expect((await screen.findAllByText("running")).length).toBeGreaterThan(0);
+    vi.unstubAllGlobals();
+  });
+
+  it("cancels a run from list", async () => {
+    const fetchMock = vi.fn((url, init) => {
+      if (String(url).includes("/agent-run-plans?") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([
+            { id: "plan-1", status: "running", completed_tasks: 1, total_tasks: 6, failed_tasks: 0, created_at: "2026-01-01T00:00:00+00:00" },
+          ]),
+        });
+      }
+      if (String(url).endsWith("/workers") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue({ items: [], total_workers: 8, reported_workers: 0, available_workers: 0, busy_workers: 0 }),
+        });
+      }
+      if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
+      }
+      if (String(url).endsWith("/agent-run-plans/plan-1/cancel") && init?.method === "POST") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue({ id: "plan-1", status: "canceled", completed_tasks: 1, total_tasks: 6, failed_tasks: 0, created_at: "2026-01-01T00:00:00+00:00" }),
+        });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("confirm", vi.fn(() => true));
+
+    render(
+      <MemoryRouter initialEntries={["/runs"]}>
+        <RunsPage />
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+
+    expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/agent-run-plans\/plan-1\/cancel$/), expect.objectContaining({ method: "POST" }));
+    expect(await screen.findByText("canceled")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Delete" })).toBeInTheDocument();
+    vi.unstubAllGlobals();
+  });
+
+  it("cancels a run from detail view", async () => {
+    const fetchMock = vi.fn((url, init) => {
+      if (String(url).endsWith("/agent-run-plans/plan-1") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue({
+            id: "plan-1",
+            status: "running",
+            lm_profile_id: "lm-1",
+            completed_tasks: 1,
+            total_tasks: 6,
+            failed_tasks: 0,
+            max_workers: 2,
+          }),
+        });
+      }
+      if (String(url).includes("/agent-run-plans/plan-1/tasks") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ items: [] }) });
+      }
+      if (String(url).endsWith("/workers") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ items: [], total_workers: 8, reported_workers: 0, available_workers: 0, busy_workers: 0 }) });
+      }
+      if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "lm-1", name: "GPT-4o" }]) });
+      }
+      if (String(url).endsWith("/agent-run-plans/plan-1/cancel") && init?.method === "POST") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue({
+            id: "plan-1",
+            status: "canceled",
+            lm_profile_id: "lm-1",
+            completed_tasks: 1,
+            total_tasks: 6,
+            failed_tasks: 0,
+            max_workers: 2,
+          }),
+        });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("confirm", vi.fn(() => true));
+
+    render(
+      <MemoryRouter initialEntries={["/runs?plan=plan-1"]}>
+        <RunsPage />
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(await screen.findByRole("button", { name: "Cancel run" }));
+
+    expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/agent-run-plans\/plan-1\/cancel$/), expect.objectContaining({ method: "POST" }));
+    expect(await screen.findByText("canceled")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Cancel run" })).not.toBeInTheDocument();
     vi.unstubAllGlobals();
   });
 

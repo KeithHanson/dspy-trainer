@@ -18,6 +18,7 @@ export function RunsPage() {
   const [selectedTask, setSelectedTask] = useState(null);
   const [filter, setFilter] = useState("all");
   const [isLoading, setIsLoading] = useState(false);
+  const [cancelingPlanId, setCancelingPlanId] = useState("");
   const [deletingPlanId, setDeletingPlanId] = useState("");
   const [error, setError] = useState("");
   const [workersError, setWorkersError] = useState("");
@@ -65,6 +66,30 @@ export function RunsPage() {
       setError(err instanceof Error ? err.message : "Could not delete run");
     } finally {
       setDeletingPlanId("");
+    }
+  };
+
+  const cancelRunPlan = async (id) => {
+    const confirmed = window.confirm("Cancel this run? Running work will stop after the current in-flight tasks finish.");
+    if (!confirmed) {
+      return;
+    }
+    setCancelingPlanId(id);
+    setError("");
+    try {
+      const response = await fetch(`${apiBase}/agent-run-plans/${id}/cancel`, { method: "POST" });
+      if (!response.ok) {
+        throw new Error(`Could not cancel run (${response.status})`);
+      }
+      const payload = await response.json();
+      setPlans((current) => current.map((plan) => (plan.id === id ? payload : plan)));
+      if (planId === id) {
+        setRunPlan(payload);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not cancel run");
+    } finally {
+      setCancelingPlanId("");
     }
   };
 
@@ -193,10 +218,23 @@ export function RunsPage() {
                         <td className="cap">{formatTimeAgo(plan.created_at)}</td>
                         <td><Icon name="chevR" size={14} className="faint" /></td>
                         <td>
+                          {canCancelRunPlan(plan.status) ? (
+                            <Button
+                              size="sm"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                cancelRunPlan(plan.id);
+                              }}
+                              disabled={cancelingPlanId === plan.id}
+                            >
+                              {cancelingPlanId === plan.id ? "Canceling..." : "Cancel"}
+                            </Button>
+                          ) : null}
                           {canDeleteRunPlan(plan.status) ? (
                             <Button
                               size="sm"
                               variant="danger"
+                              className={canCancelRunPlan(plan.status) ? "optimization-job-action" : ""}
                               onClick={(event) => {
                                 event.stopPropagation();
                                 deleteRunPlan(plan.id);
@@ -236,6 +274,11 @@ export function RunsPage() {
             <p className="muted t-sm">Live run monitor for one evaluation plan execution.</p>
           </div>
           <div className="row gap-2">
+            {runPlan?.id && canCancelRunPlan(runPlan.status) ? (
+              <Button onClick={() => cancelRunPlan(runPlan.id)} disabled={cancelingPlanId === runPlan.id}>
+                {cancelingPlanId === runPlan.id ? "Canceling..." : "Cancel run"}
+              </Button>
+            ) : null}
             <Button onClick={() => navigate("/runs")}>All jobs</Button>
             <Button onClick={() => navigate("/plans")}>Back to plans</Button>
           </div>
@@ -551,6 +594,10 @@ function toneForAverageScore(value, threshold) {
     return "";
   }
   return Number(value) >= Number(threshold) ? "runs-kpi-pass" : "runs-kpi-fail";
+}
+
+function canCancelRunPlan(status) {
+  return status === "queued" || status === "running";
 }
 
 function canDeleteRunPlan(status) {
