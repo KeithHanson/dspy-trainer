@@ -1,15 +1,11 @@
 from contextlib import asynccontextmanager
-from io import BytesIO
 import os
 from pathlib import Path
-import shutil
-from tempfile import TemporaryDirectory
 from typing import Any
-from zipfile import ZIP_DEFLATED, ZipFile
 
-from fastapi import FastAPI, File, Request, UploadFile
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
@@ -41,32 +37,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-SAMPLE_BUNDLE_DIR = Path(__file__).resolve().parents[1] / "sample_bundles" / "example-bundle"
-
-
-def _iter_sample_bundle_files(bundle_dir: Path) -> list[Path]:
-    return sorted(path for path in bundle_dir.rglob("*") if path.is_file())
-
-
-def _resolve_bundle_root(extract_root: Path) -> Path:
-    direct = extract_root / "module.py"
-    if direct.exists():
-        return extract_root
-
-    candidates: list[tuple[int, Path]] = []
-    for module_file in extract_root.rglob("module.py"):
-        parent = module_file.parent
-        if (parent / "metric.py").exists():
-            score = 1 if (parent / "bundle.toml").exists() else 0
-            candidates.append((score, parent))
-
-    if not candidates:
-        return extract_root
-
-    candidates.sort(key=lambda item: item[0], reverse=True)
-    return candidates[0][1]
 
 
 class ModuleImportRequest(BaseModel):
@@ -257,21 +227,6 @@ async def list_workers(request: Request):
     return await services.list_workers()
 
 
-@app.get("/samples/module-bundle")
-async def download_module_bundle_sample():
-    if not SAMPLE_BUNDLE_DIR.exists() or not SAMPLE_BUNDLE_DIR.is_dir():
-        return JSONResponse(status_code=500, content={"error": "sample bundle directory is missing"})
-
-    bundle = BytesIO()
-    with ZipFile(bundle, mode="w", compression=ZIP_DEFLATED) as archive:
-        root_name = SAMPLE_BUNDLE_DIR.name
-        for file_path in _iter_sample_bundle_files(SAMPLE_BUNDLE_DIR):
-            archive_name = f"{root_name}/{file_path.relative_to(SAMPLE_BUNDLE_DIR).as_posix()}"
-            archive.write(file_path, arcname=archive_name)
-    headers = {"Content-Disposition": 'attachment; filename="example-bundle.zip"'}
-    return Response(content=bundle.getvalue(), media_type="application/zip", headers=headers)
-
-
 @app.post("/modules/import")
 async def import_module(request: Request, payload: ModuleImportRequest):
     services: AppServices = request.app.state.services
@@ -441,52 +396,6 @@ async def validate_module(module_id: str, request: Request, payload: ValidateReq
         commit_sha=module_state["bundle_commit_sha"],
         bundle_version=module_state["bundle_version"],
     )
-    if not found:
-        return JSONResponse(status_code=404, content={"error": "module not found"})
-    return {
-        "id": module_id,
-        "validation_status": status,
-        "diagnostics": report.diagnostics,
-        "summary": report.summary,
-    }
-
-
-@app.post("/modules/{module_id}/validate-upload")
-async def validate_module_upload(module_id: str, request: Request, bundle: UploadFile = File(...)):
-    services: AppServices = request.app.state.services
-    if not bundle.filename or not bundle.filename.lower().endswith(".zip"):
-        return JSONResponse(status_code=400, content={"error": "bundle must be a .zip file"})
-    payload = await bundle.read()
-    try:
-        with TemporaryDirectory() as temp_dir:
-            archive_path = Path(temp_dir) / "bundle.zip"
-            archive_path.write_bytes(payload)
-            with ZipFile(archive_path) as archive:
-                archive.extractall(temp_dir)
-
-            root = Path(temp_dir)
-            bundle_root = _resolve_bundle_root(root)
-
-            report = validate_bundle(str(bundle_root))
-            if report.passed:
-                bundles_dir = Path("/tmp/dspy-trainer/bundles")
-                bundles_dir.mkdir(parents=True, exist_ok=True)
-                target_dir = bundles_dir / module_id
-                if target_dir.exists():
-                    shutil.rmtree(target_dir)
-                shutil.copytree(bundle_root, target_dir)
-                await services.set_module_source_ref(module_id, str(target_dir))
-    except Exception:
-        return JSONResponse(status_code=400, content={"error": "invalid zip bundle"})
-
-    await services.set_module_bundle_metadata(
-        module_id,
-        report.metadata.get("name") if isinstance(report.metadata.get("name"), str) else None,
-        report.metadata.get("version") if isinstance(report.metadata.get("version"), str) else None,
-    )
-
-    status = "passed" if report.passed else "failed"
-    found = await services.set_validation_status(module_id, status, report.diagnostics)
     if not found:
         return JSONResponse(status_code=404, content={"error": "module not found"})
     return {
