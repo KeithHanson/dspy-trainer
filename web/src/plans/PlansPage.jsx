@@ -25,6 +25,151 @@ function getBundleDisplayName(bundle) {
   return bundle?.bundle_name || bundle?.id || "Untitled bundle";
 }
 
+function normalizeContractFields(fields) {
+  if (!Array.isArray(fields)) {
+    return [];
+  }
+  return fields
+    .filter((field) => field && typeof field.key === "string" && field.key.trim())
+    .map((field) => ({
+      key: field.key.trim(),
+      label: typeof field.label === "string" && field.label.trim() ? field.label.trim() : field.key.trim(),
+      description: typeof field.description === "string" && field.description.trim() ? field.description.trim() : "",
+      required: field.required !== false,
+      multiline: field.multiline === true,
+    }));
+}
+
+function getEvaluationContract(bundle) {
+  const contract = bundle?.evaluation_contract;
+  return {
+    inputFields: normalizeContractFields(contract?.input_fields),
+    labelFields: normalizeContractFields(contract?.label_fields),
+    inputTemplate: contract?.input_template && typeof contract.input_template === "object" && !Array.isArray(contract.input_template) ? contract.input_template : null,
+    labelTemplate: contract?.label_template && typeof contract.label_template === "object" && !Array.isArray(contract.label_template) ? contract.label_template : null,
+  };
+}
+
+function stringifyJson(value) {
+  return JSON.stringify(value, null, 2);
+}
+
+function buildTemplatePayload(fields, fallbackTemplate) {
+  if (fallbackTemplate && typeof fallbackTemplate === "object" && !Array.isArray(fallbackTemplate) && Object.keys(fallbackTemplate).length) {
+    return fallbackTemplate;
+  }
+  if (!fields.length) {
+    return {};
+  }
+  return Object.fromEntries(fields.map((field) => [field.key, ""]));
+}
+
+function createRowFromPayloads(id, inputPayload, labelPayload) {
+  return {
+    id,
+    inputText: stringifyJson(inputPayload),
+    labelText: stringifyJson(labelPayload),
+  };
+}
+
+function createEmptyRow(contract, id) {
+  return createRowFromPayloads(
+    id,
+    buildTemplatePayload(contract?.inputFields || [], contract?.inputTemplate),
+    buildTemplatePayload(contract?.labelFields || [], contract?.labelTemplate),
+  );
+}
+
+function coerceLegacyPayload(payload, fallbackKey) {
+  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+    return payload;
+  }
+  const text = typeof payload === "string" ? payload.trim() : "";
+  return text ? { [fallbackKey]: text } : {};
+}
+
+function parseJsonObject(text, sideLabel) {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return { value: {}, error: `${sideLabel} is required.` };
+  }
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { value: {}, error: `${sideLabel} must be a JSON object.` };
+    }
+    return { value: parsed, error: "" };
+  } catch {
+    return { value: {}, error: `${sideLabel} must be valid JSON.` };
+  }
+}
+
+function hasMeaningfulValue(value) {
+  if (typeof value === "string") {
+    return value.trim().length > 0;
+  }
+  if (Array.isArray(value)) {
+    return value.some((item) => hasMeaningfulValue(item));
+  }
+  if (value && typeof value === "object") {
+    return Object.values(value).some((item) => hasMeaningfulValue(item));
+  }
+  return value !== null && value !== undefined;
+}
+
+function validatePayloadAgainstContract(payload, fields, sideLabel) {
+  if (!fields.length) {
+    return Object.keys(payload).length ? "" : `${sideLabel} must not be empty.`;
+  }
+  const missing = fields
+    .filter((field) => field.required)
+    .filter((field) => !Object.prototype.hasOwnProperty.call(payload, field.key) || !hasMeaningfulValue(payload[field.key]));
+  if (!missing.length) {
+    return "";
+  }
+  return `${sideLabel} is missing required field${missing.length === 1 ? "" : "s"}: ${missing.map((field) => field.key).join(", ")}.`;
+}
+
+function analyzeRow(row, contract) {
+  const inputParsed = parseJsonObject(row.inputText, "Input JSON");
+  const labelParsed = parseJsonObject(row.labelText, "Expected response JSON");
+  const inputBlank = !hasMeaningfulValue(inputParsed.value);
+  const labelBlank = !hasMeaningfulValue(labelParsed.value);
+  const blank = inputBlank && labelBlank;
+
+  if (blank) {
+    return { blank: true, valid: false, errors: [], input: {}, label: {} };
+  }
+
+  const errors = [];
+  if (inputParsed.error && !inputBlank) {
+    errors.push(inputParsed.error);
+  }
+  if (labelParsed.error && !labelBlank) {
+    errors.push(labelParsed.error);
+  }
+  if (!inputParsed.error) {
+    const contractError = validatePayloadAgainstContract(inputParsed.value, contract.inputFields, "Input JSON");
+    if (contractError) {
+      errors.push(contractError);
+    }
+  }
+  if (!labelParsed.error) {
+    const contractError = validatePayloadAgainstContract(labelParsed.value, contract.labelFields, "Expected response JSON");
+    if (contractError) {
+      errors.push(contractError);
+    }
+  }
+
+  return {
+    blank: false,
+    valid: errors.length === 0,
+    errors,
+    input: inputParsed.value,
+    label: labelParsed.value,
+  };
+}
+
 export function PlansPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -165,7 +310,7 @@ function PlansList({ onCreate, onEdit, onRunNavigate, showSavedNotice }) {
         <header className="row between plans-head">
           <div className="col gap-1">
             <h1 className="t-display" style={{ fontSize: 22 }}>Evaluation Plans</h1>
-            <p className="muted t-sm">Question sets + expected responses for reusable agent checks.</p>
+            <p className="muted t-sm">Dataset items + expected responses for reusable agent checks.</p>
           </div>
           <div className="row gap-2">
             <Button onClick={loadPlans} disabled={isLoading}>{isLoading ? "Refreshing..." : "Refresh"}</Button>
@@ -191,7 +336,7 @@ function PlansList({ onCreate, onEdit, onRunNavigate, showSavedNotice }) {
                       <div className="row gap-2">
                         <button type="button" className="plans-name-link" onClick={() => onEdit(plan.id)}>{plan.name || "Untitled plan"}</button>
                       </div>
-                      <span className="cap mono">{count} questions x {plan.runs_per_question || 1} runs = {count * (plan.runs_per_question || 1)} tasks · {plan.max_workers || 1} workers</span>
+                      <span className="cap mono">{count} items x {plan.runs_per_question || 1} runs = {count * (plan.runs_per_question || 1)} tasks · {plan.max_workers || 1} workers</span>
                       <span className="cap mono">LM profile: {plan.lm_profile_id ? (profileNames[plan.lm_profile_id] || plan.lm_profile_id) : "none"}</span>
                     </div>
                     <div className="row gap-2">
@@ -238,7 +383,7 @@ function PlanBuilder({ onBack, planId }) {
   const [name, setName] = useState("");
   const [runs, setRuns] = useState(3);
   const [workers, setWorkers] = useState(8);
-  const [rows, setRows] = useState([{ id: "q-1", input: "", expected: "" }]);
+  const [rows, setRows] = useState([createEmptyRow(null, "q-1")]);
   const [selectedBundleId, setSelectedBundleId] = useState("");
   const [lmProfiles, setLmProfiles] = useState([]);
   const [selectedLmProfileId, setSelectedLmProfileId] = useState("");
@@ -252,8 +397,15 @@ function PlanBuilder({ onBack, planId }) {
   const isEditing = Boolean(planId);
 
   const validModules = useMemo(() => modules.filter((item) => item.validation_status === "passed"), [modules]);
-  const filledRows = useMemo(() => rows.filter((item) => item.input.trim() && item.expected.trim()), [rows]);
-  const totalTasks = filledRows.length * runs;
+  const selectedBundle = useMemo(() => validModules.find((item) => item.id === selectedBundleId) || null, [selectedBundleId, validModules]);
+  const evaluationContract = useMemo(() => getEvaluationContract(selectedBundle), [selectedBundle]);
+  const analyzedRows = useMemo(() => rows.map((row) => ({ row, ...analyzeRow(row, evaluationContract) })), [rows, evaluationContract]);
+  const completeRows = useMemo(() => analyzedRows.filter((item) => item.valid), [analyzedRows]);
+  const invalidRows = useMemo(() => analyzedRows.filter((item) => !item.blank && !item.valid), [analyzedRows]);
+  const totalTasks = completeRows.length * runs;
+  const canLoadSampleSet = useMemo(() => evaluationContract.inputFields.length <= 1 && evaluationContract.labelFields.length <= 1, [evaluationContract]);
+  const inputPlaceholder = useMemo(() => stringifyJson(buildTemplatePayload(evaluationContract.inputFields, evaluationContract.inputTemplate)), [evaluationContract]);
+  const labelPlaceholder = useMemo(() => stringifyJson(buildTemplatePayload(evaluationContract.labelFields, evaluationContract.labelTemplate)), [evaluationContract]);
 
   const loadModules = async () => {
     setIsLoadingModules(true);
@@ -320,8 +472,8 @@ function PlanBuilder({ onBack, planId }) {
         const fromInputs = Array.isArray(payload.eval_inputs)
           ? payload.eval_inputs.map((item, idx) => ({
               id: `loaded-${idx}`,
-              input: item?.input?.input || item?.input?.question || "",
-              expected: item?.label?.expected || "",
+              inputText: stringifyJson(coerceLegacyPayload(item?.input, "question")),
+              labelText: stringifyJson(coerceLegacyPayload(item?.label, "expected")),
             }))
           : [];
         if (fromInputs.length) {
@@ -342,12 +494,25 @@ function PlanBuilder({ onBack, planId }) {
     }
   }, [selectedLmProfileId, generatorLmProfileId]);
 
+  useEffect(() => {
+    setRows((prev) => {
+      if (prev.length !== 1) {
+        return prev;
+      }
+      const current = analyzeRow(prev[0], { inputFields: [], labelFields: [], inputTemplate: null, labelTemplate: null });
+      if (!current.blank) {
+        return prev;
+      }
+      return [createEmptyRow(evaluationContract, prev[0].id)];
+    });
+  }, [evaluationContract]);
+
   const updateRow = (id, field, value) => {
     setRows((prev) => prev.map((row) => (row.id === id ? { ...row, [field]: value } : row)));
   };
 
   const addRow = () => {
-    setRows((prev) => [...prev, { id: `q-${Date.now()}`, input: "", expected: "" }]);
+    setRows((prev) => [...prev, createEmptyRow(evaluationContract, `q-${Date.now()}`)]);
   };
 
   const insertGeneratedRows = () => {
@@ -356,11 +521,7 @@ function PlanBuilder({ onBack, planId }) {
     }
     setRows((prev) => [
       ...prev,
-      ...generatedRowsPreview.map((row, idx) => ({
-        id: `generated-${Date.now()}-${idx}`,
-        input: row.input,
-        expected: row.expected,
-      })),
+      ...generatedRowsPreview.map((row, idx) => ({ ...row, id: `generated-${Date.now()}-${idx}` })),
     ]);
     setIsGeneratorOpen(false);
     setGeneratedRowsPreview([]);
@@ -385,8 +546,9 @@ function PlanBuilder({ onBack, planId }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           lm_profile_id: generatorLmProfileId,
+          module_import_id: selectedBundleId || null,
           operator_prompt: generatorPrompt,
-          existing_rows: filledRows.map((row) => ({ input: { input: row.input }, label: { expected: row.expected } })),
+          existing_rows: completeRows.map((item) => ({ input: item.input, label: item.label })),
           max_rows: 10,
         }),
       });
@@ -397,9 +559,9 @@ function PlanBuilder({ onBack, planId }) {
       const previewRows = Array.isArray(payload?.items)
         ? payload.items.map((item, idx) => ({
             id: `preview-${idx}`,
-            input: item?.input?.input || item?.input?.question || "",
-            expected: item?.label?.expected || "",
-          })).filter((item) => item.input && item.expected)
+            inputText: stringifyJson(coerceLegacyPayload(item?.input, evaluationContract.inputFields[0]?.key || "question")),
+            labelText: stringifyJson(coerceLegacyPayload(item?.label, evaluationContract.labelFields[0]?.key || "expected")),
+          })).filter((item) => analyzeRow(item, evaluationContract).valid)
         : [];
       if (!previewRows.length) {
         throw new Error("Generated rows could not be previewed.");
@@ -431,8 +593,12 @@ function PlanBuilder({ onBack, planId }) {
       setValidationError("Select an LM profile.");
       return;
     }
-    if (!filledRows.length) {
-      setValidationError("Add at least one question and expected response.");
+    if (invalidRows.length) {
+      setValidationError(`Fix ${invalidRows.length} invalid dataset item${invalidRows.length === 1 ? "" : "s"} before saving.`);
+      return;
+    }
+    if (!completeRows.length) {
+      setValidationError("Add at least one dataset item and expected response.");
       return;
     }
 
@@ -440,7 +606,7 @@ function PlanBuilder({ onBack, planId }) {
     try {
       let runPlanId = "";
 
-      const evalInputs = filledRows.map((row) => ({ input: { input: row.input }, label: { expected: row.expected } }));
+      const evalInputs = completeRows.map((row) => ({ input: row.input, label: row.label }));
 
       const savedPlanResp = await fetch(isEditing ? `${apiBase}/evaluation-plans/${planId}` : `${apiBase}/evaluation-plans`, {
         method: isEditing ? "PATCH" : "POST",
@@ -463,7 +629,6 @@ function PlanBuilder({ onBack, planId }) {
       const savedPlan = await savedPlanResp.json();
 
       if (runAfterSave) {
-        const selectedBundle = validModules.find((item) => item.id === selectedBundleId);
         const createRunResp = await fetch(`${apiBase}/agent-run-plans`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -504,7 +669,7 @@ function PlanBuilder({ onBack, planId }) {
       <header className="page-head row between plans-builder-head">
         <div className="col gap-1">
           <h1 className="t-h1">{isEditing ? "Edit plan" : "New evaluation plan"}</h1>
-          <p className="cap">Define questions and expected responses, then tune stress configuration.</p>
+          <p className="cap">Define dataset inputs and expected responses, then tune stress configuration.</p>
         </div>
         <div className="row gap-2">
           <Button onClick={onBack}>Cancel</Button>
@@ -574,30 +739,54 @@ function PlanBuilder({ onBack, planId }) {
 
           <section className="panel card-pad plans-form-block">
             <div className="row between" style={{ marginBottom: 10 }}>
-              <div className="row gap-2"><h2 className="t-h2">Dataset</h2><span className="plans-count">{filledRows.length}</span></div>
+              <div className="row gap-2"><h2 className="t-h2">Dataset</h2><span className="plans-count">{completeRows.length}</span></div>
               <div className="row gap-2">
-                <Button size="sm" onClick={() => setRows(SAMPLE_ROWS.map((row, idx) => ({ id: `sample-${idx}`, ...row })))}>Load sample set</Button>
-                <Button size="sm" variant="primary" onClick={() => setIsGeneratorOpen(true)}>Generate with LLM</Button>
-                <Button size="sm" onClick={addRow}>Add question</Button>
-              </div>
-            </div>
-            <div className="col gap-2">
-              <div className="plans-row-head">
-                <span className="t-label">#</span>
-                <span className="t-label">Input prompt</span>
-                <span className="t-label">Expected response</span>
-                <span />
-              </div>
-              {rows.map((row, index) => (
-                <div key={row.id} className="plans-row-edit">
-                  <span className="cap mono">{index + 1}</span>
-                  <textarea className="plans-textarea" rows={2} value={row.input} onChange={(event) => updateRow(row.id, "input", event.target.value)} placeholder="Input prompt" />
-                  <textarea className="plans-textarea" rows={2} value={row.expected} onChange={(event) => updateRow(row.id, "expected", event.target.value)} placeholder="Expected response" />
-                  <Button size="sm" variant="danger" onClick={() => deleteRow(row.id)}>Delete</Button>
-                </div>
-              ))}
-            </div>
-          </section>
+                 <Button
+                   size="sm"
+                   onClick={() => {
+                     const inputKey = evaluationContract.inputFields[0]?.key || "question";
+                     const labelKey = evaluationContract.labelFields[0]?.key || "expected";
+                     setRows(SAMPLE_ROWS.map((row, idx) => createRowFromPayloads(`sample-${idx}`, { [inputKey]: row.input }, { [labelKey]: row.expected })));
+                   }}
+                   disabled={!canLoadSampleSet}
+                 >
+                   Load sample set
+                 </Button>
+                 <Button size="sm" variant="primary" onClick={() => setIsGeneratorOpen(true)}>Generate with LLM</Button>
+                 <Button size="sm" onClick={addRow}>Add item</Button>
+               </div>
+             </div>
+             <div className="col gap-2">
+               <div className="panel" style={{ padding: 12 }}>
+                 <div className="t-label" style={{ marginBottom: 6 }}>Bundle eval schema</div>
+                 {evaluationContract.inputFields.length || evaluationContract.labelFields.length ? (
+                   <div className="col gap-1">
+                     <div className="muted t-sm">Input fields: {evaluationContract.inputFields.map((field) => field.key).join(", ") || "any JSON object"}</div>
+                     <div className="muted t-sm">Expected response fields: {evaluationContract.labelFields.map((field) => field.key).join(", ") || "any JSON object"}</div>
+                   </div>
+                 ) : (
+                   <p className="muted t-sm">This bundle does not declare an eval schema yet. Enter raw JSON objects that match the bundle signature and metric contract.</p>
+                 )}
+               </div>
+               <div className="plans-row-head">
+                 <span className="t-label">#</span>
+                 <span className="t-label">Input JSON</span>
+                 <span className="t-label">Expected response JSON</span>
+                 <span />
+               </div>
+               {analyzedRows.map(({ row, errors }, index) => (
+                  <div key={row.id} className="col gap-1">
+                    <div className="plans-row-edit">
+                      <span className="cap mono">{index + 1}</span>
+                      <textarea className="plans-textarea mono" rows={6} value={row.inputText} onChange={(event) => updateRow(row.id, "inputText", event.target.value)} placeholder={inputPlaceholder} />
+                      <textarea className="plans-textarea mono" rows={6} value={row.labelText} onChange={(event) => updateRow(row.id, "labelText", event.target.value)} placeholder={labelPlaceholder} />
+                      <Button size="sm" variant="danger" onClick={() => deleteRow(row.id)}>Delete</Button>
+                    </div>
+                    {errors.length ? <div className="muted t-sm">{errors.join(" ")}</div> : null}
+                  </div>
+               ))}
+             </div>
+           </section>
         </div>
 
         <aside className="plans-rail">
@@ -606,8 +795,8 @@ function PlanBuilder({ onBack, planId }) {
             <StepControl label="Runs per input" value={runs} min={1} setValue={setRuns} />
             <StepControl label="Max workers" value={workers} min={1} max={24} setValue={setWorkers} />
             <hr className="hr" />
-            <div className="panel card-pad col gap-2">
-              <div className="row between"><span className="muted">Dataset</span><span className="mono">{filledRows.length}</span></div>
+             <div className="panel card-pad col gap-2">
+              <div className="row between"><span className="muted">Dataset</span><span className="mono">{completeRows.length}</span></div>
               <div className="row between"><span className="muted">x Runs per input</span><span className="mono">{runs}</span></div>
               <hr className="hr" />
               <div className="row between"><span>Total tasks</span><span className="mono">{totalTasks}</span></div>
@@ -626,7 +815,7 @@ function PlanBuilder({ onBack, planId }) {
             <div className="row between" style={{ marginBottom: 10, alignItems: "flex-start" }}>
               <div>
                 <h2 className="t-h2">Generate eval rows</h2>
-                <p className="muted t-sm">Describe the data you need, provide examples, preview the generated rows, then insert them into this plan.</p>
+                <p className="muted t-sm">Describe the data you need, provide examples, preview the generated JSON rows, then insert them into this plan.</p>
               </div>
               <Button size="sm" variant="ghost" onClick={() => setIsGeneratorOpen(false)}>Close</Button>
             </div>
@@ -643,7 +832,7 @@ function PlanBuilder({ onBack, planId }) {
 
             <label className="col gap-1" style={{ marginBottom: 12 }}>
               <span className="t-label">What data do you need?</span>
-              <textarea className="plans-textarea" rows={5} value={generatorPrompt} onChange={(event) => setGeneratorPrompt(event.target.value)} placeholder="Explain the kinds of questions and expected responses you want generated." />
+              <textarea className="plans-textarea" rows={5} value={generatorPrompt} onChange={(event) => setGeneratorPrompt(event.target.value)} placeholder="Explain the kinds of inputs and expected responses you want generated." />
             </label>
 
             <div className="row gap-2" style={{ marginBottom: 12 }}>
@@ -658,15 +847,15 @@ function PlanBuilder({ onBack, planId }) {
                 <div className="t-h2">Preview</div>
                 <div className="plans-row-head">
                   <span className="t-label">#</span>
-                  <span className="t-label">Input prompt</span>
-                  <span className="t-label">Expected response</span>
+                  <span className="t-label">Input JSON</span>
+                  <span className="t-label">Expected response JSON</span>
                 </div>
                 <div className="plans-generated-preview-scroll">
                   {generatedRowsPreview.map((row, index) => (
                     <div key={row.id} className="plans-row-edit">
                       <span className="cap mono">{index + 1}</span>
-                      <textarea className="plans-textarea" rows={2} value={row.input} readOnly />
-                      <textarea className="plans-textarea" rows={2} value={row.expected} readOnly />
+                      <textarea className="plans-textarea mono" rows={6} value={row.inputText} readOnly />
+                      <textarea className="plans-textarea mono" rows={6} value={row.labelText} readOnly />
                     </div>
                   ))}
                 </div>

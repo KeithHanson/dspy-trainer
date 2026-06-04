@@ -19,6 +19,15 @@ class ValidationReport:
     metadata: dict[str, Any]
 
 
+def read_bundle_metadata(bundle_path: str) -> dict[str, Any]:
+    root = Path(bundle_path).expanduser().resolve()
+    toml_file = root / TOML_FILE
+    payload = _load_bundle_toml_payload(toml_file, diagnostics=None)
+    if payload is None:
+        return {}
+    return _extract_bundle_metadata(payload, toml_file.parent, diagnostics=None)
+
+
 def validate_bundle(bundle_path: str) -> ValidationReport:
     root = Path(bundle_path).expanduser().resolve()
     diagnostics: list[dict[str, Any]] = []
@@ -131,69 +140,254 @@ def _parse_python(path: Path, diagnostics: list[dict[str, Any]], label: str) -> 
 
 
 def _validate_bundle_toml(toml_file: Path, diagnostics: list[dict[str, Any]]) -> dict[str, Any]:
-    try:
-        payload = tomllib.loads(toml_file.read_text(encoding="utf-8"))
-    except OSError as exc:
-        diagnostics.append(_diag("error", "bundle_toml_read_error", f"Unable to read bundle.toml: {exc}", TOML_FILE))
-        return {}
-    except tomllib.TOMLDecodeError as exc:
-        diagnostics.append(_diag("error", "bundle_toml_invalid", f"bundle.toml is not valid TOML: {exc}", TOML_FILE))
+    payload = _load_bundle_toml_payload(toml_file, diagnostics)
+    if payload is None:
         return {}
 
+    return _extract_bundle_metadata(payload, toml_file.parent, diagnostics)
+
+
+def _load_bundle_toml_payload(
+    toml_file: Path,
+    diagnostics: list[dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    try:
+        return tomllib.loads(toml_file.read_text(encoding="utf-8"))
+    except OSError as exc:
+        _append_diag(diagnostics, "error", "bundle_toml_read_error", f"Unable to read bundle.toml: {exc}", TOML_FILE)
+        return None
+    except tomllib.TOMLDecodeError as exc:
+        _append_diag(diagnostics, "error", "bundle_toml_invalid", f"bundle.toml is not valid TOML: {exc}", TOML_FILE)
+        return None
+
+
+def _extract_bundle_metadata(
+    payload: dict[str, Any],
+    bundle_root: Path,
+    diagnostics: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
     required_keys = ["name", "version"]
     for key in required_keys:
         value = payload.get(key)
         if not isinstance(value, str) or not value.strip():
-            diagnostics.append(_diag("error", f"bundle_toml_{key}_missing", f"bundle.toml must define a non-empty '{key}' string", TOML_FILE))
+            _append_diag(
+                diagnostics,
+                "error",
+                f"bundle_toml_{key}_missing",
+                f"bundle.toml must define a non-empty '{key}' string",
+                TOML_FILE,
+            )
     score_pass_threshold = payload.get("score_pass_threshold")
     if isinstance(score_pass_threshold, bool) or not isinstance(score_pass_threshold, (int, float)):
-        diagnostics.append(
-            _diag(
-                "error",
-                "bundle_toml_score_pass_threshold_invalid",
-                "bundle.toml must define numeric 'score_pass_threshold' between 0.0 and 1.0",
-                TOML_FILE,
-            )
+        _append_diag(
+            diagnostics,
+            "error",
+            "bundle_toml_score_pass_threshold_invalid",
+            "bundle.toml must define numeric 'score_pass_threshold' between 0.0 and 1.0",
+            TOML_FILE,
         )
     elif float(score_pass_threshold) < 0.0 or float(score_pass_threshold) > 1.0:
-        diagnostics.append(
-            _diag(
-                "error",
-                "bundle_toml_score_pass_threshold_invalid",
-                "bundle.toml 'score_pass_threshold' must be between 0.0 and 1.0",
-                TOML_FILE,
-            )
+        _append_diag(
+            diagnostics,
+            "error",
+            "bundle_toml_score_pass_threshold_invalid",
+            "bundle.toml 'score_pass_threshold' must be between 0.0 and 1.0",
+            TOML_FILE,
         )
 
     optimized_program_state = payload.get("optimized_program_state")
     if optimized_program_state is not None:
         if not isinstance(optimized_program_state, str) or not optimized_program_state.strip():
-            diagnostics.append(
-                _diag(
-                    "error",
-                    "bundle_toml_optimized_program_state_invalid",
-                    "bundle.toml optional 'optimized_program_state' must be a non-empty string when provided",
-                    TOML_FILE,
-                )
+            _append_diag(
+                diagnostics,
+                "error",
+                "bundle_toml_optimized_program_state_invalid",
+                "bundle.toml optional 'optimized_program_state' must be a non-empty string when provided",
+                TOML_FILE,
             )
         else:
-            state_path = toml_file.parent / optimized_program_state.strip()
+            state_path = bundle_root / optimized_program_state.strip()
             if not state_path.exists() or not state_path.is_file():
-                diagnostics.append(
-                    _diag(
-                        "error",
-                        "optimized_program_state_missing",
-                        "optimized_program_state file referenced by bundle.toml does not exist",
-                        optimized_program_state.strip(),
-                    )
+                _append_diag(
+                    diagnostics,
+                    "error",
+                    "optimized_program_state_missing",
+                    "optimized_program_state file referenced by bundle.toml does not exist",
+                    optimized_program_state.strip(),
                 )
+
+    evaluation_contract = _extract_evaluation_contract(payload.get("evaluation"), diagnostics)
 
     return {
         "name": payload.get("name"),
         "version": payload.get("version"),
         "score_pass_threshold": float(score_pass_threshold) if isinstance(score_pass_threshold, (int, float)) and not isinstance(score_pass_threshold, bool) else None,
         "optimized_program_state": optimized_program_state.strip() if isinstance(optimized_program_state, str) and optimized_program_state.strip() else None,
+        "evaluation_contract": evaluation_contract,
     }
+
+
+def _extract_evaluation_contract(
+    evaluation_payload: Any,
+    diagnostics: list[dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    if evaluation_payload is None:
+        return None
+    if not isinstance(evaluation_payload, dict):
+        _append_diag(
+            diagnostics,
+            "error",
+            "bundle_toml_evaluation_invalid",
+            "bundle.toml optional 'evaluation' section must be a table when provided",
+            TOML_FILE,
+        )
+        return None
+
+    input_fields = _extract_contract_fields(evaluation_payload.get("input"), "input", diagnostics)
+    label_fields = _extract_contract_fields(evaluation_payload.get("label"), "label", diagnostics)
+    if not input_fields and not label_fields:
+        _append_diag(
+            diagnostics,
+            "error",
+            "bundle_toml_evaluation_empty",
+            "bundle.toml optional 'evaluation' section must define input.fields or label.fields when provided",
+            TOML_FILE,
+        )
+
+    return {
+        "input_fields": input_fields,
+        "label_fields": label_fields,
+        "input_template": {field["key"]: "" for field in input_fields},
+        "label_template": {field["key"]: "" for field in label_fields},
+    }
+
+
+def _extract_contract_fields(
+    section_payload: Any,
+    section_name: str,
+    diagnostics: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    if section_payload is None:
+        return []
+    if not isinstance(section_payload, dict):
+        _append_diag(
+            diagnostics,
+            "error",
+            f"bundle_toml_evaluation_{section_name}_invalid",
+            f"bundle.toml evaluation.{section_name} must be a table when provided",
+            TOML_FILE,
+        )
+        return []
+
+    raw_fields = section_payload.get("fields")
+    if not isinstance(raw_fields, list) or not raw_fields:
+        _append_diag(
+            diagnostics,
+            "error",
+            f"bundle_toml_evaluation_{section_name}_fields_invalid",
+            f"bundle.toml evaluation.{section_name}.fields must be a non-empty array of field definitions",
+            TOML_FILE,
+        )
+        return []
+
+    fields: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    for index, item in enumerate(raw_fields):
+        if not isinstance(item, dict):
+            _append_diag(
+                diagnostics,
+                "error",
+                f"bundle_toml_evaluation_{section_name}_field_invalid",
+                f"bundle.toml evaluation.{section_name}.fields[{index}] must be a table",
+                TOML_FILE,
+            )
+            continue
+
+        key = item.get("key")
+        if not isinstance(key, str) or not key.strip():
+            _append_diag(
+                diagnostics,
+                "error",
+                f"bundle_toml_evaluation_{section_name}_field_key_missing",
+                f"bundle.toml evaluation.{section_name}.fields[{index}] must define a non-empty key",
+                TOML_FILE,
+            )
+            continue
+        normalized_key = key.strip()
+        if normalized_key in seen_keys:
+            _append_diag(
+                diagnostics,
+                "error",
+                f"bundle_toml_evaluation_{section_name}_field_key_duplicate",
+                f"bundle.toml evaluation.{section_name}.fields keys must be unique; duplicate '{normalized_key}' found",
+                TOML_FILE,
+            )
+            continue
+        seen_keys.add(normalized_key)
+
+        label = item.get("label")
+        description = item.get("description")
+        required = item.get("required", True)
+        multiline = item.get("multiline", False)
+        if label is not None and (not isinstance(label, str) or not label.strip()):
+            _append_diag(
+                diagnostics,
+                "error",
+                f"bundle_toml_evaluation_{section_name}_field_label_invalid",
+                f"bundle.toml evaluation.{section_name}.fields[{index}] label must be a non-empty string when provided",
+                TOML_FILE,
+            )
+            label = None
+        if description is not None and not isinstance(description, str):
+            _append_diag(
+                diagnostics,
+                "error",
+                f"bundle_toml_evaluation_{section_name}_field_description_invalid",
+                f"bundle.toml evaluation.{section_name}.fields[{index}] description must be a string when provided",
+                TOML_FILE,
+            )
+            description = None
+        if not isinstance(required, bool):
+            _append_diag(
+                diagnostics,
+                "error",
+                f"bundle_toml_evaluation_{section_name}_field_required_invalid",
+                f"bundle.toml evaluation.{section_name}.fields[{index}] required must be a boolean when provided",
+                TOML_FILE,
+            )
+            required = True
+        if not isinstance(multiline, bool):
+            _append_diag(
+                diagnostics,
+                "error",
+                f"bundle_toml_evaluation_{section_name}_field_multiline_invalid",
+                f"bundle.toml evaluation.{section_name}.fields[{index}] multiline must be a boolean when provided",
+                TOML_FILE,
+            )
+            multiline = False
+
+        fields.append(
+            {
+                "key": normalized_key,
+                "label": label.strip() if isinstance(label, str) and label.strip() else normalized_key,
+                "description": description.strip() if isinstance(description, str) and description.strip() else None,
+                "required": required,
+                "multiline": multiline,
+            }
+        )
+    return fields
+
+
+def _append_diag(
+    diagnostics: list[dict[str, Any]] | None,
+    severity: str,
+    code: str,
+    message: str,
+    path: str,
+) -> None:
+    if diagnostics is None:
+        return
+    diagnostics.append(_diag(severity, code, message, path))
 
 
 def _name_of(node: ast.AST) -> str:

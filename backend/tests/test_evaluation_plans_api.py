@@ -78,22 +78,23 @@ async def fake_update_evaluation_plan(self, evaluation_plan_id, project_id, scen
     return plan
 
 
-async def fake_generate_evaluation_rows(self, lm_profile_id, operator_prompt, existing_rows, max_rows):
+async def fake_generate_evaluation_rows(self, lm_profile_id, module_import_id, operator_prompt, existing_rows, max_rows):
     assert lm_profile_id == "lm-1"
+    assert module_import_id == "mod-1"
     assert operator_prompt == "Generate refund cases"
     assert max_rows == 2
     assert len(existing_rows) == 1
     return {
         "items": [
-            {"input": {"question": "Customer asks about refund timeline"}, "label": {"expected": "Explain the refund timing policy."}},
-            {"input": {"question": "Customer wants a damaged-item refund"}, "label": {"expected": "Ask for evidence and explain the damaged-item refund flow."}},
+            {"input": {"zebra": "Customer asks about refund timeline"}, "label": {"expected": "Explain the refund timing policy."}},
+            {"input": {"zebra": "Customer wants a damaged-item refund"}, "label": {"expected": "Ask for evidence and explain the damaged-item refund flow."}},
         ],
         "attempts": 2,
     }
 
 
-async def fake_generate_evaluation_rows_crash(self, lm_profile_id, operator_prompt, existing_rows, max_rows):
-    del lm_profile_id, operator_prompt, existing_rows, max_rows
+async def fake_generate_evaluation_rows_crash(self, lm_profile_id, module_import_id, operator_prompt, existing_rows, max_rows):
+    del lm_profile_id, module_import_id, operator_prompt, existing_rows, max_rows
     raise Exception("boom")
 
 
@@ -228,6 +229,7 @@ def test_generate_evaluation_plan_rows(monkeypatch):
             "/evaluation-plans/generate-rows",
             json={
                 "lm_profile_id": "lm-1",
+                "module_import_id": "mod-1",
                 "operator_prompt": "Generate refund cases",
                 "existing_rows": [{"input": {"question": "Example q"}, "label": {"expected": "Example a"}}],
                 "max_rows": 2,
@@ -248,6 +250,7 @@ def test_generate_evaluation_plan_rows_handles_unexpected_error(monkeypatch):
             "/evaluation-plans/generate-rows",
             json={
                 "lm_profile_id": "lm-1",
+                "module_import_id": "mod-1",
                 "operator_prompt": "Generate refund cases",
                 "existing_rows": [],
                 "max_rows": 2,

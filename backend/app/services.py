@@ -26,7 +26,7 @@ import httpx
 import redis.asyncio as redis
 
 from app.config import Settings
-from app.validator import validate_bundle
+from app.validator import read_bundle_metadata, validate_bundle
 
 
 logger = logging.getLogger(__name__)
@@ -359,7 +359,11 @@ class AppServices:
         return ""
 
     @staticmethod
-    def _parse_generated_evaluation_rows(content: str) -> list[dict[str, Any]]:
+    def _parse_generated_evaluation_rows(
+        content: str,
+        *,
+        evaluation_contract: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         text = content.strip()
         if text.startswith("```"):
             lines = text.splitlines()
@@ -376,12 +380,44 @@ class AppServices:
             raw_label = item.get("label")
             if not isinstance(raw_input, dict) or not isinstance(raw_label, dict):
                 raise ValueError("Each generated row must include input and label objects")
-            question = str(raw_input.get("question") or "").strip()
-            expected = str(raw_label.get("expected") or "").strip()
-            if not question or not expected:
-                raise ValueError("Each generated row must include non-empty input.question and label.expected")
-            rows.append({"input": {"question": question}, "label": {"expected": expected}})
+            AppServices._validate_generated_payload(raw_input, "input", evaluation_contract)
+            AppServices._validate_generated_payload(raw_label, "label", evaluation_contract)
+            rows.append({"input": raw_input, "label": raw_label})
         return rows
+
+    @staticmethod
+    def _validate_generated_payload(
+        payload: dict[str, Any],
+        payload_kind: str,
+        evaluation_contract: dict[str, Any] | None,
+    ) -> None:
+        if not payload:
+            raise ValueError(f"Each generated row must include a non-empty {payload_kind} object")
+
+        field_key = "input_fields" if payload_kind == "input" else "label_fields"
+        fields = evaluation_contract.get(field_key) if isinstance(evaluation_contract, dict) else None
+        if not isinstance(fields, list) or not fields:
+            return
+
+        missing_keys: list[str] = []
+        for field in fields:
+            if not isinstance(field, dict) or not field.get("required", True):
+                continue
+            key = str(field.get("key") or "").strip()
+            if not key:
+                continue
+            if key not in payload:
+                missing_keys.append(key)
+                continue
+            value = payload.get(key)
+            if value is None:
+                missing_keys.append(key)
+                continue
+            if isinstance(value, str) and not value.strip():
+                missing_keys.append(key)
+        if missing_keys:
+            joined = ", ".join(missing_keys)
+            raise ValueError(f"Each generated row must include required {payload_kind} field(s): {joined}")
 
     @staticmethod
     def _terminate_optimization_subprocess(process: Any) -> None:
@@ -1596,9 +1632,19 @@ class AppServices:
             "created_at": created_at.isoformat() if created_at else None,
         }
 
+    def _load_module_bundle_metadata(self, row: Any) -> dict[str, Any]:
+        bundle_root_path = self._module_bundle_root_path(row)
+        if not bundle_root_path:
+            return {}
+        root = Path(bundle_root_path)
+        if not root.exists() or not root.is_dir():
+            return {}
+        return read_bundle_metadata(str(root))
+
     def _build_module_payload(self, row: Any) -> dict[str, Any]:
         created_at = row["created_at"]
         last_synced_at = self._row_value(row, "last_synced_at")
+        bundle_metadata = self._load_module_bundle_metadata(row)
         return {
             "id": row["id"],
             "source": row["source"],
@@ -1628,6 +1674,7 @@ class AppServices:
             "smoke_revision_id": self._row_value(row, "smoke_revision_id"),
             "smoke_commit_sha": self._row_value(row, "smoke_commit_sha"),
             "smoke_bundle_version": self._row_value(row, "smoke_bundle_version"),
+            "evaluation_contract": bundle_metadata.get("evaluation_contract"),
         }
 
     async def list_modules(self) -> list[dict[str, Any]]:
@@ -3916,6 +3963,7 @@ class AppServices:
         self,
         *,
         lm_profile_id: str,
+        module_import_id: str | None,
         operator_prompt: str,
         existing_rows: list[dict[str, Any]],
         max_rows: int,
@@ -3931,6 +3979,7 @@ class AppServices:
         virtual_key = str(profile.get("virtual_key") or "").strip()
         if not virtual_key:
             raise RuntimeError("lm profile has no virtual key")
+        evaluation_contract = await self._resolve_evaluation_contract(module_import_id)
 
         normalized_existing: list[dict[str, Any]] = []
         for row in existing_rows:
@@ -3938,16 +3987,20 @@ class AppServices:
                 continue
             raw_input = row.get("input")
             raw_label = row.get("label")
-            question = str(raw_input.get("question") or "").strip() if isinstance(raw_input, dict) else str(row.get("input") or "").strip()
-            expected = str(raw_label.get("expected") or "").strip() if isinstance(raw_label, dict) else str(row.get("expected") or "").strip()
-            if question and expected:
-                normalized_existing.append({"input": {"question": question}, "label": {"expected": expected}})
+            normalized_input = self._coerce_eval_payload_object(raw_input, row.get("input"), evaluation_contract, "input")
+            normalized_label = self._coerce_eval_payload_object(raw_label, row.get("expected") or row.get("label"), evaluation_contract, "label")
+            if normalized_input and normalized_label:
+                normalized_existing.append({"input": normalized_input, "label": normalized_label})
+
+        schema_description = self._describe_evaluation_contract(evaluation_contract)
+        example_shape = self._contract_example_shape(evaluation_contract)
 
         system_prompt = (
             "You generate evaluation plan rows for an operator. "
             "Return only raw JSON with no markdown, code fences, or explanatory prose. "
             "The response must be a JSON array of objects using exactly this schema: "
-            "[{\"input\": {\"question\": string}, \"label\": {\"expected\": string}}]. "
+            f"{json.dumps([example_shape])}. "
+            f"Schema notes: {schema_description}. "
             "Generated rows must be materially different from any existing rows provided by the operator; do not repeat, paraphrase, or lightly vary those prior examples."
         )
         user_prompt = (
@@ -3973,7 +4026,7 @@ class AppServices:
                 result = await self._litellm_openai_request("/v1/chat/completions", payload=payload, api_key=virtual_key)
             text = self._extract_litellm_message_text(result)
             try:
-                rows = self._parse_generated_evaluation_rows(text)
+                rows = self._parse_generated_evaluation_rows(text, evaluation_contract=evaluation_contract)
                 return {"items": rows, "attempts": attempt}
             except Exception as exc:
                 last_error = str(exc)
@@ -3982,9 +4035,76 @@ class AppServices:
                     f"Operator request:\n{cleaned_prompt}\n\n"
                     f"Existing rows to avoid duplicating:\n{json.dumps(normalized_existing, indent=2)}\n\n"
                     f"The previous response could not be parsed because: {last_error}. "
-                    "Retry and return only a JSON array using the required schema."
+                    f"Retry and return only a JSON array using this schema: {json.dumps([example_shape])}."
                 )
         raise RuntimeError(f"could not generate parseable eval rows after 3 attempts: {last_error}")
+
+    async def _resolve_evaluation_contract(self, module_import_id: str | None) -> dict[str, Any] | None:
+        module_id = str(module_import_id or "").strip()
+        if not module_id:
+            return None
+        module = await self.get_module(module_id)
+        contract = module.get("evaluation_contract") if isinstance(module, dict) else None
+        return contract if isinstance(contract, dict) else None
+
+    @staticmethod
+    def _coerce_eval_payload_object(
+        payload: Any,
+        fallback_value: Any,
+        evaluation_contract: dict[str, Any] | None,
+        payload_kind: str,
+    ) -> dict[str, Any]:
+        if isinstance(payload, dict):
+            return payload
+        text = str(fallback_value or "").strip()
+        if not text:
+            return {}
+        key = AppServices._default_eval_field_key(evaluation_contract, payload_kind)
+        return {key: text}
+
+    @staticmethod
+    def _default_eval_field_key(evaluation_contract: dict[str, Any] | None, payload_kind: str) -> str:
+        field_key = "input_fields" if payload_kind == "input" else "label_fields"
+        fields = evaluation_contract.get(field_key) if isinstance(evaluation_contract, dict) else None
+        if isinstance(fields, list):
+            for field in fields:
+                if isinstance(field, dict):
+                    key = str(field.get("key") or "").strip()
+                    if key:
+                        return key
+        return "question" if payload_kind == "input" else "expected"
+
+    @staticmethod
+    def _describe_evaluation_contract(evaluation_contract: dict[str, Any] | None) -> str:
+        if not isinstance(evaluation_contract, dict):
+            return "Use non-empty JSON objects for both input and label."
+
+        def describe_fields(fields: Any, kind: str) -> str:
+            if not isinstance(fields, list) or not fields:
+                return f"{kind}: any non-empty JSON object"
+            labels: list[str] = []
+            for field in fields:
+                if not isinstance(field, dict):
+                    continue
+                key = str(field.get("key") or "").strip()
+                if not key:
+                    continue
+                suffix = "required" if field.get("required", True) else "optional"
+                labels.append(f"{key} ({suffix})")
+            return f"{kind}: {', '.join(labels) if labels else 'any non-empty JSON object'}"
+
+        return f"{describe_fields(evaluation_contract.get('input_fields'), 'input')}; {describe_fields(evaluation_contract.get('label_fields'), 'label')}"
+
+    @staticmethod
+    def _contract_example_shape(evaluation_contract: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(evaluation_contract, dict):
+            return {"input": {"question": "..."}, "label": {"expected": "..."}}
+        input_template = evaluation_contract.get("input_template")
+        label_template = evaluation_contract.get("label_template")
+        return {
+            "input": input_template if isinstance(input_template, dict) and input_template else {"question": "..."},
+            "label": label_template if isinstance(label_template, dict) and label_template else {"expected": "..."},
+        }
 
     @staticmethod
     def _json_list(value: Any) -> list[dict[str, Any]]:

@@ -86,7 +86,7 @@ The validator enforces the core contract before the bundle becomes runnable.
 
 ### What is an Evaluation Plan?
 
-An Evaluation Plan is a saved question set and execution recipe.
+An Evaluation Plan is a saved dataset plus execution recipe.
 
 It stores:
 
@@ -141,6 +141,19 @@ Optional but useful additions:
 - `requirements.txt` for Python dependencies
 - `run_agent.py` for local manual testing
 - `optimized_program_state` in `bundle.toml` when you want to load saved program state
+- an `evaluation` section in `bundle.toml` so the UI knows which input and label keys to author
+
+Example `bundle.toml` eval contract:
+
+```toml
+[evaluation.input]
+fields = [{ key = "question", label = "Question", required = true, multiline = true }]
+
+[evaluation.label]
+fields = [{ key = "expected", label = "Expected response", required = true, multiline = true }]
+```
+
+If your bundle signature uses `zebra` instead of `question`, declare `key = "zebra"` and the plan builder will author `input.zebra` instead of hardcoding `input.question`.
 
 ### How do I test my bundle on the cli before running evals?
 
@@ -173,24 +186,24 @@ If you are using an LM Profile virtual key through LiteLLM, point the script at 
 There are two layers to think about:
 
 1. the generic backend eval shape
-2. the current UI authoring shape
+2. the bundle-declared authoring contract
 
 Generic backend eval shape:
 
 ```json
 {
-  "input": {"question": "..."},
-  "label": {"expected": "..."}
+  "input": {"<bundle input key>": "..."},
+  "label": {"<metric label key>": "..."}
 }
 ```
 
 Current UI workflow:
 
-- each row is authored as a question
-- each row stores one expected answer string
-- the builder converts that to `input.question` and `label.expected`
+- each row is authored as raw JSON for `input` and `label`
+- when the bundle declares `evaluation.input.fields` / `evaluation.label.fields`, the builder validates those required keys
+- row generation uses the same declared keys, so a bundle can use `question`, `zebra`, or any other key name
 
-Your `judge_metric(...)` can interpret `label.expected` however you want, but it must return:
+Your `judge_metric(...)` can interpret the `label` payload however you want, but it must return:
 
 ```json
 {
@@ -367,6 +380,8 @@ Optional `bundle.toml` fields currently used by DSPy Trainer:
 
 - `optimized_program_state`
 - `dspy_version`
+- `evaluation.input.fields`
+- `evaluation.label.fields`
 - `source_optimization_job_id` (written during optimization writeback)
 
 ## Notes

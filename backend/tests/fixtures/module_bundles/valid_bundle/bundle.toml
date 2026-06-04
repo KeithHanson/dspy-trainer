@@ -1,3 +1,9 @@
 name = "valid-bundle"
 version = "0.1.0"
 score_pass_threshold = 0.8
+
+[evaluation.input]
+fields = [{ key = "question", label = "Question", required = true, multiline = true }]
+
+[evaluation.label]
+fields = [{ key = "expected", label = "Expected response", required = true, multiline = true }]

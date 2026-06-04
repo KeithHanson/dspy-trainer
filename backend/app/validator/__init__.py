@@ -1,3 +1,3 @@
-from app.validator.bundle import ValidationReport, validate_bundle
+from app.validator.bundle import ValidationReport, read_bundle_metadata, validate_bundle
 
-__all__ = ["ValidationReport", "validate_bundle"]
+__all__ = ["ValidationReport", "read_bundle_metadata", "validate_bundle"]
