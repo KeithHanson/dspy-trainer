@@ -29,7 +29,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="dspy-trainer-backend", lifespan=lifespan)
 raw_cors_origins = os.getenv(
     "DSPY_TRAINER_CORS_ALLOW_ORIGINS",
-    "http://localhost:5173,http://127.0.0.1:5173",
+    "http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173",
 )
 cors_origins = [origin.strip() for origin in raw_cors_origins.split(",") if origin.strip()]
 app.add_middleware(
