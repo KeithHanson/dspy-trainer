@@ -89,7 +89,10 @@ class _FakeConn:
             self.state["job"]["generated_module_import_id"] = params[6]
             self.state["job"]["optimized_evaluation_plan_id"] = params[7]
             self.state["job"]["optimized_eval_run_plan_id"] = params[8]
-            self.state["job"]["finished_at"] = params[9].isoformat()
+            self.state["job"]["resulting_bundle_revision_id"] = params[9]
+            self.state["job"]["resulting_bundle_commit_sha"] = params[10]
+            self.state["job"]["resulting_bundle_version"] = params[11]
+            self.state["job"]["finished_at"] = params[12].isoformat()
         elif "set status='failed'" in query:
             self.state["job"]["status"] = "failed"
             self.state["job"]["failure_reason"] = params[1]
@@ -136,6 +139,9 @@ class _PersistentDbConn:
                 "bundle_revision_id": params[4],
                 "bundle_commit_sha": params[5],
                 "bundle_version": params[6],
+                "resulting_bundle_revision_id": None,
+                "resulting_bundle_commit_sha": None,
+                "resulting_bundle_version": None,
                 "strategy": params[7],
                 "objective": params[8],
                 "dataset_id": params[9],
@@ -197,7 +203,7 @@ class _PersistentDbConn:
             return "UPDATE 1"
 
         if "update optimization_jobs set status='succeeded'" in normalized:
-            job_id, execution_log, artifact_path, artifact_metadata, telemetry_summary, comparison_summary, generated_module_import_id, optimized_evaluation_plan_id, optimized_eval_run_plan_id, finished_at = params[:10]
+            job_id, execution_log, artifact_path, artifact_metadata, telemetry_summary, comparison_summary, generated_module_import_id, optimized_evaluation_plan_id, optimized_eval_run_plan_id, resulting_bundle_revision_id, resulting_bundle_commit_sha, resulting_bundle_version, finished_at = params[:13]
             job = self.state["optimization_jobs"].get(str(job_id)) or self.state.get("job")
             if isinstance(job, dict):
                 job["status"] = "succeeded"
@@ -209,6 +215,9 @@ class _PersistentDbConn:
                 job["generated_module_import_id"] = generated_module_import_id
                 job["optimized_evaluation_plan_id"] = optimized_evaluation_plan_id
                 job["optimized_eval_run_plan_id"] = optimized_eval_run_plan_id
+                job["resulting_bundle_revision_id"] = resulting_bundle_revision_id
+                job["resulting_bundle_commit_sha"] = resulting_bundle_commit_sha
+                job["resulting_bundle_version"] = resulting_bundle_version
                 job["failure_reason"] = None
                 job["finished_at"] = finished_at
                 job["updated_at"] = finished_at
@@ -1165,7 +1174,12 @@ def test_optimization_job_json_fields_persist_through_service_db_roundtrip(monke
     async def fake_materialize_from_job(job_payload, *, bundle_name=None, bundle_version=None):
         del bundle_name, bundle_version
         assert job_payload["artifact_path"].endswith(f"/{created['id']}/program.json")
-        return {"id": "mod-opt-roundtrip"}
+        return {
+            "id": "mod-opt-roundtrip",
+            "current_revision_id": "rev-opt-roundtrip",
+            "current_commit_sha": "commit-opt-roundtrip",
+            "bundle_version": "2.0.0",
+        }
 
     async def fake_create_followup_eval_plan_and_run(**kwargs):
         assert kwargs["source_run_plan_id"] == "plan-1"
@@ -1201,6 +1215,9 @@ def test_optimization_job_json_fields_persist_through_service_db_roundtrip(monke
     assert run_result is not None
     assert run_result["status"] == "succeeded"
     assert run_result["generated_module_import_id"] == "mod-opt-roundtrip"
+    assert run_result["resulting_bundle_revision_id"] == "rev-opt-roundtrip"
+    assert run_result["resulting_bundle_commit_sha"] == "commit-opt-roundtrip"
+    assert run_result["resulting_bundle_version"] == "2.0.0"
     assert run_result["optimized_evaluation_plan_id"] == "eval-opt-roundtrip"
     assert run_result["optimized_eval_run_plan_id"] == "run-opt-roundtrip"
     assert run_result["comparison_summary"] == {
@@ -1230,6 +1247,7 @@ def test_optimization_job_json_fields_persist_through_service_db_roundtrip(monke
     assert persisted["artifact_metadata"] == run_result["artifact_metadata"]
     assert persisted["telemetry_summary"] == run_result["telemetry_summary"]
     assert persisted["comparison_summary"] == run_result["comparison_summary"]
+    assert persisted["resulting_bundle_commit_sha"] == "commit-opt-roundtrip"
 
 
 def test_materialize_optimized_bundle_updates_existing_checkout(tmp_path, monkeypatch):

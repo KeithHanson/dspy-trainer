@@ -657,6 +657,9 @@ class AppServices:
                   bundle_revision_id text,
                   bundle_commit_sha text,
                   bundle_version text,
+                  resulting_bundle_revision_id text,
+                  resulting_bundle_commit_sha text,
+                  resulting_bundle_version text,
                   strategy text not null default 'bootstrap_fewshot',
                   objective text not null default 'optimize_demo_quality',
                   dataset_id text references optimization_datasets(id) on delete set null,
@@ -689,6 +692,9 @@ class AppServices:
             await conn.execute("alter table optimization_jobs add column if not exists bundle_revision_id text;")
             await conn.execute("alter table optimization_jobs add column if not exists bundle_commit_sha text;")
             await conn.execute("alter table optimization_jobs add column if not exists bundle_version text;")
+            await conn.execute("alter table optimization_jobs add column if not exists resulting_bundle_revision_id text;")
+            await conn.execute("alter table optimization_jobs add column if not exists resulting_bundle_commit_sha text;")
+            await conn.execute("alter table optimization_jobs add column if not exists resulting_bundle_version text;")
             await conn.execute("alter table optimization_jobs add column if not exists objective text not null default 'optimize_demo_quality';")
             await conn.execute("alter table optimization_jobs add column if not exists dataset_id text references optimization_datasets(id) on delete set null;")
             await conn.execute("alter table optimization_jobs add column if not exists validation_dataset_id text references optimization_datasets(id) on delete set null;")
@@ -2189,6 +2195,7 @@ class AppServices:
                 """
                 select id, status, project_id, module_import_id, bundle_path, strategy, objective, dataset_id,
                        bundle_revision_id, bundle_commit_sha, bundle_version,
+                       resulting_bundle_revision_id, resulting_bundle_commit_sha, resulting_bundle_version,
                        validation_dataset_id, execution_lm_profile_id, helper_lm_profile_id, request_config,
                        normalized_config, train_inputs, val_inputs, num_threads, source_run_plan_id, generated_module_import_id, optimized_evaluation_plan_id, optimized_eval_run_plan_id, execution_log,
                        artifact_path, artifact_metadata, telemetry_summary, comparison_summary,
@@ -2212,6 +2219,9 @@ class AppServices:
             "bundle_revision_id": self._row_value(row, "bundle_revision_id"),
             "bundle_commit_sha": self._row_value(row, "bundle_commit_sha"),
             "bundle_version": self._row_value(row, "bundle_version"),
+            "resulting_bundle_revision_id": self._row_value(row, "resulting_bundle_revision_id"),
+            "resulting_bundle_commit_sha": self._row_value(row, "resulting_bundle_commit_sha"),
+            "resulting_bundle_version": self._row_value(row, "resulting_bundle_version"),
             "strategy": row["strategy"],
             "objective": row["objective"],
             "dataset_id": row["dataset_id"],
@@ -2834,6 +2844,9 @@ class AppServices:
             generated_module_import_id = str(materialized_bundle.get("id") or "").strip() or None
             if generated_module_import_id is None:
                 raise RuntimeError("materialized optimized bundle returned no module id")
+            resulting_bundle_revision_id = str(materialized_bundle.get("current_revision_id") or "").strip() or None
+            resulting_bundle_commit_sha = str(materialized_bundle.get("current_commit_sha") or "").strip() or None
+            resulting_bundle_version = str(materialized_bundle.get("bundle_version") or "").strip() or None
 
             source_run_plan_id = str(job.get("source_run_plan_id") or "").strip()
             if not source_run_plan_id:
@@ -2897,9 +2910,12 @@ class AppServices:
                         generated_module_import_id=$7,
                         optimized_evaluation_plan_id=$8,
                         optimized_eval_run_plan_id=$9,
+                        resulting_bundle_revision_id=$10,
+                        resulting_bundle_commit_sha=$11,
+                        resulting_bundle_version=$12,
                         failure_reason=null,
-                        finished_at=$10,
-                        updated_at=$10
+                        finished_at=$13,
+                        updated_at=$13
                     where id=$1
                     """,
                     optimization_job_id,
@@ -2911,6 +2927,9 @@ class AppServices:
                     generated_module_import_id,
                     optimized_evaluation_plan_id,
                     optimized_eval_run_plan_id,
+                    resulting_bundle_revision_id,
+                    resulting_bundle_commit_sha,
+                    resulting_bundle_version,
                     now2,
                 )
         except OptimizationJobCanceled as exc:
@@ -3838,6 +3857,9 @@ class AppServices:
                     "plan_id": str(plan_id),
                     "scenario_id": str(plan["scenario_id"]),
                     "dataset_version": str(plan["dataset_version"]),
+                    "bundle_revision_id": str(plan["bundle_revision_id"] or ""),
+                    "bundle_commit_sha": str(plan["bundle_commit_sha"] or ""),
+                    "bundle_version": str(plan["bundle_version"] or ""),
                 }
                 plan_name = str(plan["plan_name"] or "RunPlan").strip() or "RunPlan"
                 parent_run_id = await self.create_mlflow_run(
