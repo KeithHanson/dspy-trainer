@@ -435,7 +435,7 @@ function SavedBundlesPanel({ modulesUrl }) {
               <input id="bundle-version-input" className="bundles-file-input" type="text" value={editingVersion} onChange={(event) => setEditingVersion(event.target.value)} />
             </div>
             <div className="row gap-2" style={{ marginTop: 10 }}>
-              <Button size="sm" onClick={saveBundleMetadata} disabled={isSavingMetadata}>{isSavingMetadata ? "Saving..." : "Save metadata"}</Button>
+              <Button size="sm" variant="primary" onClick={saveBundleMetadata} disabled={isSavingMetadata}>{isSavingMetadata ? "Saving..." : "Save metadata"}</Button>
             </div>
             {metadataError ? <p className="cap" style={{ marginTop: 8 }}>{metadataError}</p> : null}
           </div>
