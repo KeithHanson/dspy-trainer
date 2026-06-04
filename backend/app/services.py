@@ -31,6 +31,31 @@ class OptimizationJobCanceled(RuntimeError):
     pass
 
 
+def _clean_optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _default_sync_status(
+    source: str,
+    current_commit_sha: str | None,
+    upstream_commit_sha: str | None,
+    requested_status: str | None,
+) -> str:
+    requested = _clean_optional_text(requested_status)
+    if requested:
+        return requested
+    if source == "github":
+        if current_commit_sha and upstream_commit_sha and current_commit_sha == upstream_commit_sha:
+            return "synced"
+        if current_commit_sha:
+            return "pending_sync"
+        return "import_pending"
+    return "legacy"
+
+
 def _run_bundle_optimization_subprocess(
     payload: dict[str, Any],
     result_queue: Any,
@@ -495,6 +520,15 @@ class AppServices:
             await conn.execute("alter table module_imports add column if not exists bundle_name text;")
             await conn.execute("alter table module_imports add column if not exists bundle_version text;")
             await conn.execute("alter table module_imports add column if not exists deleted_at timestamptz;")
+            await conn.execute("alter table module_imports add column if not exists github_repo_url text;")
+            await conn.execute("alter table module_imports add column if not exists github_branch text;")
+            await conn.execute("alter table module_imports add column if not exists checkout_path text;")
+            await conn.execute("alter table module_imports add column if not exists current_commit_sha text;")
+            await conn.execute("alter table module_imports add column if not exists upstream_commit_sha text;")
+            await conn.execute("alter table module_imports add column if not exists sync_status text not null default 'legacy';")
+            await conn.execute("alter table module_imports add column if not exists last_synced_at timestamptz;")
+            await conn.execute("alter table module_imports add column if not exists last_sync_error text;")
+            await conn.execute("alter table module_imports add column if not exists current_revision_id text;")
             await conn.execute(
                 """
                 create table if not exists runtime_bundles (
@@ -503,6 +537,20 @@ class AppServices:
                   smoke_status text not null,
                   diagnostics jsonb not null default '[]'::jsonb,
                   updated_at timestamptz not null
+                );
+                """
+            )
+            await conn.execute(
+                """
+                create table if not exists bundle_revisions (
+                  id text primary key,
+                  module_import_id text not null references module_imports(id) on delete cascade,
+                  commit_sha text,
+                  checkout_path text,
+                  bundle_name text,
+                  bundle_version text,
+                  source_event text not null,
+                  created_at timestamptz not null
                 );
                 """
             )
@@ -692,21 +740,113 @@ class AppServices:
             await conn.execute("alter table agent_run_tasks add column if not exists worker_log text;")
             await conn.execute("alter table agent_run_tasks add column if not exists eval_pass boolean;")
 
-    async def create_module_import(self, source: str, source_ref: str | None, version_hash: str | None) -> dict[str, Any]:
+    async def _create_bundle_revision(
+        self,
+        conn: Any,
+        module_id: str,
+        *,
+        commit_sha: str | None,
+        checkout_path: str | None,
+        bundle_name: str | None,
+        bundle_version: str | None,
+        source_event: str,
+    ) -> str:
+        revision_id = str(uuid4())
+        now = datetime.now(timezone.utc)
+        await conn.execute(
+            """
+            insert into bundle_revisions (
+              id,
+              module_import_id,
+              commit_sha,
+              checkout_path,
+              bundle_name,
+              bundle_version,
+              source_event,
+              created_at
+            )
+            values ($1, $2, $3, $4, $5, $6, $7, $8)
+            """,
+            revision_id,
+            module_id,
+            _clean_optional_text(commit_sha),
+            _clean_optional_text(checkout_path),
+            _clean_optional_text(bundle_name),
+            _clean_optional_text(bundle_version),
+            source_event,
+            now,
+        )
+        await conn.execute(
+            """
+            update module_imports
+            set current_revision_id = $2,
+                updated_at = now()
+            where id = $1
+            """,
+            module_id,
+            revision_id,
+        )
+        return revision_id
+
+    async def create_module_import(
+        self,
+        source: str,
+        source_ref: str | None,
+        version_hash: str | None,
+        *,
+        github_repo_url: str | None = None,
+        github_branch: str | None = None,
+        checkout_path: str | None = None,
+        current_commit_sha: str | None = None,
+        upstream_commit_sha: str | None = None,
+        sync_status: str | None = None,
+    ) -> dict[str, Any]:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
         module_id = str(uuid4())
         now = datetime.now(timezone.utc)
+        normalized_source_ref = _clean_optional_text(source_ref)
+        normalized_checkout_path = _clean_optional_text(checkout_path) or normalized_source_ref
+        normalized_current_commit_sha = _clean_optional_text(current_commit_sha) or _clean_optional_text(version_hash)
+        normalized_upstream_commit_sha = _clean_optional_text(upstream_commit_sha) or normalized_current_commit_sha
+        normalized_sync_status = _default_sync_status(
+            source,
+            normalized_current_commit_sha,
+            normalized_upstream_commit_sha,
+            sync_status,
+        )
         async with self.postgres_pool.acquire() as conn:
             await conn.execute(
                 """
-                insert into module_imports (id, source, source_ref, version_hash, status, created_at, updated_at)
-                values ($1, $2, $3, $4, $5, $6, $7)
+                insert into module_imports (
+                  id,
+                  source,
+                  source_ref,
+                  version_hash,
+                  github_repo_url,
+                  github_branch,
+                  checkout_path,
+                  current_commit_sha,
+                  upstream_commit_sha,
+                  sync_status,
+                  last_synced_at,
+                  status,
+                  created_at,
+                  updated_at
+                )
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                 """,
                 module_id,
                 source,
-                source_ref,
+                normalized_source_ref,
                 version_hash,
+                _clean_optional_text(github_repo_url),
+                _clean_optional_text(github_branch),
+                normalized_checkout_path,
+                normalized_current_commit_sha,
+                normalized_upstream_commit_sha,
+                normalized_sync_status,
+                now if normalized_current_commit_sha else None,
                 "imported",
                 now,
                 now,
@@ -722,7 +862,16 @@ class AppServices:
                 "[]",
                 now,
             )
-        return {"id": module_id, "status": "imported"}
+            current_revision_id = await self._create_bundle_revision(
+                conn,
+                module_id,
+                commit_sha=normalized_current_commit_sha,
+                checkout_path=normalized_checkout_path,
+                bundle_name=None,
+                bundle_version=None,
+                source_event="import",
+            )
+        return {"id": module_id, "status": "imported", "current_revision_id": current_revision_id}
 
     async def set_validation_status(self, module_id: str, status: str, diagnostics: list[dict[str, Any]]) -> bool:
         if self.postgres_pool is None:
@@ -807,6 +956,67 @@ class AppServices:
             "diagnostics": row["diagnostics"],
         }
 
+    @staticmethod
+    def _row_value(row: Any, key: str) -> Any:
+        if row is None:
+            return None
+        try:
+            return row[key]
+        except Exception:
+            return None
+
+    @staticmethod
+    def _module_checkout_path(row: Any) -> str:
+        checkout_path = AppServices._row_value(row, "checkout_path")
+        normalized_checkout_path = _clean_optional_text(checkout_path)
+        if normalized_checkout_path:
+            return normalized_checkout_path
+        source_ref = AppServices._row_value(row, "source_ref")
+        return str(source_ref or "").strip()
+
+    @staticmethod
+    def _build_current_revision_payload(row: Any) -> dict[str, Any] | None:
+        revision_id = AppServices._row_value(row, "current_revision_id")
+        if not revision_id:
+            return None
+        created_at = AppServices._row_value(row, "current_revision_created_at")
+        return {
+            "id": revision_id,
+            "commit_sha": AppServices._row_value(row, "current_revision_commit_sha"),
+            "checkout_path": AppServices._row_value(row, "current_revision_checkout_path"),
+            "bundle_name": AppServices._row_value(row, "current_revision_bundle_name"),
+            "bundle_version": AppServices._row_value(row, "current_revision_bundle_version"),
+            "source_event": AppServices._row_value(row, "current_revision_source_event"),
+            "created_at": created_at.isoformat() if created_at else None,
+        }
+
+    def _build_module_payload(self, row: Any) -> dict[str, Any]:
+        created_at = row["created_at"]
+        last_synced_at = self._row_value(row, "last_synced_at")
+        return {
+            "id": row["id"],
+            "source": row["source"],
+            "source_ref": row["source_ref"],
+            "version_hash": row["version_hash"],
+            "bundle_name": row["bundle_name"],
+            "bundle_version": row["bundle_version"],
+            "status": row["status"],
+            "created_at": created_at.isoformat() if created_at else None,
+            "validation_status": row["validation_status"],
+            "smoke_status": row["smoke_status"],
+            "diagnostics": row["diagnostics"],
+            "github_repo_url": self._row_value(row, "github_repo_url"),
+            "github_branch": self._row_value(row, "github_branch"),
+            "checkout_path": self._row_value(row, "checkout_path"),
+            "current_commit_sha": self._row_value(row, "current_commit_sha"),
+            "upstream_commit_sha": self._row_value(row, "upstream_commit_sha"),
+            "sync_status": self._row_value(row, "sync_status"),
+            "last_synced_at": last_synced_at.isoformat() if last_synced_at else None,
+            "last_sync_error": self._row_value(row, "last_sync_error"),
+            "current_revision_id": self._row_value(row, "current_revision_id"),
+            "current_revision": self._build_current_revision_payload(row),
+        }
+
     async def list_modules(self) -> list[dict[str, Any]]:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
@@ -814,29 +1024,23 @@ class AppServices:
             rows = await conn.fetch(
                 """
                 select m.id, m.source, m.source_ref, m.version_hash, m.bundle_name, m.bundle_version, m.status, m.created_at,
-                       r.validation_status, r.smoke_status, r.diagnostics
+                       m.github_repo_url, m.github_branch, m.checkout_path, m.current_commit_sha, m.upstream_commit_sha,
+                       m.sync_status, m.last_synced_at, m.last_sync_error, m.current_revision_id,
+                       r.validation_status, r.smoke_status, r.diagnostics,
+                       br.commit_sha as current_revision_commit_sha,
+                       br.checkout_path as current_revision_checkout_path,
+                       br.bundle_name as current_revision_bundle_name,
+                       br.bundle_version as current_revision_bundle_version,
+                       br.source_event as current_revision_source_event,
+                       br.created_at as current_revision_created_at
                 from module_imports m
                 join runtime_bundles r on r.module_import_id = m.id
+                left join bundle_revisions br on br.id = m.current_revision_id
                 where m.deleted_at is null
                 order by m.created_at desc
                 """
             )
-        return [
-            {
-                "id": row["id"],
-                "source": row["source"],
-                "source_ref": row["source_ref"],
-                "version_hash": row["version_hash"],
-                "bundle_name": row["bundle_name"],
-                "bundle_version": row["bundle_version"],
-                "status": row["status"],
-                "created_at": row["created_at"].isoformat() if row["created_at"] else None,
-                "validation_status": row["validation_status"],
-                "smoke_status": row["smoke_status"],
-                "diagnostics": row["diagnostics"],
-            }
-            for row in rows
-        ]
+        return [self._build_module_payload(row) for row in rows]
 
     async def get_module(self, module_id: str) -> dict[str, Any] | None:
         modules = await self.list_modules()
@@ -851,7 +1055,7 @@ class AppServices:
         async with self.postgres_pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                select source_ref
+                select source_ref, checkout_path
                 from module_imports
                 where id = $1 and deleted_at is null
                 """,
@@ -859,10 +1063,10 @@ class AppServices:
             )
         if row is None:
             return None
-        source_ref = str(row["source_ref"] or "").strip()
-        if not source_ref:
+        checkout_path = self._module_checkout_path(row)
+        if not checkout_path:
             return {}
-        root = Path(source_ref)
+        root = Path(checkout_path)
         if not root.exists() or not root.is_dir():
             return {}
         files: dict[str, str] = {}
@@ -904,9 +1108,12 @@ class AppServices:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
         async with self.postgres_pool.acquire() as conn:
-            row = await conn.fetchrow("select source_ref from module_imports where id = $1", module_id)
-            source_ref = str(row["source_ref"] or "").strip() if row else ""
-            bundle_root = Path(source_ref).expanduser().resolve() if source_ref else None
+            row = await conn.fetchrow(
+                "select source_ref, checkout_path, current_commit_sha from module_imports where id = $1",
+                module_id,
+            )
+            checkout_path = self._module_checkout_path(row) if row else ""
+            bundle_root = Path(checkout_path).expanduser().resolve() if checkout_path else None
             bundle_toml_path = bundle_root / "bundle.toml" if bundle_root is not None else None
             if bundle_toml_path is not None and bundle_toml_path.exists() and bundle_toml_path.is_file():
                 bundle_toml = bundle_toml_path.read_text(encoding="utf-8")
@@ -927,6 +1134,16 @@ class AppServices:
                 bundle_name,
                 bundle_version,
             )
+            if row is not None:
+                await self._create_bundle_revision(
+                    conn,
+                    module_id,
+                    commit_sha=row["current_commit_sha"],
+                    checkout_path=checkout_path,
+                    bundle_name=bundle_name,
+                    bundle_version=bundle_version,
+                    source_event="metadata_update",
+                )
 
     async def set_module_source_ref(self, module_id: str, source_ref: str) -> None:
         if self.postgres_pool is None:
@@ -936,12 +1153,39 @@ class AppServices:
                 """
                 update module_imports
                 set source_ref = $2,
+                    checkout_path = $2,
                     updated_at = now()
                 where id = $1
                 """,
                 module_id,
                 source_ref,
             )
+
+    async def list_module_revisions(self, module_id: str) -> list[dict[str, Any]]:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                select id, commit_sha, checkout_path, bundle_name, bundle_version, source_event, created_at
+                from bundle_revisions
+                where module_import_id = $1
+                order by created_at desc
+                """,
+                module_id,
+            )
+        return [
+            {
+                "id": row["id"],
+                "commit_sha": row["commit_sha"],
+                "checkout_path": row["checkout_path"],
+                "bundle_name": row["bundle_name"],
+                "bundle_version": row["bundle_version"],
+                "source_event": row["source_event"],
+                "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+            }
+            for row in rows
+        ]
 
     @staticmethod
     def _upsert_toml_string_key(content: str, key: str, value: str) -> str:

@@ -73,6 +73,12 @@ class ModuleImportRequest(BaseModel):
     source: str
     source_ref: str | None = None
     version_hash: str | None = None
+    github_repo_url: str | None = None
+    github_branch: str | None = None
+    checkout_path: str | None = None
+    current_commit_sha: str | None = None
+    upstream_commit_sha: str | None = None
+    sync_status: str | None = None
 
 
 class ValidateRequest(BaseModel):
@@ -261,7 +267,17 @@ async def download_module_bundle_sample():
 @app.post("/modules/import")
 async def import_module(request: Request, payload: ModuleImportRequest):
     services: AppServices = request.app.state.services
-    result = await services.create_module_import(payload.source, payload.source_ref, payload.version_hash)
+    result = await services.create_module_import(
+        payload.source,
+        payload.source_ref,
+        payload.version_hash,
+        github_repo_url=payload.github_repo_url,
+        github_branch=payload.github_branch,
+        checkout_path=payload.checkout_path,
+        current_commit_sha=payload.current_commit_sha,
+        upstream_commit_sha=payload.upstream_commit_sha,
+        sync_status=payload.sync_status,
+    )
     return {"id": result["id"], "status": result["status"]}
 
 

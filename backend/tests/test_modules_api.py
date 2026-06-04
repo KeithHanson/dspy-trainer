@@ -27,7 +27,7 @@ async def fake_readiness(self):
     return ReadinessStatus(postgres=True, redis=True, mlflow=True, litellm=True)
 
 
-async def fake_create_module_import(self, source, source_ref, version_hash):
+async def fake_create_module_import(self, source, source_ref, version_hash, **kwargs):
     module_id = "mod-1"
     STORE[module_id] = {
         "id": module_id,
@@ -38,6 +38,22 @@ async def fake_create_module_import(self, source, source_ref, version_hash):
         "source": source,
         "source_ref": source_ref,
         "version_hash": version_hash,
+        "github_repo_url": kwargs.get("github_repo_url"),
+        "github_branch": kwargs.get("github_branch"),
+        "checkout_path": kwargs.get("checkout_path") or source_ref,
+        "current_commit_sha": kwargs.get("current_commit_sha") or version_hash,
+        "upstream_commit_sha": kwargs.get("upstream_commit_sha") or kwargs.get("current_commit_sha") or version_hash,
+        "sync_status": kwargs.get("sync_status") or ("synced" if source == "github" else "legacy"),
+        "current_revision_id": "rev-1",
+        "current_revision": {
+            "id": "rev-1",
+            "commit_sha": kwargs.get("current_commit_sha") or version_hash,
+            "checkout_path": kwargs.get("checkout_path") or source_ref,
+            "bundle_name": None,
+            "bundle_version": None,
+            "source_event": "import",
+            "created_at": None,
+        },
     }
     return {"id": module_id, "status": "imported"}
 
@@ -84,6 +100,10 @@ async def fake_get_module(self, module_id):
     return STORE.get(module_id)
 
 
+async def fake_list_modules(self):
+    return list(STORE.values())
+
+
 def _patch_services(monkeypatch):
     monkeypatch.setenv("DSPY_TRAINER_POSTGRES_DSN", "postgresql://postgres:postgres@localhost:5432/dspy_trainer")
     monkeypatch.setattr(main_mod.AppServices, "connect", fake_connect)
@@ -94,6 +114,7 @@ def _patch_services(monkeypatch):
     monkeypatch.setattr(main_mod.AppServices, "set_smoke_status", fake_set_smoke_status)
     monkeypatch.setattr(main_mod.AppServices, "get_diagnostics", fake_get_diagnostics)
     monkeypatch.setattr(main_mod.AppServices, "get_module", fake_get_module)
+    monkeypatch.setattr(main_mod.AppServices, "list_modules", fake_list_modules)
     monkeypatch.setattr(main_mod.AppServices, "set_module_bundle_metadata", fake_set_module_bundle_metadata)
     monkeypatch.setattr(main_mod.AppServices, "set_module_source_ref", fake_set_module_source_ref)
 
@@ -194,6 +215,7 @@ def test_module_metadata_can_be_updated(monkeypatch):
         "bundle_version": "0.1.0",
         "source": "upload",
         "source_ref": "/tmp/bundle",
+        "checkout_path": "/tmp/bundle",
     }
 
     with TestClient(main_mod.app) as client:
@@ -202,6 +224,40 @@ def test_module_metadata_can_be_updated(monkeypatch):
         payload = response.json()
         assert payload["bundle_name"] == "after-name"
         assert payload["bundle_version"] == "2.0.0"
+
+
+def test_module_import_and_list_include_git_revision_metadata(monkeypatch):
+    STORE.clear()
+    _patch_services(monkeypatch)
+
+    with TestClient(main_mod.app) as client:
+        created = client.post(
+            "/modules/import",
+            json={
+                "source": "github",
+                "source_ref": "https://github.com/example/demo-bundle",
+                "version_hash": "abc123",
+                "github_repo_url": "https://github.com/example/demo-bundle",
+                "github_branch": "main",
+                "checkout_path": "/tmp/dspy-trainer/checkouts/mod-1",
+                "current_commit_sha": "abc123",
+                "upstream_commit_sha": "abc123",
+                "sync_status": "synced",
+            },
+        )
+        assert created.status_code == 200
+
+        listed = client.get("/modules")
+        assert listed.status_code == 200
+        payload = listed.json()[0]
+        assert payload["github_repo_url"] == "https://github.com/example/demo-bundle"
+        assert payload["github_branch"] == "main"
+        assert payload["checkout_path"] == "/tmp/dspy-trainer/checkouts/mod-1"
+        assert payload["current_commit_sha"] == "abc123"
+        assert payload["upstream_commit_sha"] == "abc123"
+        assert payload["sync_status"] == "synced"
+        assert payload["current_revision"]["id"] == "rev-1"
+        assert payload["current_revision"]["commit_sha"] == "abc123"
 
 
 def test_smoke_test_rerun_overwrites_status(monkeypatch):
