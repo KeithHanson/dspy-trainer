@@ -58,16 +58,19 @@ async def fake_create_module_import(self, source, source_ref, version_hash, **kw
     return {"id": module_id, "status": "imported"}
 
 
-async def fake_set_validation_status(self, module_id, status, diagnostics):
+async def fake_set_validation_status(self, module_id, status, diagnostics, **kwargs):
     if module_id not in STORE:
         return False
     STORE[module_id]["validation_status"] = status
     STORE[module_id]["status"] = "validated" if status == "passed" else "validation_failed"
     STORE[module_id]["diagnostics"] = diagnostics
+    STORE[module_id]["validation_revision_id"] = kwargs.get("revision_id")
+    STORE[module_id]["validation_commit_sha"] = kwargs.get("commit_sha")
+    STORE[module_id]["validation_bundle_version"] = kwargs.get("bundle_version")
     return True
 
 
-async def fake_set_smoke_status(self, module_id, status, diagnostics):
+async def fake_set_smoke_status(self, module_id, status, diagnostics, **kwargs):
     if module_id not in STORE:
         return False
     STORE[module_id]["smoke_status"] = status
@@ -76,6 +79,9 @@ async def fake_set_smoke_status(self, module_id, status, diagnostics):
     else:
         STORE[module_id]["status"] = "runnable" if status == "passed" else "smoke_failed"
     STORE[module_id]["diagnostics"] = diagnostics
+    STORE[module_id]["smoke_revision_id"] = kwargs.get("revision_id")
+    STORE[module_id]["smoke_commit_sha"] = kwargs.get("commit_sha")
+    STORE[module_id]["smoke_bundle_version"] = kwargs.get("bundle_version")
     return True
 
 

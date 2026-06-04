@@ -133,31 +133,34 @@ class _PersistentDbConn:
                 "project_id": params[1],
                 "module_import_id": params[2],
                 "bundle_path": params[3],
-                "strategy": params[4],
-                "objective": params[5],
-                "dataset_id": params[6],
-                "validation_dataset_id": params[7],
-                "execution_lm_profile_id": params[8],
-                "helper_lm_profile_id": params[9],
-                "request_config": params[10],
-                "normalized_config": params[11],
-                "train_inputs": params[12],
-                "val_inputs": params[13],
-                "num_threads": params[14],
-                "source_run_plan_id": params[15],
+                "bundle_revision_id": params[4],
+                "bundle_commit_sha": params[5],
+                "bundle_version": params[6],
+                "strategy": params[7],
+                "objective": params[8],
+                "dataset_id": params[9],
+                "validation_dataset_id": params[10],
+                "execution_lm_profile_id": params[11],
+                "helper_lm_profile_id": params[12],
+                "request_config": params[13],
+                "normalized_config": params[14],
+                "train_inputs": params[15],
+                "val_inputs": params[16],
+                "num_threads": params[17],
+                "source_run_plan_id": params[18],
                 "generated_module_import_id": None,
                 "optimized_evaluation_plan_id": None,
                 "optimized_eval_run_plan_id": None,
-                "execution_log": params[16],
+                "execution_log": params[19],
                 "artifact_path": None,
                 "artifact_metadata": "{}",
                 "telemetry_summary": "{}",
-                "comparison_summary": params[17],
+                "comparison_summary": params[20],
                 "failure_reason": None,
                 "run_started_at": None,
                 "finished_at": None,
-                "created_at": params[18],
-                "updated_at": params[19],
+                "created_at": params[21],
+                "updated_at": params[22],
             }
             return "INSERT 1"
 
@@ -1095,6 +1098,19 @@ def test_optimization_job_json_fields_persist_through_service_db_roundtrip(monke
         "lm_profiles": set(),
     }
     setattr(services, "postgres_pool", _PersistentDbPool(state))
+
+    async def fake_resolve_module_execution_state(module_import_id, fallback_bundle_path=None):
+        assert module_import_id == "mod-1"
+        return {
+            "module_id": module_import_id,
+            "bundle_path": str(FIXTURES / "valid_bundle"),
+            "bundle_revision_id": "rev-1",
+            "bundle_commit_sha": "abc123",
+            "bundle_version": "0.1.0",
+            "bundle_name": "valid-bundle",
+        }
+
+    services.resolve_module_execution_state = fake_resolve_module_execution_state  # type: ignore[method-assign]
 
     created = asyncio.run(
         services.create_optimization_job(

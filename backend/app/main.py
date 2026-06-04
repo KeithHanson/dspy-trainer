@@ -405,14 +405,24 @@ async def delete_module(module_id: str, request: Request):
 @app.post("/modules/{module_id}/validate")
 async def validate_module(module_id: str, request: Request, payload: ValidateRequest):
     services: AppServices = request.app.state.services
-    report = validate_bundle(payload.bundle_path)
+    module_state = await services.resolve_module_execution_state(module_id, payload.bundle_path)
+    if module_state is None:
+        return JSONResponse(status_code=404, content={"error": "module not found"})
+    report = validate_bundle(module_state["bundle_path"])
     await services.set_module_bundle_metadata(
         module_id,
         report.metadata.get("name") if isinstance(report.metadata.get("name"), str) else None,
         report.metadata.get("version") if isinstance(report.metadata.get("version"), str) else None,
     )
     status = "passed" if report.passed else "failed"
-    found = await services.set_validation_status(module_id, status, report.diagnostics)
+    found = await services.set_validation_status(
+        module_id,
+        status,
+        report.diagnostics,
+        revision_id=module_state["bundle_revision_id"],
+        commit_sha=module_state["bundle_commit_sha"],
+        bundle_version=module_state["bundle_version"],
+    )
     if not found:
         return JSONResponse(status_code=404, content={"error": "module not found"})
     return {
@@ -472,20 +482,23 @@ async def validate_module_upload(module_id: str, request: Request, bundle: Uploa
 @app.post("/modules/{module_id}/smoke-test")
 async def smoke_test_module(module_id: str, request: Request, payload: SmokeTestRequest):
     services: AppServices = request.app.state.services
+    module_state = await services.resolve_module_execution_state(module_id, payload.bundle_path)
+    if module_state is None:
+        return JSONResponse(status_code=404, content={"error": "module not found"})
     found = await services.set_smoke_status(module_id, "running", [
         {
             "code": "smoke_test_started",
             "stage": "smoke_test",
             "message": "Smoke test execution started.",
-            "bundle_path": payload.bundle_path,
+            "bundle_path": module_state["bundle_path"],
         }
-    ])
+    ], revision_id=module_state["bundle_revision_id"], commit_sha=module_state["bundle_commit_sha"], bundle_version=module_state["bundle_version"])
     if not found:
         return JSONResponse(status_code=404, content={"error": "module not found"})
 
     try:
         report = run_bundle_eval(
-            bundle_path=payload.bundle_path,
+            bundle_path=module_state["bundle_path"],
             eval_inputs=payload.eval_inputs,
             num_threads=payload.num_threads,
         )
@@ -510,7 +523,14 @@ async def smoke_test_module(module_id: str, request: Request, payload: SmokeTest
         ]
         final_status = "failed"
 
-    await services.set_smoke_status(module_id, final_status, diagnostics)
+    await services.set_smoke_status(
+        module_id,
+        final_status,
+        diagnostics,
+        revision_id=module_state["bundle_revision_id"],
+        commit_sha=module_state["bundle_commit_sha"],
+        bundle_version=module_state["bundle_version"],
+    )
     return {"id": module_id, "smoke_status": final_status, "diagnostics": diagnostics}
 
 

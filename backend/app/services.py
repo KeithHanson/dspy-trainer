@@ -580,11 +580,23 @@ class AppServices:
                   module_import_id text primary key references module_imports(id) on delete cascade,
                   validation_status text not null,
                   smoke_status text not null,
+                  validation_revision_id text,
+                  validation_commit_sha text,
+                  validation_bundle_version text,
+                  smoke_revision_id text,
+                  smoke_commit_sha text,
+                  smoke_bundle_version text,
                   diagnostics jsonb not null default '[]'::jsonb,
                   updated_at timestamptz not null
                 );
                 """
             )
+            await conn.execute("alter table runtime_bundles add column if not exists validation_revision_id text;")
+            await conn.execute("alter table runtime_bundles add column if not exists validation_commit_sha text;")
+            await conn.execute("alter table runtime_bundles add column if not exists validation_bundle_version text;")
+            await conn.execute("alter table runtime_bundles add column if not exists smoke_revision_id text;")
+            await conn.execute("alter table runtime_bundles add column if not exists smoke_commit_sha text;")
+            await conn.execute("alter table runtime_bundles add column if not exists smoke_bundle_version text;")
             await conn.execute(
                 """
                 create table if not exists bundle_revisions (
@@ -641,6 +653,9 @@ class AppServices:
                   project_id text not null,
                   module_import_id text not null references module_imports(id) on delete restrict,
                   bundle_path text not null,
+                  bundle_revision_id text,
+                  bundle_commit_sha text,
+                  bundle_version text,
                   strategy text not null default 'bootstrap_fewshot',
                   objective text not null default 'optimize_demo_quality',
                   dataset_id text references optimization_datasets(id) on delete set null,
@@ -670,6 +685,9 @@ class AppServices:
                 """
             )
             await conn.execute("alter table optimization_jobs add column if not exists strategy text not null default 'bootstrap_fewshot';")
+            await conn.execute("alter table optimization_jobs add column if not exists bundle_revision_id text;")
+            await conn.execute("alter table optimization_jobs add column if not exists bundle_commit_sha text;")
+            await conn.execute("alter table optimization_jobs add column if not exists bundle_version text;")
             await conn.execute("alter table optimization_jobs add column if not exists objective text not null default 'optimize_demo_quality';")
             await conn.execute("alter table optimization_jobs add column if not exists dataset_id text references optimization_datasets(id) on delete set null;")
             await conn.execute("alter table optimization_jobs add column if not exists validation_dataset_id text references optimization_datasets(id) on delete set null;")
@@ -742,6 +760,9 @@ class AppServices:
                   plan_name text not null default 'RunPlan',
                   lm_profile_id text references lm_profiles(id) on delete set null,
                   bundle_path text not null,
+                  bundle_revision_id text,
+                  bundle_commit_sha text,
+                  bundle_version text,
                   eval_inputs jsonb not null default '[]'::jsonb,
                   mlflow_experiment_id text,
                   mlflow_parent_run_id text,
@@ -758,6 +779,9 @@ class AppServices:
             )
             await conn.execute("alter table agent_run_plans add column if not exists plan_name text not null default 'RunPlan';")
             await conn.execute("alter table agent_run_plans add column if not exists lm_profile_id text references lm_profiles(id) on delete set null;")
+            await conn.execute("alter table agent_run_plans add column if not exists bundle_revision_id text;")
+            await conn.execute("alter table agent_run_plans add column if not exists bundle_commit_sha text;")
+            await conn.execute("alter table agent_run_plans add column if not exists bundle_version text;")
             await conn.execute("alter table agent_run_plans add column if not exists mlflow_experiment_id text;")
             await conn.execute("alter table agent_run_plans add column if not exists mlflow_parent_run_id text;")
             await conn.execute(
@@ -912,6 +936,31 @@ class AppServices:
                     bundle_version=bundle_version,
                     source_event=source_event,
                 )
+
+    async def resolve_module_execution_state(
+        self,
+        module_id: str,
+        fallback_bundle_path: str | None = None,
+    ) -> dict[str, Any] | None:
+        module = await self.get_module(module_id)
+        if module is None:
+            return None
+        if str(module.get("source") or "") == "github":
+            checkout_path = str(module.get("checkout_path") or module.get("source_ref") or fallback_bundle_path or "").strip()
+        else:
+            checkout_path = str(fallback_bundle_path or module.get("checkout_path") or module.get("source_ref") or "").strip()
+        if not checkout_path:
+            return None
+        current_revision_raw = module.get("current_revision")
+        current_revision: dict[str, Any] = current_revision_raw if isinstance(current_revision_raw, dict) else {}
+        return {
+            "module_id": module_id,
+            "bundle_path": checkout_path,
+            "bundle_revision_id": str(module.get("current_revision_id") or "").strip() or None,
+            "bundle_commit_sha": str(module.get("current_commit_sha") or current_revision.get("commit_sha") or "").strip() or None,
+            "bundle_version": str(module.get("bundle_version") or current_revision.get("bundle_version") or "").strip() or None,
+            "bundle_name": str(module.get("bundle_name") or current_revision.get("bundle_name") or "").strip() or None,
+        }
 
     async def import_github_module(self, github_repo_url: str, github_branch: str, github_pat: str) -> dict[str, Any]:
         normalized_repo_url = _normalize_github_repo_url(github_repo_url)
@@ -1214,7 +1263,16 @@ class AppServices:
             )
         return {"id": module_id, "status": "imported", "current_revision_id": current_revision_id}
 
-    async def set_validation_status(self, module_id: str, status: str, diagnostics: list[dict[str, Any]]) -> bool:
+    async def set_validation_status(
+        self,
+        module_id: str,
+        status: str,
+        diagnostics: list[dict[str, Any]],
+        *,
+        revision_id: str | None = None,
+        commit_sha: str | None = None,
+        bundle_version: str | None = None,
+    ) -> bool:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
         now = datetime.now(timezone.utc)
@@ -1222,12 +1280,20 @@ class AppServices:
             result = await conn.execute(
                 """
                 update runtime_bundles
-                set validation_status = $2, diagnostics = $3::jsonb, updated_at = $4
+                set validation_status = $2,
+                    diagnostics = $3::jsonb,
+                    validation_revision_id = $4,
+                    validation_commit_sha = $5,
+                    validation_bundle_version = $6,
+                    updated_at = $7
                 where module_import_id = $1
                 """,
                 module_id,
                 status,
                 __import__("json").dumps(diagnostics),
+                revision_id,
+                commit_sha,
+                bundle_version,
                 now,
             )
             await conn.execute(
@@ -1242,7 +1308,16 @@ class AppServices:
             )
         return result.endswith("1")
 
-    async def set_smoke_status(self, module_id: str, status: str, diagnostics: list[dict[str, Any]]) -> bool:
+    async def set_smoke_status(
+        self,
+        module_id: str,
+        status: str,
+        diagnostics: list[dict[str, Any]],
+        *,
+        revision_id: str | None = None,
+        commit_sha: str | None = None,
+        bundle_version: str | None = None,
+    ) -> bool:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
         now = datetime.now(timezone.utc)
@@ -1250,12 +1325,20 @@ class AppServices:
             result = await conn.execute(
                 """
                 update runtime_bundles
-                set smoke_status = $2, diagnostics = $3::jsonb, updated_at = $4
+                set smoke_status = $2,
+                    diagnostics = $3::jsonb,
+                    smoke_revision_id = $4,
+                    smoke_commit_sha = $5,
+                    smoke_bundle_version = $6,
+                    updated_at = $7
                 where module_import_id = $1
                 """,
                 module_id,
                 status,
                 __import__("json").dumps(diagnostics),
+                revision_id,
+                commit_sha,
+                bundle_version,
                 now,
             )
             await conn.execute(
@@ -1280,7 +1363,9 @@ class AppServices:
         async with self.postgres_pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                select m.id, m.status, r.validation_status, r.smoke_status, r.diagnostics
+                select m.id, m.status, r.validation_status, r.smoke_status, r.diagnostics,
+                       r.validation_revision_id, r.validation_commit_sha, r.validation_bundle_version,
+                       r.smoke_revision_id, r.smoke_commit_sha, r.smoke_bundle_version
                 from module_imports m
                 join runtime_bundles r on r.module_import_id = m.id
                 where m.id = $1
@@ -1295,6 +1380,12 @@ class AppServices:
             "validation_status": row["validation_status"],
             "smoke_status": row["smoke_status"],
             "diagnostics": row["diagnostics"],
+            "validation_revision_id": row["validation_revision_id"],
+            "validation_commit_sha": row["validation_commit_sha"],
+            "validation_bundle_version": row["validation_bundle_version"],
+            "smoke_revision_id": row["smoke_revision_id"],
+            "smoke_commit_sha": row["smoke_commit_sha"],
+            "smoke_bundle_version": row["smoke_bundle_version"],
         }
 
     @staticmethod
@@ -1356,6 +1447,12 @@ class AppServices:
             "last_sync_error": self._row_value(row, "last_sync_error"),
             "current_revision_id": self._row_value(row, "current_revision_id"),
             "current_revision": self._build_current_revision_payload(row),
+            "validation_revision_id": self._row_value(row, "validation_revision_id"),
+            "validation_commit_sha": self._row_value(row, "validation_commit_sha"),
+            "validation_bundle_version": self._row_value(row, "validation_bundle_version"),
+            "smoke_revision_id": self._row_value(row, "smoke_revision_id"),
+            "smoke_commit_sha": self._row_value(row, "smoke_commit_sha"),
+            "smoke_bundle_version": self._row_value(row, "smoke_bundle_version"),
         }
 
     async def list_modules(self) -> list[dict[str, Any]]:
@@ -1368,6 +1465,8 @@ class AppServices:
                        m.github_repo_url, m.github_branch, m.checkout_path, m.current_commit_sha, m.upstream_commit_sha,
                        m.sync_status, m.last_synced_at, m.last_sync_error, m.current_revision_id,
                        r.validation_status, r.smoke_status, r.diagnostics,
+                       r.validation_revision_id, r.validation_commit_sha, r.validation_bundle_version,
+                       r.smoke_revision_id, r.smoke_commit_sha, r.smoke_bundle_version,
                        br.commit_sha as current_revision_commit_sha,
                        br.checkout_path as current_revision_checkout_path,
                        br.bundle_name as current_revision_bundle_name,
@@ -1902,6 +2001,9 @@ class AppServices:
         job_id = str(uuid4())
         comparison_summary: dict[str, Any] = {}
         creation_log_additions: list[str] = []
+        execution_state = await self.resolve_module_execution_state(module_import_id, bundle_path)
+        if execution_state is None:
+            return None
         if source_run_plan_id is not None:
             baseline_summary = await self._get_source_run_plan_baseline(
                 project_id=project_id,
@@ -1964,21 +2066,25 @@ class AppServices:
                 """
                 insert into optimization_jobs (
                   id, status, project_id, module_import_id, bundle_path, strategy, objective, dataset_id,
+                  bundle_revision_id, bundle_commit_sha, bundle_version,
                   validation_dataset_id, execution_lm_profile_id, helper_lm_profile_id, request_config,
                   normalized_config, train_inputs, val_inputs, num_threads, source_run_plan_id, generated_module_import_id, execution_log, artifact_path,
                   artifact_metadata, telemetry_summary, comparison_summary, failure_reason, run_started_at,
                   finished_at, created_at, updated_at
                 )
                 values (
-                  $1, 'queued', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb,
-                  $13::jsonb, $14::jsonb, $15, $16, null, $17, null, '{}'::jsonb, '{}'::jsonb, $18::jsonb,
-                  null, null, null, $19, $20
+                  $1, 'queued', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb,
+                  $14::jsonb, $15::jsonb, $16, $17, null, $18, null, '{}'::jsonb, '{}'::jsonb, $19::jsonb,
+                  null, null, null, $20, $21
                 )
                 """,
                 job_id,
                 project_id,
                 module_import_id,
-                bundle_path,
+                execution_state["bundle_path"],
+                execution_state["bundle_revision_id"],
+                execution_state["bundle_commit_sha"],
+                execution_state["bundle_version"],
                 strategy.strip() or "bootstrap_fewshot",
                 objective.strip() or "optimize_demo_quality",
                 dataset_id,
@@ -2022,6 +2128,7 @@ class AppServices:
             row = await conn.fetchrow(
                 """
                 select id, status, project_id, module_import_id, bundle_path, strategy, objective, dataset_id,
+                       bundle_revision_id, bundle_commit_sha, bundle_version,
                        validation_dataset_id, execution_lm_profile_id, helper_lm_profile_id, request_config,
                        normalized_config, train_inputs, val_inputs, num_threads, source_run_plan_id, generated_module_import_id, optimized_evaluation_plan_id, optimized_eval_run_plan_id, execution_log,
                        artifact_path, artifact_metadata, telemetry_summary, comparison_summary,
@@ -2042,6 +2149,9 @@ class AppServices:
             "project_id": row["project_id"],
             "module_import_id": row["module_import_id"],
             "bundle_path": row["bundle_path"],
+            "bundle_revision_id": self._row_value(row, "bundle_revision_id"),
+            "bundle_commit_sha": self._row_value(row, "bundle_commit_sha"),
+            "bundle_version": self._row_value(row, "bundle_version"),
             "strategy": row["strategy"],
             "objective": row["objective"],
             "dataset_id": row["dataset_id"],
@@ -3164,6 +3274,9 @@ class AppServices:
         plan_id = str(uuid4())
         plan_name_value = "RunPlan"
         effective_lm_profile_id = lm_profile_id
+        execution_state = await self.resolve_module_execution_state(module_import_id, bundle_path)
+        if execution_state is None:
+            return None
         async with self.postgres_pool.acquire() as conn:
             module_exists = await conn.fetchval("select 1 from module_imports where id = $1", module_import_id)
             if module_exists is None:
@@ -3188,11 +3301,12 @@ class AppServices:
                 """
                 insert into agent_run_plans (
                   id, status, project_id, module_import_id, scenario_id, dataset_version,
-                  plan_name, lm_profile_id, bundle_path, eval_inputs, mlflow_experiment_id, mlflow_parent_run_id, runs_per_question, max_workers,
+                  plan_name, lm_profile_id, bundle_path, bundle_revision_id, bundle_commit_sha, bundle_version,
+                  eval_inputs, mlflow_experiment_id, mlflow_parent_run_id, runs_per_question, max_workers,
                   total_tasks, completed_tasks, failed_tasks, failure_reason,
                   created_at, updated_at
                 )
-                values ($1, 'draft', $2, $3, $4, $5, $6, $7, $8, $9::jsonb, null, null, $10, $11, 0, 0, 0, null, $12, $13)
+                values ($1, 'draft', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, null, null, $12, $13, 0, 0, 0, null, $14, $15)
                 """,
                 plan_id,
                 project_id,
@@ -3201,7 +3315,10 @@ class AppServices:
                 dataset_version,
                 plan_name_value,
                 effective_lm_profile_id,
-                bundle_path,
+                execution_state["bundle_path"],
+                execution_state["bundle_revision_id"],
+                execution_state["bundle_commit_sha"],
+                execution_state["bundle_version"],
                 __import__("json").dumps(effective_eval_inputs),
                 max(1, runs_per_question),
                 max(1, max_workers),
@@ -3479,7 +3596,8 @@ class AppServices:
             row = await conn.fetchrow(
                 """
                 select id, status, project_id, module_import_id, scenario_id, dataset_version,
-                       plan_name, lm_profile_id, bundle_path, eval_inputs, mlflow_experiment_id, mlflow_parent_run_id, runs_per_question, max_workers,
+                       plan_name, lm_profile_id, bundle_path, bundle_revision_id, bundle_commit_sha, bundle_version,
+                       eval_inputs, mlflow_experiment_id, mlflow_parent_run_id, runs_per_question, max_workers,
                        (select count(*) from agent_run_tasks t where t.plan_id = agent_run_plans.id and t.status = 'running') as running_tasks,
                        total_tasks, completed_tasks, failed_tasks, failure_reason,
                        created_at, updated_at
@@ -3501,6 +3619,9 @@ class AppServices:
             "plan_name": row["plan_name"],
             "lm_profile_id": row["lm_profile_id"],
             "bundle_path": row["bundle_path"],
+            "bundle_revision_id": self._row_value(row, "bundle_revision_id"),
+            "bundle_commit_sha": self._row_value(row, "bundle_commit_sha"),
+            "bundle_version": self._row_value(row, "bundle_version"),
             "eval_inputs": eval_inputs,
             "mlflow_experiment_id": row["mlflow_experiment_id"],
             "mlflow_parent_run_id": row["mlflow_parent_run_id"],
@@ -3523,7 +3644,8 @@ class AppServices:
             rows = await conn.fetch(
                 """
                 select id, status, project_id, module_import_id, scenario_id, dataset_version,
-                       plan_name, lm_profile_id, bundle_path, eval_inputs, mlflow_experiment_id, mlflow_parent_run_id, runs_per_question, max_workers,
+                       plan_name, lm_profile_id, bundle_path, bundle_revision_id, bundle_commit_sha, bundle_version,
+                       eval_inputs, mlflow_experiment_id, mlflow_parent_run_id, runs_per_question, max_workers,
                        (
                          select avg(t.score)
                          from agent_run_tasks t
@@ -3559,6 +3681,9 @@ class AppServices:
                 "plan_name": row["plan_name"],
                 "lm_profile_id": row["lm_profile_id"],
                 "bundle_path": row["bundle_path"],
+                "bundle_revision_id": self._row_value(row, "bundle_revision_id"),
+                "bundle_commit_sha": self._row_value(row, "bundle_commit_sha"),
+                "bundle_version": self._row_value(row, "bundle_version"),
                 "eval_inputs": self._json_list(row["eval_inputs"]),
                 "mlflow_experiment_id": row["mlflow_experiment_id"],
                 "mlflow_parent_run_id": row["mlflow_parent_run_id"],
