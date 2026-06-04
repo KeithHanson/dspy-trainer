@@ -8,7 +8,7 @@ Developer bootstrap and day-2 operations are documented in `docs/COMPOSE_RUNBOOK
 
 1. Copy `.env.sample` to `.env` and fill in at least:
    - `GITHUB_PAT`
-   - LiteLLM upstream settings for the model provider you want to use
+   - any infra/auth values you want to override locally
 2. Start the stack from repo root:
 
 ```bash
@@ -25,7 +25,8 @@ docker compose up -d --remove-orphans
 4. Download the sample bundle from the Bundles page.
 5. Push that bundle to a GitHub repository.
 6. Import the repository from the Bundles page.
-7. Validate the bundle, create an Evaluation Plan, run evals, then launch an Optimization Job from a successful run.
+7. Create an LM Profile in the app.
+8. Validate the bundle, create an Evaluation Plan, run evals, then launch an Optimization Job from a successful run.
 
 ## What is this?
 
@@ -373,4 +374,4 @@ Optional `bundle.toml` fields currently used by DSPy Trainer:
 - GitHub access is configured server-side through `GITHUB_PAT` / `DSPY_TRAINER_GITHUB_PAT`.
 - The web UI never collects or stores the PAT.
 - Sample bundle bootstrap and local runner examples live under `backend/sample_bundles/example-bundle/`.
-- The repo does not ship a default LiteLLM upstream provider configuration; you must supply your own model name, upstream model identifier, and provider credentials in `.env`.
+- LiteLLM runs as an internal proxy and model routing is expected to be configured through LM Profiles created in the app, not through repo-level upstream model env vars.

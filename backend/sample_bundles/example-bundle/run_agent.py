@@ -5,8 +5,12 @@ import json
 import os
 
 import dspy
+from dotenv import load_dotenv
 
 from module import build_program
+
+
+load_dotenv()
 
 
 def parse_args() -> argparse.Namespace:

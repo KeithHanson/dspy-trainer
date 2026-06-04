@@ -1,11 +1,3 @@
-model_list:
-  - model_name: os.environ/LITELLM_MODEL_NAME
-    litellm_params:
-      model: "os.environ/LITELLM_UPSTREAM_MODEL"
-      api_key: "os.environ/LITELLM_UPSTREAM_API_KEY"
-      api_base: "os.environ/LITELLM_UPSTREAM_API_BASE"
-      api_version: "os.environ/LITELLM_UPSTREAM_API_VERSION"
-
 litellm_settings:
   drop_params: true
 
