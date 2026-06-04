@@ -876,6 +876,19 @@ class AppServices:
 
         return await asyncio.to_thread(run)
 
+    async def _commit_and_push_checkout(
+        self,
+        checkout_path: Path,
+        *,
+        message: str,
+    ) -> str:
+        await self._run_git_command(["git", "status", "--short"], cwd=checkout_path)
+        await self._run_git_command(["git", "add", "bundle.toml"], cwd=checkout_path)
+        await self._run_git_command(["git", "add", "."], cwd=checkout_path)
+        await self._run_git_command(["git", "commit", "-m", message], cwd=checkout_path)
+        await self._run_git_command(["git", "push"], cwd=checkout_path)
+        return await self._run_git_command(["git", "rev-parse", "HEAD"], cwd=checkout_path)
+
     def github_pat_configured(self) -> bool:
         return bool(str(os.getenv("DSPY_TRAINER_GITHUB_PAT") or self.settings.github_pat or os.getenv("GITHUB_PAT") or "").strip())
 
@@ -1656,10 +1669,10 @@ class AppServices:
         source_module = await self.get_module(module_id)
         if source_module is None:
             return None
-        source_ref = str(source_module.get("source_ref") or "").strip()
-        if not source_ref:
+        source_root_value = str(source_module.get("checkout_path") or source_module.get("source_ref") or "").strip()
+        if not source_root_value:
             return None
-        source_root = Path(source_ref).expanduser().resolve()
+        source_root = Path(source_root_value).expanduser().resolve()
         if not source_root.exists() or not source_root.is_dir():
             return None
 
@@ -1675,20 +1688,10 @@ class AppServices:
         default_optimized_bundle_name = f"{base_bundle_name}-optimized-{optimization_job_id}"
         optimized_bundle_name = str(bundle_name or "").strip() or default_optimized_bundle_name
         optimized_bundle_version = str(bundle_version or "").strip() or base_bundle_version
-        created = await self.create_module_import("optimization", optimization_job_id, None)
-        new_module_id = str(created["id"])
-
-        bundles_dir = Path("/tmp/dspy-trainer/bundles")
-        bundles_dir.mkdir(parents=True, exist_ok=True)
-        target_dir = bundles_dir / new_module_id
-        if target_dir.exists():
-            shutil.rmtree(target_dir)
-        shutil.copytree(source_root, target_dir)
-
         artifact_target_name = artifact_path.name or "program.json"
-        shutil.copy2(artifact_path, target_dir / artifact_target_name)
+        shutil.copy2(artifact_path, source_root / artifact_target_name)
 
-        bundle_toml_path = target_dir / "bundle.toml"
+        bundle_toml_path = source_root / "bundle.toml"
         bundle_toml = bundle_toml_path.read_text(encoding="utf-8")
         bundle_toml = self._upsert_toml_string_key(bundle_toml, "name", optimized_bundle_name)
         bundle_toml = self._upsert_toml_string_key(bundle_toml, "version", optimized_bundle_version)
@@ -1696,16 +1699,42 @@ class AppServices:
         bundle_toml = self._upsert_toml_string_key(bundle_toml, "source_optimization_job_id", optimization_job_id)
         bundle_toml_path.write_text(bundle_toml, encoding="utf-8")
 
-        await self.set_module_source_ref(new_module_id, str(target_dir))
-        report = validate_bundle(str(target_dir))
+        commit_sha = await self._commit_and_push_checkout(
+            source_root,
+            message=f"Apply optimization output {optimization_job_id}",
+        )
+        report = validate_bundle(str(source_root))
         await self.set_module_bundle_metadata(
-            new_module_id,
+            module_id,
             report.metadata.get("name") if isinstance(report.metadata.get("name"), str) else optimized_bundle_name,
             report.metadata.get("version") if isinstance(report.metadata.get("version"), str) else optimized_bundle_version,
         )
         status = "passed" if report.passed else "failed"
-        await self.set_validation_status(new_module_id, status, report.diagnostics)
-        return await self.get_module(new_module_id)
+        await self._set_module_sync_state(
+            module_id,
+            current_commit_sha=commit_sha,
+            upstream_commit_sha=commit_sha,
+            sync_status="synced",
+            last_sync_error=None,
+            synced_now=True,
+            source_event="optimization_writeback",
+            bundle_name=optimized_bundle_name,
+            bundle_version=optimized_bundle_version,
+            checkout_path=str(source_root),
+        )
+        updated_module = await self.get_module(module_id)
+        revision_id = None
+        if updated_module is not None:
+            revision_id = str(updated_module.get("current_revision_id") or "").strip() or None
+        await self.set_validation_status(
+            module_id,
+            status,
+            report.diagnostics,
+            revision_id=revision_id,
+            commit_sha=commit_sha,
+            bundle_version=optimized_bundle_version,
+        )
+        return await self.get_module(module_id)
 
     async def materialize_optimized_bundle(
         self,

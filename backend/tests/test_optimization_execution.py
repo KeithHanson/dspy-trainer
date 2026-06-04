@@ -1232,7 +1232,7 @@ def test_optimization_job_json_fields_persist_through_service_db_roundtrip(monke
     assert persisted["comparison_summary"] == run_result["comparison_summary"]
 
 
-def test_materialize_optimized_bundle_creates_new_bundle(tmp_path, monkeypatch):
+def test_materialize_optimized_bundle_updates_existing_checkout(tmp_path, monkeypatch):
     services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
 
     source_bundle = tmp_path / "source-bundle"
@@ -1264,12 +1264,9 @@ def test_materialize_optimized_bundle_creates_new_bundle(tmp_path, monkeypatch):
     artifact_path = artifact_dir / "program.json"
     artifact_path.write_text('{"answer": "Paris"}', encoding="utf-8")
 
-    bundles_root = Path("/tmp/dspy-trainer/bundles")
-    if bundles_root.exists():
-        shutil.rmtree(bundles_root)
-
-    created_modules: dict[str, dict] = {}
     validation_calls: list[tuple[str, str]] = []
+    sync_state_calls: list[dict[str, object]] = []
+    git_calls: list[tuple[list[str], str | None]] = []
 
     async def fake_get_optimization_job(job_id):
         assert job_id == "opt-123"
@@ -1284,57 +1281,71 @@ def test_materialize_optimized_bundle_creates_new_bundle(tmp_path, monkeypatch):
         if module_id == "mod-1":
             return {
                 "id": "mod-1",
+                "source": "github",
                 "bundle_name": "echo-bundle",
+                "bundle_version": "0.1.0",
                 "source_ref": str(source_bundle),
+                "checkout_path": str(source_bundle),
+                "current_revision_id": "rev-before",
             }
-        entry = created_modules[module_id]
-        return {
-            "id": module_id,
-            "status": "validated",
-            "source": "optimization",
-            "source_ref": entry["source_ref"],
-            "bundle_name": entry["bundle_name"],
-            "bundle_version": entry["bundle_version"],
-            "validation_status": entry["validation_status"],
-            "smoke_status": "pending",
-            "diagnostics": entry["diagnostics"],
-        }
-
-    async def fake_create_module_import(source, source_ref, version_hash):
-        del source_ref, version_hash
-        assert source == "optimization"
-        created_modules["mod-opt-1"] = {"id": "mod-opt-1", "status": "imported"}
-        return {"id": "mod-opt-1", "status": "imported"}
-
-    async def fake_set_module_source_ref(module_id, source_ref):
-        created_modules[module_id]["source_ref"] = source_ref
+        return None
 
     async def fake_set_module_bundle_metadata(module_id, bundle_name, bundle_version):
-        created_modules[module_id]["bundle_name"] = bundle_name
-        created_modules[module_id]["bundle_version"] = bundle_version
+        assert module_id == "mod-1"
+        assert bundle_name == "custom-bundle"
+        assert bundle_version == "2.0.0"
 
-    async def fake_set_validation_status(module_id, status, diagnostics):
+    async def fake_set_validation_status(module_id, status, diagnostics, **kwargs):
         validation_calls.append((module_id, status))
-        created_modules[module_id]["validation_status"] = status
-        created_modules[module_id]["diagnostics"] = diagnostics
+        assert kwargs["commit_sha"] == "commit-after"
+        assert kwargs["bundle_version"] == "2.0.0"
         return True
 
+    async def fake_set_module_sync_state(module_id, **kwargs):
+        sync_state_calls.append({"module_id": module_id, **kwargs})
+
+    async def fake_run_git_command(args, *, cwd=None):
+        git_calls.append((args, str(cwd) if cwd is not None else None))
+        if args[:3] == ["git", "rev-parse", "HEAD"]:
+            return "commit-after"
+        return ""
+
+    async def fake_get_updated_module(module_id):
+        if module_id != "mod-1":
+            return None
+        return {
+            "id": "mod-1",
+            "source": "github",
+            "source_ref": str(source_bundle),
+            "checkout_path": str(source_bundle),
+            "bundle_name": "custom-bundle",
+            "bundle_version": "2.0.0",
+            "validation_status": "passed",
+            "smoke_status": "pending",
+            "diagnostics": [],
+            "current_revision_id": "rev-after",
+        }
+
     monkeypatch.setattr(services, "get_optimization_job", fake_get_optimization_job)
-    monkeypatch.setattr(services, "get_module", fake_get_module)
-    monkeypatch.setattr(services, "create_module_import", fake_create_module_import)
-    monkeypatch.setattr(services, "set_module_source_ref", fake_set_module_source_ref)
+    monkeypatch.setattr(services, "get_module", fake_get_updated_module)
     monkeypatch.setattr(services, "set_module_bundle_metadata", fake_set_module_bundle_metadata)
     monkeypatch.setattr(services, "set_validation_status", fake_set_validation_status)
+    monkeypatch.setattr(services, "_set_module_sync_state", fake_set_module_sync_state)
+    monkeypatch.setattr(services, "_run_git_command", fake_run_git_command)
 
     result = asyncio.run(services.materialize_optimized_bundle("opt-123", bundle_name="custom-bundle", bundle_version="2.0.0"))
 
     assert result is not None
     assert result["bundle_name"] == "custom-bundle"
-    materialized_root = Path(result["source_ref"])
+    materialized_root = Path(source_bundle)
     assert materialized_root.joinpath("program.json").exists()
     bundle_toml = materialized_root.joinpath("bundle.toml").read_text(encoding="utf-8")
     assert 'name = "custom-bundle"' in bundle_toml
     assert 'version = "2.0.0"' in bundle_toml
     assert 'optimized_program_state = "program.json"' in bundle_toml
     assert 'source_optimization_job_id = "opt-123"' in bundle_toml
-    assert validation_calls == [("mod-opt-1", "passed")]
+    assert validation_calls == [("mod-1", "passed")]
+    assert sync_state_calls[0]["module_id"] == "mod-1"
+    assert sync_state_calls[0]["source_event"] == "optimization_writeback"
+    assert any(call[0][:3] == ["git", "commit", "-m"] for call in git_calls)
+    assert any(call[0][:2] == ["git", "push"] for call in git_calls)
