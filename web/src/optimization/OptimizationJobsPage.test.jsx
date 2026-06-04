@@ -350,7 +350,7 @@ describe("OptimizationJobsPage", () => {
               id: "opt-job-delete",
               strategy: "bootstrap_fewshot",
               objective: "optimize_demo_quality",
-              status: "queued",
+              status: "succeeded",
               module_import_id: "mod-1",
               comparison_summary: {},
               run_started_at: "2026-01-01T00:01:00+00:00",
@@ -441,6 +441,7 @@ describe("OptimizationJobsPage", () => {
     );
 
     expect(await screen.findByText("opt-job-ca")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Delete" })).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
 
@@ -531,6 +532,7 @@ describe("OptimizationJobsPage", () => {
 
     expect(await screen.findByText("Optimization Job Detail")).toBeInTheDocument();
     expect(await screen.findByRole("button", { name: "Cancel job" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Delete job" })).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "Cancel job" }));
 

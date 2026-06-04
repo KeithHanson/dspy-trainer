@@ -193,17 +193,19 @@ export function RunsPage() {
                         <td className="cap">{formatTimeAgo(plan.created_at)}</td>
                         <td><Icon name="chevR" size={14} className="faint" /></td>
                         <td>
-                          <Button
-                            size="sm"
-                            variant="danger"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              deleteRunPlan(plan.id);
-                            }}
-                            disabled={deletingPlanId === plan.id}
-                          >
-                            {deletingPlanId === plan.id ? "Deleting..." : "Delete"}
-                          </Button>
+                          {canDeleteRunPlan(plan.status) ? (
+                            <Button
+                              size="sm"
+                              variant="danger"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                deleteRunPlan(plan.id);
+                              }}
+                              disabled={deletingPlanId === plan.id}
+                            >
+                              {deletingPlanId === plan.id ? "Deleting..." : "Delete"}
+                            </Button>
+                          ) : null}
                         </td>
                       </tr>
                     ))}
@@ -549,6 +551,10 @@ function toneForAverageScore(value, threshold) {
     return "";
   }
   return Number(value) >= Number(threshold) ? "runs-kpi-pass" : "runs-kpi-fail";
+}
+
+function canDeleteRunPlan(status) {
+  return status === "succeeded" || status === "failed" || status === "canceled";
 }
 
 function shortId(value) {

@@ -247,18 +247,20 @@ export function OptimizationJobsPage() {
                                 {cancelingJobId === item.id ? "Canceling..." : "Cancel"}
                               </Button>
                             ) : null}
-                            <Button
-                              size="sm"
-                              variant="danger"
-                              className={canCancelJob(item?.status) ? "optimization-job-action" : ""}
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                deleteJob(item.id);
-                              }}
-                              disabled={deletingJobId === item.id}
-                            >
-                              {deletingJobId === item.id ? "Deleting..." : "Delete"}
-                            </Button>
+                            {canDeleteJob(item?.status) ? (
+                              <Button
+                                size="sm"
+                                variant="danger"
+                                className={canCancelJob(item?.status) ? "optimization-job-action" : ""}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  deleteJob(item.id);
+                                }}
+                                disabled={deletingJobId === item.id}
+                              >
+                                {deletingJobId === item.id ? "Deleting..." : "Delete"}
+                              </Button>
+                            ) : null}
                           </td>
                         </tr>
                       );
@@ -296,7 +298,7 @@ export function OptimizationJobsPage() {
                 {cancelingJobId === detailJobId ? "Canceling..." : "Cancel job"}
               </Button>
             ) : null}
-            {detailJobId ? (
+            {detailJobId && canDeleteJob(job?.status) ? (
               <Button variant="danger" onClick={() => deleteJob(detailJobId)} disabled={deletingJobId === detailJobId}>
                 {deletingJobId === detailJobId ? "Deleting..." : "Delete job"}
               </Button>
@@ -530,4 +532,8 @@ function getDeltaComparisonClass(deltaValue) {
 
 function canCancelJob(status) {
   return status === "queued" || status === "running";
+}
+
+function canDeleteJob(status) {
+  return status === "succeeded" || status === "failed" || status === "canceled";
 }
