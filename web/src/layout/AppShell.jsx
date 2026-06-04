@@ -14,7 +14,7 @@ const PRIMARY_NAV = [
 
 const SECONDARY_NAV = [];
 
-function NavSection({ items, hasActiveRun }) {
+function NavSection({ items, hasActiveRun, hasActiveOptimization }) {
   return items.map((item) => (
     <NavLink
       end
@@ -27,6 +27,7 @@ function NavSection({ items, hasActiveRun }) {
           <Icon className="shell-nav-icon" name={item.icon} size={item.icon === "settings" ? 18 : 16} active={isActive} />
           <span>{item.label}</span>
           {item.to === "/runs" && hasActiveRun ? <span className="dot d-live" aria-hidden="true" /> : null}
+          {item.to === "/optimization/jobs" && hasActiveOptimization ? <span className="dot d-live" aria-hidden="true" /> : null}
         </>
       )}
     </NavLink>
@@ -38,30 +39,39 @@ export function AppShell({ children }) {
   const mlflowBase = useMemo(() => (import.meta.env.VITE_MLFLOW_BASE_URL || "http://localhost:5001").replace(/\/$/, ""), []);
   const litellmBase = useMemo(() => (import.meta.env.VITE_LITELLM_BASE_URL || "http://localhost:4000").replace(/\/$/, ""), []);
   const [hasActiveRun, setHasActiveRun] = useState(false);
+  const [hasActiveOptimization, setHasActiveOptimization] = useState(false);
 
   useEffect(() => {
     let isMounted = true;
 
     const loadRunActivity = async () => {
       try {
-        const response = await fetch(`${apiBase}/agent-run-plans?limit=50&offset=0`, { method: "GET" });
-        if (!response.ok) {
+        const [runsResp, optimizationResp] = await Promise.all([
+          fetch(`${apiBase}/agent-run-plans?limit=50&offset=0`, { method: "GET" }),
+          fetch(`${apiBase}/optimization/jobs?limit=50&offset=0`, { method: "GET" }),
+        ]);
+        if (!runsResp.ok || !optimizationResp.ok) {
           if (isMounted) {
             setHasActiveRun(false);
+            setHasActiveOptimization(false);
           }
           return;
         }
-        const payload = await response.json();
-        const plans = Array.isArray(payload) ? payload : [];
+        const [runPayload, optimizationPayload] = await Promise.all([runsResp.json(), optimizationResp.json()]);
+        const plans = Array.isArray(runPayload) ? runPayload : [];
+        const jobs = Array.isArray(optimizationPayload) ? optimizationPayload : [];
         const nextHasActive = plans.some(
           (plan) => plan?.status === "queued" || plan?.status === "running" || Number(plan?.running_tasks || 0) > 0,
         );
+        const nextHasActiveOptimization = jobs.some((job) => job?.status === "queued" || job?.status === "running");
         if (isMounted) {
           setHasActiveRun(nextHasActive);
+          setHasActiveOptimization(nextHasActiveOptimization);
         }
       } catch {
         if (isMounted) {
           setHasActiveRun(false);
+          setHasActiveOptimization(false);
         }
       }
     };
@@ -85,9 +95,9 @@ export function AppShell({ children }) {
         </div>
 
         <div className="col shell-nav-wrap">
-          <NavSection items={PRIMARY_NAV} hasActiveRun={hasActiveRun} />
+          <NavSection items={PRIMARY_NAV} hasActiveRun={hasActiveRun} hasActiveOptimization={hasActiveOptimization} />
           <hr className="hr shell-divider" />
-          {SECONDARY_NAV.length ? <NavSection items={SECONDARY_NAV} hasActiveRun={false} /> : null}
+          {SECONDARY_NAV.length ? <NavSection items={SECONDARY_NAV} hasActiveRun={false} hasActiveOptimization={false} /> : null}
           <div className="col shell-external-links">
             <a className="shell-nav-item" href={mlflowBase} target="_blank" rel="noreferrer">
               <Icon className="shell-nav-icon" name="external" size={16} />

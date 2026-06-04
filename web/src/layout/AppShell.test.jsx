@@ -4,12 +4,18 @@ import { vi } from "vitest";
 import { AppShell } from "./AppShell";
 
 describe("AppShell", () => {
-  function stubPlansFetch(plans) {
+  function stubActivityFetch(plans, jobs = []) {
     const fetchMock = vi.fn((url) => {
       if (String(url).includes("/agent-run-plans?limit=50&offset=0")) {
         return Promise.resolve({
           ok: true,
           json: vi.fn().mockResolvedValue(plans),
+        });
+      }
+      if (String(url).includes("/optimization/jobs?limit=50&offset=0")) {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue(jobs),
         });
       }
       return Promise.reject(new Error(`Unexpected URL ${url}`));
@@ -19,7 +25,7 @@ describe("AppShell", () => {
   }
 
   it("highlights active nav item", () => {
-    stubPlansFetch([]);
+    stubActivityFetch([]);
     render(
       <MemoryRouter initialEntries={["/runs"]}>
         <AppShell>
@@ -34,7 +40,7 @@ describe("AppShell", () => {
   });
 
   it("highlights optimization nav item", () => {
-    stubPlansFetch([]);
+    stubActivityFetch([]);
     render(
       <MemoryRouter initialEntries={["/optimization"]}>
         <AppShell>
@@ -50,7 +56,7 @@ describe("AppShell", () => {
   });
 
   it("highlights optimization jobs nav item", () => {
-    stubPlansFetch([]);
+    stubActivityFetch([]);
     render(
       <MemoryRouter initialEntries={["/optimization/jobs"]}>
         <AppShell>
@@ -66,7 +72,7 @@ describe("AppShell", () => {
   });
 
   it("renders external utility links", () => {
-    stubPlansFetch([]);
+    stubActivityFetch([]);
     render(
       <MemoryRouter initialEntries={["/plans"]}>
         <AppShell>
@@ -82,7 +88,7 @@ describe("AppShell", () => {
   });
 
   it("shows runs live dot only when a run is active", async () => {
-    stubPlansFetch([{ id: "plan-1", status: "running", running_tasks: 1 }]);
+    stubActivityFetch([{ id: "plan-1", status: "running", running_tasks: 1 }]);
     render(
       <MemoryRouter initialEntries={["/dashboard"]}>
         <AppShell>
@@ -99,7 +105,7 @@ describe("AppShell", () => {
   });
 
   it("hides runs live dot when no run is active", async () => {
-    stubPlansFetch([{ id: "plan-1", status: "succeeded", running_tasks: 0 }]);
+    stubActivityFetch([{ id: "plan-1", status: "succeeded", running_tasks: 0 }]);
     render(
       <MemoryRouter initialEntries={["/dashboard"]}>
         <AppShell>
@@ -112,6 +118,23 @@ describe("AppShell", () => {
       expect(screen.getByRole("link", { name: "Eval Runs" })).toHaveTextContent("Eval Runs");
     });
     expect(document.querySelector(".d-live")).toBeNull();
+    vi.unstubAllGlobals();
+  });
+
+  it("shows optimization live dot when an optimization job is active", async () => {
+    stubActivityFetch([], [{ id: "opt-1", status: "running" }]);
+    render(
+      <MemoryRouter initialEntries={["/dashboard"]}>
+        <AppShell>
+          <div>content</div>
+        </AppShell>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Optimization Jobs" })).toHaveTextContent("Optimization Jobs");
+      expect(document.querySelectorAll(".d-live").length).toBeGreaterThan(0);
+    });
     vi.unstubAllGlobals();
   });
 });
