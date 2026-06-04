@@ -342,7 +342,7 @@ describe("RunsPage", () => {
       </MemoryRouter>,
     );
 
-    await userEvent.click(await screen.findByRole("row", { name: /Q1/ }));
+    await userEvent.click(await screen.findByRole("row", { name: /E1/ }));
     expect(await screen.findByText("Run item detail")).toBeInTheDocument();
     expect(await screen.findAllByText("✅")).toHaveLength(2);
 

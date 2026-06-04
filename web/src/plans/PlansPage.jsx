@@ -320,7 +320,7 @@ function PlanBuilder({ onBack, planId }) {
         const fromInputs = Array.isArray(payload.eval_inputs)
           ? payload.eval_inputs.map((item, idx) => ({
               id: `loaded-${idx}`,
-              input: item?.input?.question || "",
+              input: item?.input?.input || item?.input?.question || "",
               expected: item?.label?.expected || "",
             }))
           : [];
@@ -386,7 +386,7 @@ function PlanBuilder({ onBack, planId }) {
         body: JSON.stringify({
           lm_profile_id: generatorLmProfileId,
           operator_prompt: generatorPrompt,
-          existing_rows: filledRows.map((row) => ({ input: { question: row.input }, label: { expected: row.expected } })),
+          existing_rows: filledRows.map((row) => ({ input: { input: row.input }, label: { expected: row.expected } })),
           max_rows: 10,
         }),
       });
@@ -397,7 +397,7 @@ function PlanBuilder({ onBack, planId }) {
       const previewRows = Array.isArray(payload?.items)
         ? payload.items.map((item, idx) => ({
             id: `preview-${idx}`,
-            input: item?.input?.question || "",
+            input: item?.input?.input || item?.input?.question || "",
             expected: item?.label?.expected || "",
           })).filter((item) => item.input && item.expected)
         : [];
@@ -440,7 +440,7 @@ function PlanBuilder({ onBack, planId }) {
     try {
       let runPlanId = "";
 
-      const evalInputs = filledRows.map((row) => ({ input: { question: row.input }, label: { expected: row.expected } }));
+      const evalInputs = filledRows.map((row) => ({ input: { input: row.input }, label: { expected: row.expected } }));
 
       const savedPlanResp = await fetch(isEditing ? `${apiBase}/evaluation-plans/${planId}` : `${apiBase}/evaluation-plans`, {
         method: isEditing ? "PATCH" : "POST",
@@ -603,12 +603,12 @@ function PlanBuilder({ onBack, planId }) {
         <aside className="plans-rail">
           <div className="col gap-3">
             <div className="t-label">Agent Run Plan</div>
-            <StepControl label="Runs per question" value={runs} min={1} setValue={setRuns} />
+            <StepControl label="Runs per input" value={runs} min={1} setValue={setRuns} />
             <StepControl label="Max workers" value={workers} min={1} max={24} setValue={setWorkers} />
             <hr className="hr" />
             <div className="panel card-pad col gap-2">
               <div className="row between"><span className="muted">Dataset</span><span className="mono">{filledRows.length}</span></div>
-              <div className="row between"><span className="muted">x Runs per question</span><span className="mono">{runs}</span></div>
+              <div className="row between"><span className="muted">x Runs per input</span><span className="mono">{runs}</span></div>
               <hr className="hr" />
               <div className="row between"><span>Total tasks</span><span className="mono">{totalTasks}</span></div>
             </div>

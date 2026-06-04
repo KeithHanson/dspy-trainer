@@ -345,7 +345,7 @@ export function RunsPage() {
                 <thead>
                     <tr>
                       <th style={{ width: 36 }}></th>
-                      <th>Question</th>
+                      <th>Eval Item</th>
                       <th>Attempt</th>
                       <th>Status</th>
                       <th>Eval</th>
@@ -357,7 +357,7 @@ export function RunsPage() {
                   {filteredTasks.map((task) => (
                     <tr key={task.id} className="runs-row-click" onClick={() => setSelectedTask(task)}>
                       <td><StatusDot status={task.status} /></td>
-                      <td className="mono">Q{task.question_index + 1}</td>
+                      <td className="mono">E{task.question_index + 1}</td>
                       <td className="mono">{task.attempt_index + 1}</td>
                       <td><StatusPill status={task.status} /></td>
                       <td className="mono">{task.status === "succeeded" ? (task.eval_pass ? "✅" : "❌") : "-"}</td>
