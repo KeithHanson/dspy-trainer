@@ -281,6 +281,10 @@ export function OptimizationLaunchPage() {
       setValidationError("Execution LM profile is required to launch optimization.");
       return;
     }
+    if (!sourceRunPlanId.trim()) {
+      setValidationError("Source run plan is required to launch optimization.");
+      return;
+    }
     setIsSubmitting(true);
     try {
       const response = await fetch(`${apiBase}/optimization/jobs`, {
@@ -303,7 +307,7 @@ export function OptimizationLaunchPage() {
           train_inputs: [],
           val_inputs: [],
             num_threads: 1,
-            source_run_plan_id: sourceRunPlanId.trim() || null,
+            source_run_plan_id: sourceRunPlanId.trim(),
         }),
       });
       if (!response.ok) {
@@ -372,7 +376,7 @@ export function OptimizationLaunchPage() {
           <FieldHelp text="The selected module is the source for optimization. Re-run its bundle upload if this is stale." />
 
           <label className="col gap-1" htmlFor="optimization-source-run-plan">
-            <span className="t-label">Source run plan (optional)</span>
+            <span className="t-label">Source run plan</span>
             <select
               id="optimization-source-run-plan"
               className="bundles-input"
@@ -401,7 +405,7 @@ export function OptimizationLaunchPage() {
               !selectedModuleId
                 ? "Select a validated module to scope source run plans by module."
                 : sourceRunPlans.length
-                  ? "Optional. Scope dataset derivation to one run plan for the selected module."
+                  ? "Required. Choose the source run plan used to derive optimization data and follow-up evaluation context."
                   : "No source run plans were found for the selected module."
             }
           />

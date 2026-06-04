@@ -86,8 +86,7 @@ describe("OptimizationLaunchPage", () => {
     await userEvent.click(screen.getByRole("button", { name: "MIPROv2" }));
     await userEvent.selectOptions(screen.getByLabelText("Execution LM profile"), "lm-exec-1");
     await userEvent.selectOptions(screen.getByLabelText("Helper LM profile (optional)"), "lm-help-2");
-    await userEvent.selectOptions(screen.getByLabelText("Training dataset (optional)"), "ods-1");
-    await userEvent.selectOptions(screen.getByLabelText("Source run plan (optional)"), "plan-123");
+    await userEvent.selectOptions(screen.getByLabelText("Source run plan"), "plan-123");
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
       expect.stringMatching(/\/agent-run-plans\/plan-123\/tasks\?limit=500&offset=0$/),
@@ -116,7 +115,7 @@ describe("OptimizationLaunchPage", () => {
     expect(payload.module_import_id).toBe("mod-1");
     expect(payload.execution_lm_profile_id).toBe("lm-exec-1");
     expect(payload.helper_lm_profile_id).toBe("lm-help-2");
-    expect(payload.dataset_id).toBe("ods-1");
+    expect(payload.dataset_id).toBeNull();
   expect(payload.source_run_plan_id).toBe("plan-123");
     expect(payload.request_config).toMatchObject({
       budget: "light",
@@ -172,7 +171,7 @@ describe("OptimizationLaunchPage", () => {
     expect(moduleSelect).toBeInTheDocument();
     await userEvent.selectOptions(moduleSelect, "mod-2");
 
-    const sourceRunPlanSelect = await screen.findByLabelText("Source run plan (optional)");
+    const sourceRunPlanSelect = await screen.findByLabelText("Source run plan");
     expect(sourceRunPlanSelect).toBeEnabled();
     expect(await screen.findByRole("option", { name: "No matching run plans for this module" })).toBeInTheDocument();
 
@@ -221,7 +220,7 @@ describe("OptimizationLaunchPage", () => {
       </MemoryRouter>,
     );
 
-      const sourceRunPlanSelect = await screen.findByLabelText("Source run plan (optional)");
+      const sourceRunPlanSelect = await screen.findByLabelText("Source run plan");
       expect(await screen.findByRole("option", { name: /Paginated run plan/ })).toBeInTheDocument();
       expect(sourceRunPlanSelect).toHaveValue("");
 
@@ -249,7 +248,7 @@ describe("OptimizationLaunchPage", () => {
       </MemoryRouter>,
     );
 
-    const sourceRunPlanSelect = await screen.findByLabelText("Source run plan (optional)");
+    const sourceRunPlanSelect = await screen.findByLabelText("Source run plan");
     expect(sourceRunPlanSelect).toBeDisabled();
     expect(screen.getByRole("option", { name: "Select a validated module first" })).toBeInTheDocument();
 
