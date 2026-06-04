@@ -216,6 +216,13 @@ def _patch_services(monkeypatch):
 def test_module_import_and_status_flow(monkeypatch):
     STORE.clear()
     _patch_services(monkeypatch)
+    requirement_installs: list[str] = []
+
+    async def fake_ensure_bundle_requirements_installed(self, bundle_path):
+        requirement_installs.append(bundle_path)
+
+    monkeypatch.setattr(main_mod.AppServices, "ensure_bundle_requirements_installed", fake_ensure_bundle_requirements_installed)
+
     def fake_run_bundle_eval(bundle_path, eval_inputs, num_threads=1):
         _ = (bundle_path, eval_inputs, num_threads)
         raise RuntimeError("runtime error")
@@ -271,6 +278,7 @@ def test_module_import_and_status_flow(monkeypatch):
             assert payload["id"] == module_id
             assert payload["validation_status"] == "passed"
             assert payload["smoke_status"] == "failed"
+            assert requirement_installs == [str(bundle_dir)]
 
 
 def test_module_not_found_paths(monkeypatch):

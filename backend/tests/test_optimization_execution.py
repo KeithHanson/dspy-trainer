@@ -546,9 +546,14 @@ def test_run_optimization_job_persists_artifact_and_summaries(monkeypatch):
         return None
     async def fake_get_lm_profile(lm_profile_id):
         return None
+    requirement_installs: list[str] = []
+
+    async def fake_ensure_bundle_requirements_installed(bundle_path):
+        requirement_installs.append(bundle_path)
 
     monkeypatch.setattr(services, "append_optimization_process_log", fake_append_optimization_process_log)
     monkeypatch.setattr(services, "get_lm_profile", fake_get_lm_profile)
+    monkeypatch.setattr(services, "ensure_bundle_requirements_installed", fake_ensure_bundle_requirements_installed)
     monkeypatch.setattr(services, "_apply_optimized_bundle_writeback", fake_apply_writeback)
     monkeypatch.setattr(services, "_materialize_optimized_bundle_from_job", fake_materialize_from_job)
     monkeypatch.setattr(services, "get_module", fake_get_module)
@@ -570,6 +575,7 @@ def test_run_optimization_job_persists_artifact_and_summaries(monkeypatch):
     assert result["artifact_path"].endswith("program.json")
     assert result["artifact_metadata"] == {"artifact_type": "dspy_program_state"}
     assert result["telemetry_summary"]["selected_demos"][0]["demo_count"] == 1
+    assert requirement_installs == [str(FIXTURES / "valid_bundle")]
     assert result["comparison_summary"] == {
         "baseline_score_pct": None,
         "optimized_score_pct": 100.0,

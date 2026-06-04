@@ -448,6 +448,7 @@ async def smoke_test_module(module_id: str, request: Request, payload: SmokeTest
         return JSONResponse(status_code=404, content={"error": "module not found"})
 
     try:
+        await services.ensure_bundle_requirements_installed(module_state["bundle_path"])
         report = run_bundle_eval(
             bundle_path=module_state["bundle_path"],
             eval_inputs=payload.eval_inputs,

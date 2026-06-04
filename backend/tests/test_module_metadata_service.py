@@ -2,6 +2,7 @@ import asyncio
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 
@@ -292,3 +293,46 @@ def test_classify_sync_status_covers_sync_relationships():
     assert _classify_sync_status("abc", "def", "abc") == "behind"
     assert _classify_sync_status("def", "abc", "abc") == "ahead"
     assert _classify_sync_status("abc", "def", "xyz") == "diverged"
+
+
+def test_ensure_bundle_requirements_installed_skips_when_missing(tmp_path, monkeypatch):
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+    bundle_root = tmp_path / "bundle"
+    bundle_root.mkdir()
+
+    called = False
+
+    def fake_run(*args, **kwargs):
+        nonlocal called
+        called = True
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("app.services.subprocess.run", fake_run)
+
+    asyncio.run(services.ensure_bundle_requirements_installed(str(bundle_root)))
+
+    assert called is False
+
+
+def test_ensure_bundle_requirements_installed_caches_by_requirements_hash(tmp_path, monkeypatch):
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+    bundle_root = tmp_path / "bundle"
+    bundle_root.mkdir()
+    requirements = bundle_root / "requirements.txt"
+    requirements.write_text("httpx==0.27.0\n", encoding="utf-8")
+
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        calls.append(list(args))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("app.services.subprocess.run", fake_run)
+
+    asyncio.run(services.ensure_bundle_requirements_installed(str(bundle_root)))
+    asyncio.run(services.ensure_bundle_requirements_installed(str(bundle_root)))
+    requirements.write_text("httpx==0.28.0\n", encoding="utf-8")
+    asyncio.run(services.ensure_bundle_requirements_installed(str(bundle_root)))
+
+    assert len(calls) == 2
+    assert calls[0][-2:] == ["-r", str(requirements)]

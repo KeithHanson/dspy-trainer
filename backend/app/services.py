@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 import logging
 import multiprocessing
@@ -13,6 +14,7 @@ import random
 import re
 import shutil
 import subprocess
+import sys
 import tomllib
 import traceback
 from typing import Any
@@ -257,6 +259,48 @@ class AppServices:
         self.redis: redis.Redis | None = None
         self.postgres_pool: asyncpg.Pool | None = None
         self.http_client: httpx.AsyncClient | None = None
+        self._installed_bundle_requirements: dict[str, str] = {}
+        self._bundle_requirements_lock = asyncio.Lock()
+
+    async def ensure_bundle_requirements_installed(self, bundle_path: str) -> None:
+        root = Path(bundle_path).expanduser().resolve()
+        requirements_path = root / "requirements.txt"
+        if not requirements_path.exists() or not requirements_path.is_file():
+            return
+        requirements_bytes = requirements_path.read_bytes()
+        digest = hashlib.sha256(requirements_bytes).hexdigest()
+        cache_key = str(requirements_path)
+        if self._installed_bundle_requirements.get(cache_key) == digest:
+            return
+
+        async with self._bundle_requirements_lock:
+            if self._installed_bundle_requirements.get(cache_key) == digest:
+                return
+
+            def run_install() -> None:
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "pip",
+                        "install",
+                        "--disable-pip-version-check",
+                        "-r",
+                        str(requirements_path),
+                    ],
+                    cwd=str(root),
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                if completed.returncode != 0:
+                    stderr = (completed.stderr or "").strip()
+                    stdout = (completed.stdout or "").strip()
+                    detail = stderr or stdout or "pip install failed"
+                    raise RuntimeError(f"failed to install bundle requirements: {detail}")
+
+            await asyncio.to_thread(run_install)
+            self._installed_bundle_requirements[cache_key] = digest
 
     @staticmethod
     def _merge_process_log(existing_log: str | None, additions: list[str]) -> str:
@@ -3030,6 +3074,8 @@ class AppServices:
                         raise RuntimeError("helper lm profile not found")
                     emit(f"helper_lm_profile_id={job['helper_lm_profile_id']}")
 
+                await self.ensure_bundle_requirements_installed(str(job["bundle_path"]))
+
                 artifact_root = Path("/tmp/dspy-trainer/optimization_artifacts") / optimization_job_id
                 emit(f"artifact_dir={artifact_root}")
                 optimization_result = await self._run_optimization_in_subprocess(
@@ -4356,6 +4402,7 @@ class AppServices:
                 task["plan_id"],
                 now,
             )
+        await self.ensure_bundle_requirements_installed(str(task["bundle_path"]))
         try:
             eval_inputs = [
                 {

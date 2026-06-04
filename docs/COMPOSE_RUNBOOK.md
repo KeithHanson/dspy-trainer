@@ -26,6 +26,9 @@ Named volumes:
 
 Before starting the stack, ensure `.env` contains `GITHUB_PAT` if you want to import, sync, or push GitHub-backed bundles. Backend and worker read that variable server-side; the web UI only reports whether GitHub access is configured. GitHub imports may target either the repo root or a configured bundle subfolder. Optimization writeback now pushes to an `optimization-<job-prefix>` branch for manual merge, so also set `GIT_COMMIT_NAME` and `GIT_COMMIT_EMAIL` (defaults are provided if omitted).
 
+Bundle runtime note:
+- If a tracked bundle contains `requirements.txt`, backend and worker install those dependencies automatically before executing the bundle.
+
 Run from repository root:
 
 ```bash
