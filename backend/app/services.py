@@ -2824,12 +2824,13 @@ class AppServices:
             "You generate evaluation plan rows for an operator. "
             "Return only raw JSON with no markdown, code fences, or explanatory prose. "
             "The response must be a JSON array of objects using exactly this schema: "
-            "[{\"input\": {\"question\": string}, \"label\": {\"expected\": string}}]."
+            "[{\"input\": {\"question\": string}, \"label\": {\"expected\": string}}]. "
+            "Generated rows must be materially different from any existing rows provided by the operator; do not repeat, paraphrase, or lightly vary those prior examples."
         )
         user_prompt = (
             f"Generate {max_rows} evaluation rows.\n\n"
             f"Operator request:\n{cleaned_prompt}\n\n"
-            f"Existing rows for style reference:\n{json.dumps(normalized_existing, indent=2)}"
+            f"Existing rows to avoid duplicating:\n{json.dumps(normalized_existing, indent=2)}"
         )
 
         last_error = "unknown parse failure"
@@ -2856,7 +2857,7 @@ class AppServices:
                 user_prompt = (
                     f"Generate {max_rows} evaluation rows.\n\n"
                     f"Operator request:\n{cleaned_prompt}\n\n"
-                    f"Existing rows for style reference:\n{json.dumps(normalized_existing, indent=2)}\n\n"
+                    f"Existing rows to avoid duplicating:\n{json.dumps(normalized_existing, indent=2)}\n\n"
                     f"The previous response could not be parsed because: {last_error}. "
                     "Retry and return only a JSON array using the required schema."
                 )

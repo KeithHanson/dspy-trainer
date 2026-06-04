@@ -714,6 +714,8 @@ async def generate_evaluation_plan_rows(request: Request, payload: EvaluationPla
         return JSONResponse(status_code=400, content={"error": str(exc)})
     except RuntimeError as exc:
         return JSONResponse(status_code=502, content={"error": str(exc)})
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"error": f"unexpected generation failure: {exc}"})
 
 
 @app.post("/lm-profiles")

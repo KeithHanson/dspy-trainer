@@ -387,7 +387,7 @@ function PlanBuilder({ onBack, planId }) {
           lm_profile_id: generatorLmProfileId,
           operator_prompt: generatorPrompt,
           existing_rows: filledRows.map((row) => ({ input: { question: row.input }, label: { expected: row.expected } })),
-          max_rows: 25,
+          max_rows: 10,
         }),
       });
       if (!response.ok) {

@@ -92,6 +92,11 @@ async def fake_generate_evaluation_rows(self, lm_profile_id, operator_prompt, ex
     }
 
 
+async def fake_generate_evaluation_rows_crash(self, lm_profile_id, operator_prompt, existing_rows, max_rows):
+    del lm_profile_id, operator_prompt, existing_rows, max_rows
+    raise Exception("boom")
+
+
 def _patch_services(monkeypatch):
     monkeypatch.setenv("DSPY_TRAINER_POSTGRES_DSN", "postgresql://postgres:postgres@localhost:5432/dspy_trainer")
     monkeypatch.setattr(main_mod.AppServices, "connect", fake_connect)
@@ -232,3 +237,21 @@ def test_generate_evaluation_plan_rows(monkeypatch):
         payload = response.json()
         assert payload["attempts"] == 2
         assert len(payload["items"]) == 2
+
+
+def test_generate_evaluation_plan_rows_handles_unexpected_error(monkeypatch):
+    _reset_state()
+    _patch_services(monkeypatch)
+    monkeypatch.setattr(main_mod.AppServices, "generate_evaluation_rows", fake_generate_evaluation_rows_crash)
+    with TestClient(main_mod.app) as client:
+        response = client.post(
+            "/evaluation-plans/generate-rows",
+            json={
+                "lm_profile_id": "lm-1",
+                "operator_prompt": "Generate refund cases",
+                "existing_rows": [],
+                "max_rows": 2,
+            },
+        )
+        assert response.status_code == 500
+        assert "unexpected generation failure" in response.json()["error"]
