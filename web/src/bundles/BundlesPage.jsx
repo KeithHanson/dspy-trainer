@@ -268,6 +268,27 @@ function SavedBundlesPanel({ modulesUrl }) {
   const [isSavingMetadata, setIsSavingMetadata] = useState(false);
   const [metadataError, setMetadataError] = useState("");
 
+  const loadBundleFiles = async (bundleId) => {
+    if (!bundleId) {
+      setBundleFiles({});
+      return {};
+    }
+    try {
+      const response = await fetch(`${modulesUrl}/${bundleId}/files`, { method: "GET" });
+      if (!response.ok) {
+        setBundleFiles({});
+        return {};
+      }
+      const payload = await response.json();
+      const files = payload && typeof payload === "object" ? payload : {};
+      setBundleFiles(files);
+      return files;
+    } catch {
+      setBundleFiles({});
+      return {};
+    }
+  };
+
   const loadBundles = async () => {
     setIsLoadingBundles(true);
     try {
@@ -316,17 +337,7 @@ function SavedBundlesPanel({ modulesUrl }) {
         setBundleFiles({});
         return;
       }
-      try {
-        const response = await fetch(`${modulesUrl}/${selectedBundle.id}/files`, { method: "GET" });
-        if (!response.ok) {
-          setBundleFiles({});
-          return;
-        }
-        const payload = await response.json();
-        setBundleFiles(payload && typeof payload === "object" ? payload : {});
-      } catch {
-        setBundleFiles({});
-      }
+      await loadBundleFiles(selectedBundle.id);
     };
     loadFiles();
   }, [modulesUrl, selectedBundle?.id]);
@@ -367,6 +378,15 @@ function SavedBundlesPanel({ modulesUrl }) {
     } finally {
       setIsSavingMetadata(false);
     }
+  };
+
+  const openBundleFile = async (fileName) => {
+    if (!selectedBundle?.id) {
+      setActiveFileName(fileName);
+      return;
+    }
+    const files = await loadBundleFiles(selectedBundle.id);
+    setActiveFileName(Object.prototype.hasOwnProperty.call(files, fileName) ? fileName : fileName);
   };
 
   return (
@@ -437,11 +457,11 @@ function SavedBundlesPanel({ modulesUrl }) {
             <hr className="hr" style={{ marginBottom: 10 }} />
             <div className="row gap-2" style={{ marginBottom: 10 }}>
               {Object.keys(bundleFiles).length ? Object.keys(bundleFiles).map((fileName) => (
-                <Button key={`${selectedBundle.id}-${fileName}`} size="sm" variant={activeFileName === fileName ? "primary" : "ghost"} onClick={() => setActiveFileName(fileName)}>
+                <Button key={`${selectedBundle.id}-${fileName}`} size="sm" variant={activeFileName === fileName ? "primary" : "ghost"} onClick={() => openBundleFile(fileName)}>
                   {fileName}
                 </Button>
               )) : Object.keys(BUNDLE_FILE_TEMPLATES).map((fileName) => (
-                <Button key={`${selectedBundle.id}-${fileName}`} size="sm" variant={activeFileName === fileName ? "primary" : "ghost"} onClick={() => setActiveFileName(fileName)}>
+                <Button key={`${selectedBundle.id}-${fileName}`} size="sm" variant={activeFileName === fileName ? "primary" : "ghost"} onClick={() => openBundleFile(fileName)}>
                   {fileName}
                 </Button>
               ))}

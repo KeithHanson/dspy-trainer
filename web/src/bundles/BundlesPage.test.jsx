@@ -186,4 +186,55 @@ describe("BundlesPage", () => {
 
     vi.unstubAllGlobals();
   });
+
+  it("reloads bundle files when a file button is clicked", async () => {
+    let fileFetchCount = 0;
+    const fetchMock = vi.fn((url, init) => {
+      if (String(url).endsWith("/modules") && (!init || init.method === "GET")) {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([
+            {
+              id: "mod-3",
+              bundle_name: "reload-test",
+              bundle_version: "0.1.0",
+              validation_status: "passed",
+              status: "imported",
+              diagnostics: [],
+            },
+          ]),
+        });
+      }
+      if (String(url).endsWith("/modules/mod-3/files")) {
+        fileFetchCount += 1;
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue({
+            "module.py": `print(${fileFetchCount})`,
+            "metric.py": `metric_${fileFetchCount}`,
+          }),
+        });
+      }
+      if (String(url).endsWith("/samples/module-bundle")) {
+        return Promise.resolve({ ok: true, blob: vi.fn().mockResolvedValue(new Blob(["zip"])) });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter>
+        <BundlesPage />
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(await screen.findByRole("button", { name: "View files" }));
+    expect(await screen.findByText("print(1)")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "metric.py" }));
+
+    await waitFor(() => expect(fileFetchCount).toBe(2));
+    expect(await screen.findByText("metric_2")).toBeInTheDocument();
+
+    vi.unstubAllGlobals();
+  });
 });
