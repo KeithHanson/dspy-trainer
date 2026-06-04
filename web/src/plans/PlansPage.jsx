@@ -243,6 +243,12 @@ function PlanBuilder({ onBack, planId }) {
   const [lmProfiles, setLmProfiles] = useState([]);
   const [selectedLmProfileId, setSelectedLmProfileId] = useState("");
   const [isLoadingPlan, setIsLoadingPlan] = useState(false);
+  const [isGeneratorOpen, setIsGeneratorOpen] = useState(false);
+  const [generatorPrompt, setGeneratorPrompt] = useState("");
+  const [generatorExamples, setGeneratorExamples] = useState("");
+  const [isGeneratingRows, setIsGeneratingRows] = useState(false);
+  const [generatedRowsPreview, setGeneratedRowsPreview] = useState([]);
+  const [generationError, setGenerationError] = useState("");
   const isEditing = Boolean(planId);
 
   const validModules = useMemo(() => modules.filter((item) => item.validation_status === "passed"), [modules]);
@@ -336,6 +342,69 @@ function PlanBuilder({ onBack, planId }) {
 
   const addRow = () => {
     setRows((prev) => [...prev, { id: `q-${Date.now()}`, input: "", expected: "" }]);
+  };
+
+  const insertGeneratedRows = () => {
+    if (!generatedRowsPreview.length) {
+      return;
+    }
+    setRows((prev) => [
+      ...prev,
+      ...generatedRowsPreview.map((row, idx) => ({
+        id: `generated-${Date.now()}-${idx}`,
+        input: row.input,
+        expected: row.expected,
+      })),
+    ]);
+    setIsGeneratorOpen(false);
+    setGeneratedRowsPreview([]);
+    setGenerationError("");
+  };
+
+  const generateRowsPreview = async () => {
+    setGenerationError("");
+    setGeneratedRowsPreview([]);
+    if (!selectedLmProfileId) {
+      setGenerationError("Select an LM profile before generating rows.");
+      return;
+    }
+    if (!generatorPrompt.trim()) {
+      setGenerationError("Describe the data you need before generating rows.");
+      return;
+    }
+    setIsGeneratingRows(true);
+    try {
+      const response = await fetch(`${apiBase}/evaluation-plans/generate-rows`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          lm_profile_id: selectedLmProfileId,
+          operator_prompt: generatorPrompt,
+          operator_examples: generatorExamples,
+          existing_rows: filledRows.map((row) => ({ input: { question: row.input }, label: { expected: row.expected } })),
+          max_rows: 5,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(await parseApiError(response, `Could not generate rows (${response.status})`));
+      }
+      const payload = await response.json();
+      const previewRows = Array.isArray(payload?.items)
+        ? payload.items.map((item, idx) => ({
+            id: `preview-${idx}`,
+            input: item?.input?.question || "",
+            expected: item?.label?.expected || "",
+          })).filter((item) => item.input && item.expected)
+        : [];
+      if (!previewRows.length) {
+        throw new Error("Generated rows could not be previewed.");
+      }
+      setGeneratedRowsPreview(previewRows);
+    } catch (error) {
+      setGenerationError(error instanceof Error ? error.message : "Could not generate rows");
+    } finally {
+      setIsGeneratingRows(false);
+    }
   };
 
   const deleteRow = (id) => {
@@ -503,6 +572,7 @@ function PlanBuilder({ onBack, planId }) {
               <div className="row gap-2"><h2 className="t-h2">Questions</h2><span className="plans-count">{filledRows.length}</span></div>
               <div className="row gap-2">
                 <Button size="sm" onClick={() => setRows(SAMPLE_ROWS.map((row, idx) => ({ id: `sample-${idx}`, ...row })))}>Load sample set</Button>
+                <Button size="sm" variant="primary" onClick={() => setIsGeneratorOpen(true)}>Generate with LLM</Button>
                 <Button size="sm" onClick={addRow}>Add question</Button>
               </div>
             </div>
@@ -544,8 +614,69 @@ function PlanBuilder({ onBack, planId }) {
           </div>
         </aside>
       </div>
+
+      {isGeneratorOpen ? (
+        <div className="bundles-modal-backdrop" onClick={() => setIsGeneratorOpen(false)}>
+          <div className="panel card-pad bundles-modal plans-generate-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="row between" style={{ marginBottom: 10, alignItems: "flex-start" }}>
+              <div>
+                <h2 className="t-h2">Generate eval rows</h2>
+                <p className="muted t-sm">Describe the data you need, provide examples, preview the generated rows, then insert them into this plan.</p>
+              </div>
+              <Button size="sm" variant="ghost" onClick={() => setIsGeneratorOpen(false)}>Close</Button>
+            </div>
+
+            <label className="col gap-1" style={{ marginBottom: 12 }}>
+              <span className="t-label">What data do you need?</span>
+              <textarea className="plans-textarea" rows={5} value={generatorPrompt} onChange={(event) => setGeneratorPrompt(event.target.value)} placeholder="Explain the kinds of questions and expected answers you want generated." />
+            </label>
+
+            <label className="col gap-1" style={{ marginBottom: 12 }}>
+              <span className="t-label">Examples for the model</span>
+              <textarea className="plans-textarea" rows={6} value={generatorExamples} onChange={(event) => setGeneratorExamples(event.target.value)} placeholder="Paste example input / expected-answer pairs or notes about formatting and quality." />
+            </label>
+
+            <div className="row gap-2" style={{ marginBottom: 12 }}>
+              <Button variant="primary" onClick={generateRowsPreview} disabled={isGeneratingRows}>{isGeneratingRows ? "Generating..." : "Generate preview"}</Button>
+              {generatedRowsPreview.length ? <Button onClick={insertGeneratedRows}>Approve + insert rows</Button> : null}
+            </div>
+
+            {generationError ? <div className="plans-validation-alert" role="alert"><p className="plans-validation-copy">{generationError}</p></div> : null}
+
+            {generatedRowsPreview.length ? (
+              <div className="col gap-2">
+                <div className="t-h2">Preview</div>
+                <div className="plans-row-head">
+                  <span className="t-label">#</span>
+                  <span className="t-label">Input prompt</span>
+                  <span className="t-label">Expected answer</span>
+                </div>
+                {generatedRowsPreview.map((row, index) => (
+                  <div key={row.id} className="plans-row-edit">
+                    <span className="cap mono">{index + 1}</span>
+                    <textarea className="plans-textarea" rows={2} value={row.input} readOnly />
+                    <textarea className="plans-textarea" rows={2} value={row.expected} readOnly />
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
     </section>
   );
+}
+
+async function parseApiError(response, fallback) {
+  try {
+    const body = await response.json();
+    if (body?.error) {
+      return `${fallback}: ${body.error}`;
+    }
+  } catch {
+    return fallback;
+  }
+  return fallback;
 }
 
 function formatCreatedAt(value) {

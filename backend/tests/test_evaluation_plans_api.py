@@ -78,6 +78,21 @@ async def fake_update_evaluation_plan(self, evaluation_plan_id, project_id, scen
     return plan
 
 
+async def fake_generate_evaluation_rows(self, lm_profile_id, operator_prompt, operator_examples, existing_rows, max_rows):
+    assert lm_profile_id == "lm-1"
+    assert operator_prompt == "Generate refund cases"
+    assert operator_examples == "Input: refund request\nExpected: explain the policy"
+    assert max_rows == 2
+    assert len(existing_rows) == 1
+    return {
+        "items": [
+            {"input": {"question": "Customer asks about refund timeline"}, "label": {"expected": "Explain the refund timing policy."}},
+            {"input": {"question": "Customer wants a damaged-item refund"}, "label": {"expected": "Ask for evidence and explain the damaged-item refund flow."}},
+        ],
+        "attempts": 2,
+    }
+
+
 def _patch_services(monkeypatch):
     monkeypatch.setenv("DSPY_TRAINER_POSTGRES_DSN", "postgresql://postgres:postgres@localhost:5432/dspy_trainer")
     monkeypatch.setattr(main_mod.AppServices, "connect", fake_connect)
@@ -87,6 +102,7 @@ def _patch_services(monkeypatch):
     monkeypatch.setattr(main_mod.AppServices, "get_evaluation_plan", fake_get_evaluation_plan)
     monkeypatch.setattr(main_mod.AppServices, "delete_evaluation_plan", fake_delete_evaluation_plan)
     monkeypatch.setattr(main_mod.AppServices, "update_evaluation_plan", fake_update_evaluation_plan)
+    monkeypatch.setattr(main_mod.AppServices, "generate_evaluation_rows", fake_generate_evaluation_rows)
 
 
 def _reset_state():
@@ -198,3 +214,23 @@ def test_update_evaluation_plan(monkeypatch):
         assert updated.json()["id"] == plan_id
         assert updated.json()["name"] == "Updated"
         assert updated.json()["dataset_version"] == "v2"
+
+
+def test_generate_evaluation_plan_rows(monkeypatch):
+    _reset_state()
+    _patch_services(monkeypatch)
+    with TestClient(main_mod.app) as client:
+        response = client.post(
+            "/evaluation-plans/generate-rows",
+            json={
+                "lm_profile_id": "lm-1",
+                "operator_prompt": "Generate refund cases",
+                "operator_examples": "Input: refund request\nExpected: explain the policy",
+                "existing_rows": [{"input": {"question": "Example q"}, "label": {"expected": "Example a"}}],
+                "max_rows": 2,
+            },
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["attempts"] == 2
+        assert len(payload["items"]) == 2

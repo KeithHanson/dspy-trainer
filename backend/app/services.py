@@ -174,6 +174,50 @@ class AppServices:
         return "\n".join(lines)
 
     @staticmethod
+    def _extract_litellm_message_text(result: dict[str, Any]) -> str:
+        choices = result.get("choices") if isinstance(result, dict) else None
+        if not isinstance(choices, list) or not choices:
+            return ""
+        message = choices[0].get("message") if isinstance(choices[0], dict) else None
+        if not isinstance(message, dict):
+            return ""
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            text_parts: list[str] = []
+            for item in content:
+                if isinstance(item, dict) and isinstance(item.get("text"), str):
+                    text_parts.append(item["text"])
+            return "\n".join(text_parts)
+        return ""
+
+    @staticmethod
+    def _parse_generated_evaluation_rows(content: str) -> list[dict[str, Any]]:
+        text = content.strip()
+        if text.startswith("```"):
+            lines = text.splitlines()
+            if len(lines) >= 3:
+                text = "\n".join(lines[1:-1]).strip()
+        payload = json.loads(text)
+        if not isinstance(payload, list) or not payload:
+            raise ValueError("LLM response must be a non-empty JSON array")
+        rows: list[dict[str, Any]] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                raise ValueError("Each generated row must be an object")
+            raw_input = item.get("input")
+            raw_label = item.get("label")
+            if not isinstance(raw_input, dict) or not isinstance(raw_label, dict):
+                raise ValueError("Each generated row must include input and label objects")
+            question = str(raw_input.get("question") or "").strip()
+            expected = str(raw_label.get("expected") or "").strip()
+            if not question or not expected:
+                raise ValueError("Each generated row must include non-empty input.question and label.expected")
+            rows.append({"input": {"question": question}, "label": {"expected": expected}})
+        return rows
+
+    @staticmethod
     def _terminate_optimization_subprocess(process: Any) -> None:
         if not process.is_alive():
             return
@@ -2741,6 +2785,82 @@ class AppServices:
                 now,
             )
         return await self.get_evaluation_plan(evaluation_plan_id)
+
+    async def generate_evaluation_rows(
+        self,
+        *,
+        lm_profile_id: str,
+        operator_prompt: str,
+        operator_examples: str,
+        existing_rows: list[dict[str, Any]],
+        max_rows: int,
+    ) -> dict[str, Any]:
+        cleaned_prompt = operator_prompt.strip()
+        if not cleaned_prompt:
+            raise ValueError("operator_prompt is required")
+        if max_rows < 1 or max_rows > 25:
+            raise ValueError("max_rows must be between 1 and 25")
+        profile = await self.get_lm_profile(lm_profile_id)
+        if profile is None:
+            raise ValueError("lm profile not found")
+        virtual_key = str(profile.get("virtual_key") or "").strip()
+        if not virtual_key:
+            raise RuntimeError("lm profile has no virtual key")
+
+        normalized_existing: list[dict[str, Any]] = []
+        for row in existing_rows:
+            if not isinstance(row, dict):
+                continue
+            raw_input = row.get("input")
+            raw_label = row.get("label")
+            question = str(raw_input.get("question") or "").strip() if isinstance(raw_input, dict) else str(row.get("input") or "").strip()
+            expected = str(raw_label.get("expected") or "").strip() if isinstance(raw_label, dict) else str(row.get("expected") or "").strip()
+            if question and expected:
+                normalized_existing.append({"input": {"question": question}, "label": {"expected": expected}})
+
+        system_prompt = (
+            "You generate evaluation plan rows for an operator. "
+            "Return only raw JSON with no markdown, code fences, or explanatory prose. "
+            "The response must be a JSON array of objects using exactly this schema: "
+            "[{\"input\": {\"question\": string}, \"label\": {\"expected\": string}}]."
+        )
+        user_prompt = (
+            f"Generate {max_rows} evaluation rows.\n\n"
+            f"Operator request:\n{cleaned_prompt}\n\n"
+            f"Operator examples:\n{operator_examples.strip() or '(none provided)'}\n\n"
+            f"Existing rows for style reference:\n{json.dumps(normalized_existing, indent=2)}"
+        )
+
+        last_error = "unknown parse failure"
+        for attempt in range(1, 4):
+            payload = {
+                "model": f"lm-profile:{lm_profile_id}",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": 0.3,
+                "max_tokens": 1400,
+            }
+            try:
+                result = await self._litellm_openai_request("/chat/completions", payload=payload, api_key=virtual_key)
+            except Exception:
+                result = await self._litellm_openai_request("/v1/chat/completions", payload=payload, api_key=virtual_key)
+            text = self._extract_litellm_message_text(result)
+            try:
+                rows = self._parse_generated_evaluation_rows(text)
+                return {"items": rows, "attempts": attempt}
+            except Exception as exc:
+                last_error = str(exc)
+                user_prompt = (
+                    f"Generate {max_rows} evaluation rows.\n\n"
+                    f"Operator request:\n{cleaned_prompt}\n\n"
+                    f"Operator examples:\n{operator_examples.strip() or '(none provided)'}\n\n"
+                    f"Existing rows for style reference:\n{json.dumps(normalized_existing, indent=2)}\n\n"
+                    f"The previous response could not be parsed because: {last_error}. "
+                    "Retry and return only a JSON array using the required schema."
+                )
+        raise RuntimeError(f"could not generate parseable eval rows after 3 attempts: {last_error}")
 
     @staticmethod
     def _json_list(value: Any) -> list[dict[str, Any]]:

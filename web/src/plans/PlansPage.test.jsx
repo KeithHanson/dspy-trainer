@@ -204,4 +204,58 @@ describe("PlansPage", () => {
 
     expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/evaluation-plans\/plan-1$/), expect.objectContaining({ method: "PATCH" }));
   });
+
+  it("generates eval rows via LLM preview and inserts them on approval", async () => {
+    const fetchMock = vi.fn((url, init) => {
+      if (String(url).endsWith("/modules") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([
+            { id: "mod-1", bundle_name: "policy-bot", bundle_version: "1.0.0", validation_status: "passed", source_ref: "bundle.zip" },
+          ]),
+        });
+      }
+      if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "lm-1", name: "GPT-4o" }]) });
+      }
+      if (String(url).endsWith("/evaluation-plans/generate-rows") && init?.method === "POST") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue({
+            items: [
+              { input: { question: "How long do refunds take?" }, label: { expected: "Explain the standard refund timeline." } },
+              { input: { question: "What if an item arrives damaged?" }, label: { expected: "Explain the damaged-item refund flow." } },
+            ],
+            attempts: 1,
+          }),
+        });
+      }
+      if (String(url).endsWith("/evaluation-plans") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter initialEntries={["/plans?new=1"]}>
+        <PlansPage />
+      </MemoryRouter>,
+    );
+
+    await userEvent.selectOptions(await screen.findByLabelText("Runtime model profile"), "lm-1");
+    await userEvent.click(screen.getByRole("button", { name: "Generate with LLM" }));
+    await userEvent.type(screen.getByLabelText("What data do you need?"), "Generate refund cases");
+    await userEvent.type(screen.getByLabelText("Examples for the model"), "Input: refund request\nExpected: explain the policy");
+    await userEvent.click(screen.getByRole("button", { name: "Generate preview" }));
+
+    expect(await screen.findByText("How long do refunds take?")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Approve + insert rows" }));
+
+    expect(await screen.findByDisplayValue("How long do refunds take?")).toBeInTheDocument();
+    expect(await screen.findByDisplayValue("Explain the standard refund timeline.")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/evaluation-plans\/generate-rows$/), expect.objectContaining({ method: "POST" }));
+
+    vi.unstubAllGlobals();
+  });
 });

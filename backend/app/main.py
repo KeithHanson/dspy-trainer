@@ -166,6 +166,14 @@ class EvaluationPlanCreateRequest(BaseModel):
     eval_inputs: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class EvaluationPlanGenerateRowsRequest(BaseModel):
+    lm_profile_id: str
+    operator_prompt: str
+    operator_examples: str = ""
+    existing_rows: list[dict[str, Any]] = Field(default_factory=list)
+    max_rows: int = 5
+
+
 class LmProfileCreateRequest(BaseModel):
     name: str
     model: str
@@ -691,6 +699,23 @@ async def create_evaluation_plan(request: Request, payload: EvaluationPlanCreate
     except ValueError as exc:
         return JSONResponse(status_code=404, content={"error": str(exc)})
     return result
+
+
+@app.post("/evaluation-plans/generate-rows")
+async def generate_evaluation_plan_rows(request: Request, payload: EvaluationPlanGenerateRowsRequest):
+    services: AppServices = request.app.state.services
+    try:
+        return await services.generate_evaluation_rows(
+            lm_profile_id=payload.lm_profile_id,
+            operator_prompt=payload.operator_prompt,
+            operator_examples=payload.operator_examples,
+            existing_rows=payload.existing_rows,
+            max_rows=payload.max_rows,
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    except RuntimeError as exc:
+        return JSONResponse(status_code=502, content={"error": str(exc)})
 
 
 @app.post("/lm-profiles")
