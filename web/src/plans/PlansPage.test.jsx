@@ -245,6 +245,7 @@ describe("PlansPage", () => {
 
     await userEvent.selectOptions(await screen.findByLabelText("Runtime model profile"), "lm-1");
     await userEvent.click(screen.getByRole("button", { name: "Generate with LLM" }));
+    await userEvent.selectOptions(screen.getByLabelText("LM profile for generation"), "lm-1");
     await userEvent.type(screen.getByLabelText("What data do you need?"), "Generate refund cases");
     await userEvent.click(screen.getByRole("button", { name: "Generate preview" }));
 

@@ -245,6 +245,7 @@ function PlanBuilder({ onBack, planId }) {
   const [isLoadingPlan, setIsLoadingPlan] = useState(false);
   const [isGeneratorOpen, setIsGeneratorOpen] = useState(false);
   const [generatorPrompt, setGeneratorPrompt] = useState("");
+  const [generatorLmProfileId, setGeneratorLmProfileId] = useState("");
   const [isGeneratingRows, setIsGeneratingRows] = useState(false);
   const [generatedRowsPreview, setGeneratedRowsPreview] = useState([]);
   const [generationError, setGenerationError] = useState("");
@@ -335,6 +336,12 @@ function PlanBuilder({ onBack, planId }) {
     loadPlan();
   }, [apiBase, planId]);
 
+  useEffect(() => {
+    if (!generatorLmProfileId && selectedLmProfileId) {
+      setGeneratorLmProfileId(selectedLmProfileId);
+    }
+  }, [selectedLmProfileId, generatorLmProfileId]);
+
   const updateRow = (id, field, value) => {
     setRows((prev) => prev.map((row) => (row.id === id ? { ...row, [field]: value } : row)));
   };
@@ -363,7 +370,7 @@ function PlanBuilder({ onBack, planId }) {
   const generateRowsPreview = async () => {
     setGenerationError("");
     setGeneratedRowsPreview([]);
-    if (!selectedLmProfileId) {
+    if (!generatorLmProfileId) {
       setGenerationError("Select an LM profile before generating rows.");
       return;
     }
@@ -377,7 +384,7 @@ function PlanBuilder({ onBack, planId }) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          lm_profile_id: selectedLmProfileId,
+          lm_profile_id: generatorLmProfileId,
           operator_prompt: generatorPrompt,
           existing_rows: filledRows.map((row) => ({ input: { question: row.input }, label: { expected: row.expected } })),
           max_rows: 5,
@@ -623,6 +630,16 @@ function PlanBuilder({ onBack, planId }) {
               </div>
               <Button size="sm" variant="ghost" onClick={() => setIsGeneratorOpen(false)}>Close</Button>
             </div>
+
+            <label className="col gap-1" style={{ marginBottom: 12 }}>
+              <span className="t-label">LM profile for generation</span>
+              <select className="bundles-input" value={generatorLmProfileId} onChange={(event) => setGeneratorLmProfileId(event.target.value)}>
+                <option value="">Select an LM profile...</option>
+                {lmProfiles.map((profile) => (
+                  <option key={profile.id} value={profile.id}>{profile.name || profile.id}</option>
+                ))}
+              </select>
+            </label>
 
             <label className="col gap-1" style={{ marginBottom: 12 }}>
               <span className="t-label">What data do you need?</span>
