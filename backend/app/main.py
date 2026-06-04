@@ -383,6 +383,15 @@ async def sync_module(module_id: str, request: Request, payload: ModuleSyncReque
         return JSONResponse(status_code=409, content={"error": str(exc), "sync_state": exc.sync_state})
 
 
+@app.get("/modules/{module_id}/revisions")
+async def list_module_revisions(module_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    current = await services.get_module(module_id)
+    if current is None:
+        return JSONResponse(status_code=404, content={"error": "module not found"})
+    return await services.list_module_revisions(module_id)
+
+
 @app.get("/modules/{module_id}/files")
 async def get_module_files(module_id: str, request: Request):
     services: AppServices = request.app.state.services

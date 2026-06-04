@@ -110,6 +110,20 @@ async def fake_list_modules(self):
     return list(STORE.values())
 
 
+async def fake_list_module_revisions(self, module_id):
+    if module_id not in STORE:
+        return []
+    return [
+        {
+            "id": "rev-1",
+            "commit_sha": "abc12345",
+            "bundle_version": STORE[module_id].get("bundle_version") or "0.1.0",
+            "source_event": "import",
+            "created_at": None,
+        }
+    ]
+
+
 async def fake_import_github_module(self, github_repo_url, github_branch):
     module_id = "mod-1"
     STORE[module_id] = {
@@ -189,6 +203,7 @@ def _patch_services(monkeypatch):
     monkeypatch.setattr(main_mod.AppServices, "get_diagnostics", fake_get_diagnostics)
     monkeypatch.setattr(main_mod.AppServices, "get_module", fake_get_module)
     monkeypatch.setattr(main_mod.AppServices, "list_modules", fake_list_modules)
+    monkeypatch.setattr(main_mod.AppServices, "list_module_revisions", fake_list_module_revisions)
     monkeypatch.setattr(main_mod.AppServices, "import_github_module", fake_import_github_module)
     monkeypatch.setattr(main_mod.AppServices, "refresh_module_sync_status", fake_refresh_module_sync_status)
     monkeypatch.setattr(main_mod.AppServices, "sync_module", fake_sync_module)
@@ -383,8 +398,27 @@ def test_module_sync_status_refresh_and_sync(monkeypatch):
 
         synced = client.post("/modules/mod-1/sync", json={})
         assert synced.status_code == 200
-        assert synced.json()["sync_status"] == "synced"
-        assert synced.json()["current_commit_sha"] == "def456"
+    assert synced.json()["sync_status"] == "synced"
+    assert synced.json()["current_commit_sha"] == "def456"
+
+
+def test_module_revision_history_endpoint(monkeypatch):
+    STORE.clear()
+    _patch_services(monkeypatch)
+    STORE["mod-rev"] = {
+        "id": "mod-rev",
+        "bundle_name": "repo-bundle",
+        "bundle_version": "1.2.3",
+        "validation_status": "passed",
+        "status": "validated",
+        "diagnostics": [],
+    }
+
+    with TestClient(main_mod.app) as client:
+        response = client.get("/modules/mod-rev/revisions")
+
+    assert response.status_code == 200
+    assert response.json()[0]["commit_sha"] == "abc12345"
 
 
 def test_github_module_metadata_update_is_blocked_when_behind(monkeypatch):

@@ -169,6 +169,12 @@ describe("BundlesPage", () => {
       if (String(url).endsWith("/ready")) {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ github: { configured: true } }) });
       }
+      if (String(url).endsWith("/modules/mod-2/sync-status")) {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ sync_status: "synced", current_commit_sha: "abc12345", upstream_commit_sha: "abc12345" }) });
+      }
+      if (String(url).endsWith("/modules/mod-2/revisions")) {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
+      }
       if (String(url).endsWith("/modules")) {
         return Promise.resolve({
           ok: true,
@@ -176,6 +182,9 @@ describe("BundlesPage", () => {
             {
               id: "mod-2",
               bundle_name: "support-triage-agent",
+              github_repo_url: "https://github.com/example/support-triage-agent",
+              github_branch: "main",
+              sync_status: "synced",
               validation_status: "passed",
               status: "imported",
               diagnostics: { unexpected: true },
@@ -203,6 +212,12 @@ describe("BundlesPage", () => {
     const fetchMock = vi.fn((url, init) => {
       if (String(url).endsWith("/ready")) {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ github: { configured: true } }) });
+      }
+      if (String(url).endsWith("/modules/mod-2/sync-status")) {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ sync_status: "synced", current_commit_sha: "abc12345", upstream_commit_sha: "abc12345" }) });
+      }
+      if (String(url).endsWith("/modules/mod-2/revisions")) {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
       }
       if (String(url).endsWith("/modules") && (!init || init.method === "GET")) {
         return Promise.resolve({
@@ -265,6 +280,12 @@ describe("BundlesPage", () => {
       if (String(url).endsWith("/ready")) {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ github: { configured: true } }) });
       }
+      if (String(url).endsWith("/modules/mod-3/sync-status")) {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ sync_status: "synced", current_commit_sha: "abc12345", upstream_commit_sha: "abc12345" }) });
+      }
+      if (String(url).endsWith("/modules/mod-3/revisions")) {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
+      }
       if (String(url).endsWith("/modules") && (!init || init.method === "GET")) {
         return Promise.resolve({
           ok: true,
@@ -306,6 +327,102 @@ describe("BundlesPage", () => {
 
     await waitFor(() => expect(fileFetchCount).toBe(2));
     expect(await screen.findByText("metric_2")).toBeInTheDocument();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("renders sync status, revision history, and manual sync action", async () => {
+    const fetchMock = vi.fn((url, init) => {
+      if (String(url).endsWith("/ready")) {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ github: { configured: true } }) });
+      }
+      if (String(url).endsWith("/modules") && (!init || init.method === "GET")) {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([
+            {
+              id: "mod-sync",
+              bundle_name: "repo-bundle",
+              bundle_version: "1.2.3",
+              github_repo_url: "https://github.com/example/repo-bundle",
+              github_branch: "main",
+              current_commit_sha: "abc12345",
+              last_synced_at: "2026-06-04T17:00:00+00:00",
+              sync_status: "behind",
+              validation_status: "passed",
+              status: "validated",
+              diagnostics: [],
+            },
+          ]),
+        });
+      }
+      if (String(url).endsWith("/modules/mod-sync/files")) {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ "module.py": "print('sync')" }) });
+      }
+      if (String(url).endsWith("/modules/mod-sync/sync-status") && (!init || init.method === "GET")) {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue({
+            module_id: "mod-sync",
+            sync_status: "behind",
+            current_commit_sha: "abc12345",
+            upstream_commit_sha: "def67890",
+          }),
+        });
+      }
+      if (String(url).endsWith("/modules/mod-sync/revisions")) {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([
+            {
+              id: "rev-2",
+              commit_sha: "def67890",
+              bundle_version: "1.2.4",
+              source_event: "sync",
+              created_at: "2026-06-04T17:05:00+00:00",
+            },
+            {
+              id: "rev-1",
+              commit_sha: "abc12345",
+              bundle_version: "1.2.3",
+              source_event: "import",
+              created_at: "2026-06-04T17:00:00+00:00",
+            },
+          ]),
+        });
+      }
+      if (String(url).endsWith("/modules/mod-sync/sync") && init?.method === "POST") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue({
+            module_id: "mod-sync",
+            sync_status: "synced",
+            current_commit_sha: "def67890",
+            upstream_commit_sha: "def67890",
+            synced: true,
+          }),
+        });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter>
+        <BundlesPage />
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(await screen.findByRole("button", { name: "View files" }));
+    expect(await screen.findByText(/Sync status:/)).toBeInTheDocument();
+    expect(await screen.findAllByText(/behind/)).toHaveLength(2);
+    expect(await screen.findAllByText(/def67890/)).toHaveLength(2);
+    expect(await screen.findByText(/Revision history/)).toBeInTheDocument();
+    expect(await screen.findByText(/v1.2.4/)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Sync bundle" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/modules\/mod-sync\/sync$/), expect.objectContaining({ method: "POST" })));
 
     vi.unstubAllGlobals();
   });

@@ -259,6 +259,12 @@ function SavedBundlesPanel({ modulesUrl }) {
   const [savedBundles, setSavedBundles] = useState([]);
   const [isLoadingBundles, setIsLoadingBundles] = useState(false);
   const [selectedBundle, setSelectedBundle] = useState(null);
+  const [selectedBundleSync, setSelectedBundleSync] = useState(null);
+  const [bundleRevisions, setBundleRevisions] = useState([]);
+  const [isLoadingRevisions, setIsLoadingRevisions] = useState(false);
+  const [syncActionError, setSyncActionError] = useState("");
+  const [isRefreshingSync, setIsRefreshingSync] = useState(false);
+  const [isSyncingBundle, setIsSyncingBundle] = useState(false);
   const [activeFileName, setActiveFileName] = useState("module.py");
   const [bundleFiles, setBundleFiles] = useState({});
   const [editingName, setEditingName] = useState("");
@@ -285,6 +291,50 @@ function SavedBundlesPanel({ modulesUrl }) {
     } catch {
       setBundleFiles({});
       return {};
+    }
+  };
+
+  const loadBundleSyncStatus = async (bundleId) => {
+    if (!bundleId) {
+      setSelectedBundleSync(null);
+      return null;
+    }
+    try {
+      const response = await fetch(`${modulesUrl}/${bundleId}/sync-status`, { method: "GET" });
+      if (!response.ok) {
+        setSelectedBundleSync(null);
+        return null;
+      }
+      const payload = await response.json();
+      setSelectedBundleSync(payload);
+      return payload;
+    } catch {
+      setSelectedBundleSync(null);
+      return null;
+    }
+  };
+
+  const loadBundleRevisions = async (bundleId) => {
+    if (!bundleId) {
+      setBundleRevisions([]);
+      return [];
+    }
+    setIsLoadingRevisions(true);
+    try {
+      const response = await fetch(`${modulesUrl}/${bundleId}/revisions`, { method: "GET" });
+      if (!response.ok) {
+        setBundleRevisions([]);
+        return [];
+      }
+      const payload = await response.json();
+      const revisions = Array.isArray(payload) ? payload : [];
+      setBundleRevisions(revisions);
+      return revisions;
+    } catch {
+      setBundleRevisions([]);
+      return [];
+    } finally {
+      setIsLoadingRevisions(false);
     }
   };
 
@@ -335,9 +385,16 @@ function SavedBundlesPanel({ modulesUrl }) {
     const loadFiles = async () => {
       if (!selectedBundle?.id) {
         setBundleFiles({});
+        setSelectedBundleSync(null);
+        setBundleRevisions([]);
         return;
       }
-      await loadBundleFiles(selectedBundle.id);
+      setSyncActionError("");
+      await Promise.all([
+        loadBundleFiles(selectedBundle.id),
+        loadBundleSyncStatus(selectedBundle.id),
+        loadBundleRevisions(selectedBundle.id),
+      ]);
     };
     loadFiles();
   }, [modulesUrl, selectedBundle?.id]);
@@ -393,6 +450,58 @@ function SavedBundlesPanel({ modulesUrl }) {
     setActiveFileName(Object.prototype.hasOwnProperty.call(files, fileName) ? fileName : fileName);
   };
 
+  const refreshSelectedBundleGitState = async () => {
+    if (!selectedBundle?.id) {
+      return;
+    }
+    setIsRefreshingSync(true);
+    setSyncActionError("");
+    try {
+      const response = await fetch(`${modulesUrl}/${selectedBundle.id}/sync-status`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload?.error || `Could not refresh sync status (${response.status})`);
+      }
+      setSelectedBundleSync(payload);
+      await loadBundles();
+      await loadBundleRevisions(selectedBundle.id);
+    } catch (error) {
+      setSyncActionError(error instanceof Error ? error.message : "Could not refresh sync status");
+    } finally {
+      setIsRefreshingSync(false);
+    }
+  };
+
+  const syncSelectedBundle = async () => {
+    if (!selectedBundle?.id) {
+      return;
+    }
+    setIsSyncingBundle(true);
+    setSyncActionError("");
+    try {
+      const response = await fetch(`${modulesUrl}/${selectedBundle.id}/sync`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload?.error || `Could not sync bundle (${response.status})`);
+      }
+      setSelectedBundleSync(payload);
+      await loadBundles();
+      await loadBundleRevisions(selectedBundle.id);
+    } catch (error) {
+      setSyncActionError(error instanceof Error ? error.message : "Could not sync bundle");
+    } finally {
+      setIsSyncingBundle(false);
+    }
+  };
+
   return (
     <div className="panel card-pad bundles-validation-result">
       <div className="row between" style={{ marginBottom: 10 }}>
@@ -412,6 +521,7 @@ function SavedBundlesPanel({ modulesUrl }) {
                 <span className="t-sm">{bundle.bundle_name || bundle.github_repo_url || bundle.source_ref || bundle.id}</span>
                 <span className="cap"><span className="mono">{bundle.validation_status}</span> · {bundle.status}</span>
                 {bundle.bundle_version ? <span className="cap">v{bundle.bundle_version}</span> : null}
+                {bundle.sync_status ? <span className="cap mono">Sync {bundle.sync_status}</span> : null}
                 {bundle.github_branch ? <span className="cap mono">Branch {bundle.github_branch}</span> : null}
                 {bundle.current_commit_sha ? <span className="cap mono">Commit {bundle.current_commit_sha.slice(0, 8)}</span> : null}
                 {bundle.created_at ? <span className="cap mono">Imported {formatDateTime(bundle.created_at)}</span> : null}
@@ -461,8 +571,42 @@ function SavedBundlesPanel({ modulesUrl }) {
             <div className="col gap-1" style={{ marginBottom: 12 }}>
               <p className="cap">Repository: <span className="faint">{selectedBundle.github_repo_url}</span></p>
               <p className="cap">Branch: <span className="faint">{selectedBundle.github_branch || "unknown"}</span></p>
-              <p className="cap">Sync status: <span className="faint">{selectedBundle.sync_status || "unknown"}</span></p>
+              <p className="cap">Sync status: <span className="faint">{selectedBundleSync?.sync_status || selectedBundle.sync_status || "unknown"}</span></p>
               {selectedBundle.current_commit_sha ? <p className="cap">Current commit: <span className="faint mono">{selectedBundle.current_commit_sha}</span></p> : null}
+              {selectedBundleSync?.upstream_commit_sha ? <p className="cap">Upstream commit: <span className="faint mono">{selectedBundleSync.upstream_commit_sha}</span></p> : null}
+              {selectedBundle.last_synced_at ? <p className="cap">Last synced: <span className="faint">{formatDateTime(selectedBundle.last_synced_at)}</span></p> : null}
+              <div className="row gap-2" style={{ marginTop: 8 }}>
+                <Button size="sm" onClick={refreshSelectedBundleGitState} disabled={isRefreshingSync || isSyncingBundle}>
+                  {isRefreshingSync ? "Refreshing..." : "Refresh sync status"}
+                </Button>
+                <Button size="sm" variant="primary" onClick={syncSelectedBundle} disabled={isRefreshingSync || isSyncingBundle}>
+                  {isSyncingBundle ? "Syncing..." : "Sync bundle"}
+                </Button>
+              </div>
+            </div>
+          ) : null}
+          {syncActionError ? <ErrorState title="Bundle sync action failed" description={syncActionError} /> : null}
+          {selectedBundle.github_repo_url ? (
+            <div className="bundles-check-detail-list" style={{ marginBottom: 12 }}>
+              <div className="t-h2" style={{ marginBottom: 8 }}>Revision history</div>
+              {isLoadingRevisions ? (
+                <LoadingState label="Loading revisions..." />
+              ) : bundleRevisions.length ? (
+                <ul className="bundles-diags">
+                  {bundleRevisions.slice(0, 8).map((revision) => (
+                    <li key={revision.id}>
+                      <span className="mono">{(revision.commit_sha || "unknown").slice(0, 8)}</span>
+                      {" · "}
+                      {revision.bundle_version ? `v${revision.bundle_version}` : "version unknown"}
+                      {" · "}
+                      {revision.source_event || "event unknown"}
+                      {revision.created_at ? ` · ${formatDateTime(revision.created_at)}` : ""}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="cap">No revisions recorded yet.</p>
+              )}
             </div>
           ) : null}
           <div className="bundles-check-report" style={{ marginBottom: 12 }}>
