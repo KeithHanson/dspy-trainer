@@ -8,3 +8,4 @@
 - Worker behavior: `backend/worker.py` heartbeats worker status into Redis, BRPOPs the configured queue, and delegates payload handling to service methods.
 - App-visible entities include module imports, evaluation plans, agent run plans/tasks, optimization jobs/datasets, LM profiles, and LiteLLM keys.
 - MLflow correlation is implemented for agent run plans/optimization workflows; sample bundle to copy from is `backend/sample_bundles/example-bundle/`.
+- Read `mem:backend/bundles` for the bundle contract, optional hooks, and upload/execution path through validation, smoke tests, worker tasks, and optimization jobs.

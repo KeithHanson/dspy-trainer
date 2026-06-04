@@ -1,0 +1,9 @@
+- Bundle contract lives in `backend/app/validator/bundle.py` and runtime in `backend/app/executor/module_runner.py`.
+- Required files in bundle root: `module.py`, `metric.py`, `bundle.toml`.
+- `module.py` validator requirements: at least one class inheriting a `*Signature`, at least one `dspy.Module` subclass, and top-level `build_program()`.
+- `metric.py` validator requirement: top-level `judge_metric(example, prediction)` with at least 2 params.
+- Runtime-required callable outputs are stricter than validator: `judge_metric` must return exactly `{score, rationale, flags, raw_response}` where `score` is numeric, `rationale` is `str`, and `flags` is `list[str]`.
+- Optional bundle hooks in `module.py`: `build_lm()` with zero required args; if present it overrides passed-in `lm_profile` during `run_bundle_eval`. In optimization, `execution_lm_profile` takes precedence over `build_lm()`.
+- Optional manifest field: `optimized_program_state` in `bundle.toml`; if present, runtime loads JSON into `program.load_state(state)` so the program must implement `load_state` to use it.
+- Optimization adds an implicit requirement: the built program must expose predictor output fields via `named_predictors()` signatures; otherwise optimization fails with "program must define at least one predictor output field for optimization".
+- Upload/runtime path: `GET /samples/module-bundle` serves the example zip, `POST /modules/{id}/validate-upload` extracts and validates, `POST /modules/{id}/smoke-test` executes `run_bundle_eval`, worker `run_agent_run_task()` also executes `run_bundle_eval`, and optimization jobs execute `run_bundle_optimization()` in a subprocess.
