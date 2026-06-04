@@ -148,6 +148,7 @@ export function mapDashboardOverview({ plans, modules, workers }) {
     },
     workerTable,
     quickStart: [
+      { id: "lm-profile", title: "Setup an LM Profile", detail: "Connect your bundles to an LLM", to: "/lm-profiles/new" },
       { id: "import", title: "Import your module", detail: "Connect a GitHub repo and branch", to: "/bundles?import=1" },
       { id: "plan", title: "Create a new plan", detail: "Define question set and runs", to: "/plans?new=1" },
       { id: "runs", title: "Review run monitor", detail: "Inspect scores, pass/fail, and traces", to: "/runs" },

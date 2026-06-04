@@ -28,6 +28,7 @@ export const mockDashboardProvider = {
         { workerId: "worker-2", taskId: "task-204", stateLabel: "processing" },
       ],
       quickStart: [
+        { id: "lm-profile", title: "Setup an LM Profile", detail: "Connect your bundles to an LLM", to: "/lm-profiles/new" },
         { id: "import", title: "Import your module", detail: "Connect a GitHub repo and branch", to: "/bundles?import=1" },
         { id: "plan", title: "Create a new plan", detail: "Define question set and runs", to: "/plans?new=1" },
         { id: "team", title: "Invite your team", detail: "Share results with reviewers", to: "/team" },
