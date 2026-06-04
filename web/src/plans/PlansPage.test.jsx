@@ -246,7 +246,6 @@ describe("PlansPage", () => {
     await userEvent.selectOptions(await screen.findByLabelText("Runtime model profile"), "lm-1");
     await userEvent.click(screen.getByRole("button", { name: "Generate with LLM" }));
     await userEvent.type(screen.getByLabelText("What data do you need?"), "Generate refund cases");
-    await userEvent.type(screen.getByLabelText("Examples for the model"), "Input: refund request\nExpected: explain the policy");
     await userEvent.click(screen.getByRole("button", { name: "Generate preview" }));
 
     expect(await screen.findByText("How long do refunds take?")).toBeInTheDocument();

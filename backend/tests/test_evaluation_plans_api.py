@@ -78,10 +78,9 @@ async def fake_update_evaluation_plan(self, evaluation_plan_id, project_id, scen
     return plan
 
 
-async def fake_generate_evaluation_rows(self, lm_profile_id, operator_prompt, operator_examples, existing_rows, max_rows):
+async def fake_generate_evaluation_rows(self, lm_profile_id, operator_prompt, existing_rows, max_rows):
     assert lm_profile_id == "lm-1"
     assert operator_prompt == "Generate refund cases"
-    assert operator_examples == "Input: refund request\nExpected: explain the policy"
     assert max_rows == 2
     assert len(existing_rows) == 1
     return {
@@ -225,7 +224,6 @@ def test_generate_evaluation_plan_rows(monkeypatch):
             json={
                 "lm_profile_id": "lm-1",
                 "operator_prompt": "Generate refund cases",
-                "operator_examples": "Input: refund request\nExpected: explain the policy",
                 "existing_rows": [{"input": {"question": "Example q"}, "label": {"expected": "Example a"}}],
                 "max_rows": 2,
             },

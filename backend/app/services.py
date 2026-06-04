@@ -2791,7 +2791,6 @@ class AppServices:
         *,
         lm_profile_id: str,
         operator_prompt: str,
-        operator_examples: str,
         existing_rows: list[dict[str, Any]],
         max_rows: int,
     ) -> dict[str, Any]:
@@ -2827,7 +2826,6 @@ class AppServices:
         user_prompt = (
             f"Generate {max_rows} evaluation rows.\n\n"
             f"Operator request:\n{cleaned_prompt}\n\n"
-            f"Operator examples:\n{operator_examples.strip() or '(none provided)'}\n\n"
             f"Existing rows for style reference:\n{json.dumps(normalized_existing, indent=2)}"
         )
 
@@ -2855,7 +2853,6 @@ class AppServices:
                 user_prompt = (
                     f"Generate {max_rows} evaluation rows.\n\n"
                     f"Operator request:\n{cleaned_prompt}\n\n"
-                    f"Operator examples:\n{operator_examples.strip() or '(none provided)'}\n\n"
                     f"Existing rows for style reference:\n{json.dumps(normalized_existing, indent=2)}\n\n"
                     f"The previous response could not be parsed because: {last_error}. "
                     "Retry and return only a JSON array using the required schema."

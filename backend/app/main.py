@@ -169,7 +169,6 @@ class EvaluationPlanCreateRequest(BaseModel):
 class EvaluationPlanGenerateRowsRequest(BaseModel):
     lm_profile_id: str
     operator_prompt: str
-    operator_examples: str = ""
     existing_rows: list[dict[str, Any]] = Field(default_factory=list)
     max_rows: int = 5
 
@@ -708,7 +707,6 @@ async def generate_evaluation_plan_rows(request: Request, payload: EvaluationPla
         return await services.generate_evaluation_rows(
             lm_profile_id=payload.lm_profile_id,
             operator_prompt=payload.operator_prompt,
-            operator_examples=payload.operator_examples,
             existing_rows=payload.existing_rows,
             max_rows=payload.max_rows,
         )

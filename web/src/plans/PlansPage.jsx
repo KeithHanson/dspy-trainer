@@ -245,7 +245,6 @@ function PlanBuilder({ onBack, planId }) {
   const [isLoadingPlan, setIsLoadingPlan] = useState(false);
   const [isGeneratorOpen, setIsGeneratorOpen] = useState(false);
   const [generatorPrompt, setGeneratorPrompt] = useState("");
-  const [generatorExamples, setGeneratorExamples] = useState("");
   const [isGeneratingRows, setIsGeneratingRows] = useState(false);
   const [generatedRowsPreview, setGeneratedRowsPreview] = useState([]);
   const [generationError, setGenerationError] = useState("");
@@ -380,7 +379,6 @@ function PlanBuilder({ onBack, planId }) {
         body: JSON.stringify({
           lm_profile_id: selectedLmProfileId,
           operator_prompt: generatorPrompt,
-          operator_examples: generatorExamples,
           existing_rows: filledRows.map((row) => ({ input: { question: row.input }, label: { expected: row.expected } })),
           max_rows: 5,
         }),
@@ -629,11 +627,6 @@ function PlanBuilder({ onBack, planId }) {
             <label className="col gap-1" style={{ marginBottom: 12 }}>
               <span className="t-label">What data do you need?</span>
               <textarea className="plans-textarea" rows={5} value={generatorPrompt} onChange={(event) => setGeneratorPrompt(event.target.value)} placeholder="Explain the kinds of questions and expected answers you want generated." />
-            </label>
-
-            <label className="col gap-1" style={{ marginBottom: 12 }}>
-              <span className="t-label">Examples for the model</span>
-              <textarea className="plans-textarea" rows={6} value={generatorExamples} onChange={(event) => setGeneratorExamples(event.target.value)} placeholder="Paste example input / expected-answer pairs or notes about formatting and quality." />
             </label>
 
             <div className="row gap-2" style={{ marginBottom: 12 }}>
