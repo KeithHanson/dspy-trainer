@@ -315,7 +315,7 @@ export function RunsPage() {
                       <td className="mono">Q{task.question_index + 1}</td>
                       <td className="mono">{task.attempt_index + 1}</td>
                       <td><StatusPill status={task.status} /></td>
-                      <td className="mono">{task.status === "succeeded" ? (task.eval_pass ? "pass" : "fail") : "-"}</td>
+                      <td className="mono">{task.status === "succeeded" ? (task.eval_pass ? "✅" : "❌") : "-"}</td>
                       <td className="mono">{task.score ?? "-"}</td>
                       <td className="mono">{task.worker_id || "-"}</td>
                     </tr>
