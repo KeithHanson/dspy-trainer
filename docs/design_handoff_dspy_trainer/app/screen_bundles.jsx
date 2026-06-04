@@ -126,7 +126,7 @@ function BundleUpload({ nav, toast }) {
               <pre className="code">{`example-bundle.zip
 ├── `}<span className="c-key">module.py</span>{`     `}<span className="c-com"># class TriageAgent(dspy.Module)</span>{`
 ├── `}<span className="c-key">metric.py</span>{`     `}<span className="c-com"># def judge_metric(gold, pred, trace=None)</span>{`
-└── `}<span className="c-key">bundle.toml</span>{`   `}<span className="c-com"># name, version, lm_target, deps</span></pre>
+└── `}<span className="c-key">bundle.toml</span>{`   `}<span className="c-com"># name, version, deps</span></pre>
             </div>
           </div>
         )}

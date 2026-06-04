@@ -64,7 +64,7 @@ def test_validator_accepts_optional_build_lm_with_no_args(tmp_path):
         encoding="utf-8",
     )
     (bundle / "bundle.toml").write_text(
-        "name='x'\nversion='0.1.0'\nlm_target='x'\nscore_pass_threshold=0.8\n",
+        "name='x'\nversion='0.1.0'\nscore_pass_threshold=0.8\n",
         encoding="utf-8",
     )
     report = validate_bundle(str(bundle))
@@ -95,7 +95,7 @@ def test_validator_rejects_build_lm_with_required_args(tmp_path):
         encoding="utf-8",
     )
     (bundle / "bundle.toml").write_text(
-        "name='x'\nversion='0.1.0'\nlm_target='x'\nscore_pass_threshold=0.8\n",
+        "name='x'\nversion='0.1.0'\nscore_pass_threshold=0.8\n",
         encoding="utf-8",
     )
     report = validate_bundle(str(bundle))
@@ -125,7 +125,7 @@ def test_validator_accepts_optimized_program_state_file(tmp_path):
     )
     (bundle / "program.json").write_text("{}", encoding="utf-8")
     (bundle / "bundle.toml").write_text(
-        "name='x'\nversion='0.1.0'\nlm_target='x'\nscore_pass_threshold=0.8\noptimized_program_state='program.json'\n",
+        "name='x'\nversion='0.1.0'\nscore_pass_threshold=0.8\noptimized_program_state='program.json'\n",
         encoding="utf-8",
     )
     report = validate_bundle(str(bundle))
@@ -154,7 +154,7 @@ def test_validator_rejects_missing_optimized_program_state_file(tmp_path):
         encoding="utf-8",
     )
     (bundle / "bundle.toml").write_text(
-        "name='x'\nversion='0.1.0'\nlm_target='x'\nscore_pass_threshold=0.8\noptimized_program_state='program.json'\n",
+        "name='x'\nversion='0.1.0'\nscore_pass_threshold=0.8\noptimized_program_state='program.json'\n",
         encoding="utf-8",
     )
     report = validate_bundle(str(bundle))

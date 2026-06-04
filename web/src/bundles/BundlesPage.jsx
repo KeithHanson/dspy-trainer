@@ -65,7 +65,6 @@ def build_program():
     help: "Add a bundle.toml file at the bundle root so the validator can read required metadata.",
     snippet: `name = "support-triage-agent"
 version = "0.1.0"
-lm_target = "gpt-4.1-mini"
 score_pass_threshold = 0.8
 `,
   },
@@ -143,11 +142,10 @@ python -m py_compile module.py metric.py
   {
     id: "bundle_toml_fields",
     label: "bundle.toml has required fields",
-    failCodes: ["bundle_toml_invalid", "bundle_toml_name_missing", "bundle_toml_version_missing", "bundle_toml_lm_target_missing", "bundle_toml_score_pass_threshold_invalid"],
-    help: "bundle.toml must be valid TOML and include non-empty name/version/lm_target plus numeric score_pass_threshold between 0.0 and 1.0.",
+    failCodes: ["bundle_toml_invalid", "bundle_toml_name_missing", "bundle_toml_version_missing", "bundle_toml_score_pass_threshold_invalid"],
+    help: "bundle.toml must be valid TOML and include non-empty name/version plus numeric score_pass_threshold between 0.0 and 1.0.",
     snippet: `name = "support-triage-agent"
 version = "0.1.0"
-lm_target = "gpt-4.1-mini"
 score_pass_threshold = 0.8
 `,
   },
@@ -164,7 +162,7 @@ const PREP_STEPS = [
   "Copy the sample folder and rename it for your module.",
   "Update module.py with your DSPy signature and module class.",
   "Update metric.py with your evaluation contract.",
-  "Set bundle.toml name/version/lm_target and score_pass_threshold.",
+  "Set bundle.toml name/version and score_pass_threshold.",
   "Zip the folder root, then upload for validation.",
 ];
 
@@ -237,7 +235,7 @@ export function BundlesPage() {
               <pre className="bundles-structure">{`example-bundle.zip
 ├── module.py   # DSPy module + build_program()
 ├── metric.py   # judge_metric(example, prediction, trace=None)
-└── bundle.toml # name, version, lm_target`}</pre>
+└── bundle.toml # name, version`}</pre>
             </section>
 
             <section className="panel card-pad bundles-section">

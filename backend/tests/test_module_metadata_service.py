@@ -56,7 +56,7 @@ def test_set_module_bundle_metadata_updates_saved_bundle_toml(tmp_path):
     bundle_root.mkdir()
     bundle_toml = bundle_root / "bundle.toml"
     bundle_toml.write_text(
-        'name = "before-name"\nversion = "0.1.0"\nlm_target = "gpt-4.1-mini"\nscore_pass_threshold = 0.8\n',
+        'name = "before-name"\nversion = "0.1.0"\nscore_pass_threshold = 0.8\n',
         encoding="utf-8",
     )
     services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))

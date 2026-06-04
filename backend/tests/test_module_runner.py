@@ -69,7 +69,7 @@ def test_run_bundle_eval_uses_lm_profile_when_build_lm_absent(tmp_path):
         encoding="utf-8",
     )
     (bundle / "bundle.toml").write_text(
-        "name='x'\nversion='0.1.0'\nlm_target='x'\nscore_pass_threshold=0.8\n",
+        "name='x'\nversion='0.1.0'\nscore_pass_threshold=0.8\n",
         encoding="utf-8",
     )
 
@@ -247,7 +247,7 @@ def test_run_bundle_eval_loads_optimized_program_state(tmp_path):
     )
     (bundle / "program.json").write_text('{"answer": "Paris"}', encoding="utf-8")
     (bundle / "bundle.toml").write_text(
-        "name='x'\nversion='0.1.0'\nlm_target='x'\nscore_pass_threshold=0.8\noptimized_program_state='program.json'\n",
+        "name='x'\nversion='0.1.0'\nscore_pass_threshold=0.8\noptimized_program_state='program.json'\n",
         encoding="utf-8",
     )
 

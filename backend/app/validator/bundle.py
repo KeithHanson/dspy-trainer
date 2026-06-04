@@ -140,7 +140,7 @@ def _validate_bundle_toml(toml_file: Path, diagnostics: list[dict[str, Any]]) ->
         diagnostics.append(_diag("error", "bundle_toml_invalid", f"bundle.toml is not valid TOML: {exc}", TOML_FILE))
         return {}
 
-    required_keys = ["name", "version", "lm_target"]
+    required_keys = ["name", "version"]
     for key in required_keys:
         value = payload.get(key)
         if not isinstance(value, str) or not value.strip():
@@ -191,7 +191,6 @@ def _validate_bundle_toml(toml_file: Path, diagnostics: list[dict[str, Any]]) ->
     return {
         "name": payload.get("name"),
         "version": payload.get("version"),
-        "lm_target": payload.get("lm_target"),
         "score_pass_threshold": float(score_pass_threshold) if isinstance(score_pass_threshold, (int, float)) and not isinstance(score_pass_threshold, bool) else None,
         "optimized_program_state": optimized_program_state.strip() if isinstance(optimized_program_state, str) and optimized_program_state.strip() else None,
     }

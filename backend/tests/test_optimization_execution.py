@@ -1239,7 +1239,7 @@ def test_materialize_optimized_bundle_creates_new_bundle(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     (source_bundle / "bundle.toml").write_text(
-        "name='echo-bundle'\nversion='0.1.0'\nlm_target='x'\nscore_pass_threshold=0.8\n",
+        "name='echo-bundle'\nversion='0.1.0'\nscore_pass_threshold=0.8\n",
         encoding="utf-8",
     )
 
