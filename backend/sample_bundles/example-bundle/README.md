@@ -21,7 +21,7 @@ python run_agent.py \
   --model openai/gpt-4o-mini
 ```
 
-The script prints JSON with the sample bundle outputs:
+The script prints the raw prediction result returned by the program. For the sample bundle that will usually look like:
 
 ```json
 {

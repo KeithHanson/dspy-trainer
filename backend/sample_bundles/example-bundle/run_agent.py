@@ -54,12 +54,11 @@ def main() -> None:
 
     program = build_program()
     prediction = program(question=args.question)
-    payload = {
-        "category": str(getattr(prediction, "category", "")),
-        "priority": str(getattr(prediction, "priority", "")),
-        "reply": str(getattr(prediction, "reply", "")),
-    }
-    print(json.dumps(payload, indent=2))
+    try:
+        payload = prediction.toDict()
+    except Exception:
+        payload = str(prediction)
+    print(json.dumps(payload, indent=2) if isinstance(payload, dict) else payload)
 
 
 if __name__ == "__main__":
