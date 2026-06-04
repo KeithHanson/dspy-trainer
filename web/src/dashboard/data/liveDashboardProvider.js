@@ -148,7 +148,7 @@ export function mapDashboardOverview({ plans, modules, workers }) {
     },
     workerTable,
     quickStart: [
-      { id: "upload", title: "Upload your module", detail: "module.py + metric.py zipped", to: "/bundles?upload=1" },
+      { id: "import", title: "Import your module", detail: "Connect a GitHub repo and branch", to: "/bundles?import=1" },
       { id: "plan", title: "Create a new plan", detail: "Define question set and runs", to: "/plans?new=1" },
       { id: "runs", title: "Review run monitor", detail: "Inspect scores, pass/fail, and traces", to: "/runs" },
     ],

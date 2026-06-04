@@ -11,7 +11,7 @@ describe("OptimizationLaunchPage", () => {
         return Promise.resolve({
           ok: true,
           json: vi.fn().mockResolvedValue([
-            { id: "mod-1", bundle_name: "Echo Support", validation_status: "passed", source_ref: "module.zip", bundle_version: "0.3.0", current_commit_sha: "abc12345", sync_status: "synced" },
+            { id: "mod-1", bundle_name: "Echo Support", validation_status: "passed", source_ref: "/tmp/checkouts/echo-support", bundle_version: "0.3.0", current_commit_sha: "abc12345", sync_status: "synced" },
           ]),
         });
       }
@@ -138,8 +138,8 @@ describe("OptimizationLaunchPage", () => {
         return Promise.resolve({
           ok: true,
           json: vi.fn().mockResolvedValue([
-            { id: "mod-1", bundle_name: "Echo Support", validation_status: "passed", source_ref: "module.zip", bundle_version: "0.3.0", current_commit_sha: "abc12345", sync_status: "synced" },
-            { id: "mod-2", bundle_name: "Other Module", validation_status: "passed", source_ref: "module2.zip", bundle_version: "0.4.0", current_commit_sha: "def67890", sync_status: "synced" },
+            { id: "mod-1", bundle_name: "Echo Support", validation_status: "passed", source_ref: "/tmp/checkouts/echo-support", bundle_version: "0.3.0", current_commit_sha: "abc12345", sync_status: "synced" },
+            { id: "mod-2", bundle_name: "Other Module", validation_status: "passed", source_ref: "/tmp/checkouts/other-module", bundle_version: "0.4.0", current_commit_sha: "def67890", sync_status: "synced" },
           ]),
         });
       }
@@ -189,7 +189,7 @@ describe("OptimizationLaunchPage", () => {
         return Promise.resolve({
           ok: true,
           json: vi.fn().mockResolvedValue([
-            { id: "mod-1", bundle_name: "Echo Support", validation_status: "passed", source_ref: "module.zip", bundle_version: "0.3.0", current_commit_sha: "abc12345", sync_status: "synced" },
+            { id: "mod-1", bundle_name: "Echo Support", validation_status: "passed", source_ref: "/tmp/checkouts/echo-support", bundle_version: "0.3.0", current_commit_sha: "abc12345", sync_status: "synced" },
           ]),
         });
       }
@@ -264,7 +264,7 @@ describe("OptimizationLaunchPage", () => {
         return Promise.resolve({
           ok: true,
           json: vi.fn().mockResolvedValue([
-            { id: "mod-1", bundle_name: "Echo Support", validation_status: "passed", source_ref: "module.zip", bundle_version: "0.3.0", current_commit_sha: "abc12345", sync_status: "synced" },
+            { id: "mod-1", bundle_name: "Echo Support", validation_status: "passed", source_ref: "/tmp/checkouts/echo-support", bundle_version: "0.3.0", current_commit_sha: "abc12345", sync_status: "synced" },
           ]),
         });
       }
@@ -302,7 +302,7 @@ describe("OptimizationLaunchPage", () => {
         return Promise.resolve({
           ok: true,
           json: vi.fn().mockResolvedValue([
-            { id: "mod-1", bundle_name: "Echo Support", validation_status: "passed", source_ref: "module.zip", bundle_version: "0.3.0", current_commit_sha: "abc12345", sync_status: "behind" },
+            { id: "mod-1", bundle_name: "Echo Support", validation_status: "passed", source_ref: "/tmp/checkouts/echo-support", bundle_version: "0.3.0", current_commit_sha: "abc12345", sync_status: "behind" },
           ]),
         });
       }

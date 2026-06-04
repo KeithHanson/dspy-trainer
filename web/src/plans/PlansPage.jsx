@@ -472,7 +472,7 @@ function PlanBuilder({ onBack, planId }) {
             module_import_id: selectedBundleId,
             scenario_id: SCENARIO_ID,
             dataset_version: DATASET_VERSION,
-            bundle_path: selectedBundle?.source_ref || selectedBundle?.bundle_name || "uploaded-bundle.zip",
+            bundle_path: selectedBundle?.source_ref || selectedBundle?.checkout_path || selectedBundle?.github_repo_url || selectedBundle?.bundle_name || selectedBundleId,
             eval_inputs: [],
             evaluation_plan_id: savedPlan.id,
             runs_per_question: runs,

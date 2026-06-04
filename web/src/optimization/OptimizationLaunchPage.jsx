@@ -81,7 +81,7 @@ function formatDateTime(value) {
 }
 
 function resolveBundlePath(moduleRow) {
-  return moduleRow?.source_ref || moduleRow?.bundle_name || "uploaded-bundle.zip";
+  return moduleRow?.source_ref || moduleRow?.checkout_path || moduleRow?.github_repo_url || moduleRow?.bundle_name || moduleRow?.id || "";
 }
 
 function isBundleMutationBlocked(moduleRow) {

@@ -68,7 +68,7 @@ export function DashboardPage({ adapter, onOpenRun, user }) {
             <p className="muted t-sm">{data.summaryLine}</p>
           </div>
           <div className="row gap-2">
-            <Button onClick={() => navigate("/bundles?upload=1")}>Upload bundle</Button>
+            <Button onClick={() => navigate("/bundles?import=1")}>Import bundle</Button>
             <Button variant="primary" onClick={() => navigate("/plans?new=1")}>New plan</Button>
           </div>
         </header>
