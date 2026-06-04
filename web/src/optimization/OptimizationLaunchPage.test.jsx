@@ -11,7 +11,7 @@ describe("OptimizationLaunchPage", () => {
         return Promise.resolve({
           ok: true,
           json: vi.fn().mockResolvedValue([
-            { id: "mod-1", bundle_name: "Echo Support", validation_status: "passed", source_ref: "module.zip" },
+            { id: "mod-1", bundle_name: "Echo Support", validation_status: "passed", source_ref: "module.zip", bundle_version: "0.3.0", current_commit_sha: "abc12345", sync_status: "synced" },
           ]),
         });
       }
@@ -87,6 +87,8 @@ describe("OptimizationLaunchPage", () => {
     await userEvent.selectOptions(screen.getByLabelText("Execution LM profile"), "lm-exec-1");
     await userEvent.selectOptions(screen.getByLabelText("Helper LM profile (optional)"), "lm-help-2");
     await userEvent.selectOptions(screen.getByLabelText("Source run plan"), "plan-123");
+    await userEvent.clear(screen.getByLabelText("Target bundle version"));
+    await userEvent.type(screen.getByLabelText("Target bundle version"), "2.0.0-preview");
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
       expect.stringMatching(/\/agent-run-plans\/plan-123\/tasks\?limit=500&offset=0$/),
@@ -121,8 +123,9 @@ describe("OptimizationLaunchPage", () => {
       budget: "light",
       max_bootstrapped_demos: 4,
       max_labeled_demos: 16,
+      target_bundle_version: "2.0.0-preview",
     });
-    expect(payload.normalized_config).toMatchObject({ optimizer_family: "miprov2" });
+    expect(payload.normalized_config).toMatchObject({ optimizer_family: "miprov2", target_bundle_version: "2.0.0-preview" });
 
     expect(await screen.findByText(/Optimization job queued/)).toBeInTheDocument();
 
@@ -135,8 +138,8 @@ describe("OptimizationLaunchPage", () => {
         return Promise.resolve({
           ok: true,
           json: vi.fn().mockResolvedValue([
-            { id: "mod-1", bundle_name: "Echo Support", validation_status: "passed", source_ref: "module.zip" },
-            { id: "mod-2", bundle_name: "Other Module", validation_status: "passed", source_ref: "module2.zip" },
+            { id: "mod-1", bundle_name: "Echo Support", validation_status: "passed", source_ref: "module.zip", bundle_version: "0.3.0", current_commit_sha: "abc12345", sync_status: "synced" },
+            { id: "mod-2", bundle_name: "Other Module", validation_status: "passed", source_ref: "module2.zip", bundle_version: "0.4.0", current_commit_sha: "def67890", sync_status: "synced" },
           ]),
         });
       }
@@ -186,7 +189,7 @@ describe("OptimizationLaunchPage", () => {
         return Promise.resolve({
           ok: true,
           json: vi.fn().mockResolvedValue([
-            { id: "mod-1", bundle_name: "Echo Support", validation_status: "passed", source_ref: "module.zip" },
+            { id: "mod-1", bundle_name: "Echo Support", validation_status: "passed", source_ref: "module.zip", bundle_version: "0.3.0", current_commit_sha: "abc12345", sync_status: "synced" },
           ]),
         });
       }
@@ -261,7 +264,7 @@ describe("OptimizationLaunchPage", () => {
         return Promise.resolve({
           ok: true,
           json: vi.fn().mockResolvedValue([
-            { id: "mod-1", bundle_name: "Echo Support", validation_status: "passed", source_ref: "module.zip" },
+            { id: "mod-1", bundle_name: "Echo Support", validation_status: "passed", source_ref: "module.zip", bundle_version: "0.3.0", current_commit_sha: "abc12345", sync_status: "synced" },
           ]),
         });
       }
@@ -289,6 +292,47 @@ describe("OptimizationLaunchPage", () => {
       String(callUrl).endsWith("/optimization/jobs") && callInit?.method === "POST",
     );
     expect(postCall).toBeUndefined();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("blocks launch when selected module is behind upstream", async () => {
+    const fetchMock = vi.fn((url, init) => {
+      if (String(url).endsWith("/modules") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([
+            { id: "mod-1", bundle_name: "Echo Support", validation_status: "passed", source_ref: "module.zip", bundle_version: "0.3.0", current_commit_sha: "abc12345", sync_status: "behind" },
+          ]),
+        });
+      }
+      if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "lm-exec-1", name: "Execution Profile" }]) });
+      }
+      if (String(url).endsWith("/modules/mod-1/agent-run-plans?limit=100&offset=0") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([
+            { id: "plan-123", plan_name: "Baseline run plan", status: "finished", created_at: "2026-01-01T00:00:00Z" },
+          ]),
+        });
+      }
+      if (String(url).endsWith("/agent-run-plans/plan-123/tasks?limit=500&offset=0") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ items: [] }) });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter>
+        <OptimizationLaunchPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText(/Sync status:/)).toBeInTheDocument();
+    expect(await screen.findByText(/This bundle cannot be mutated until it is manually synced/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Launch optimization job" })).toBeDisabled();
 
     vi.unstubAllGlobals();
   });

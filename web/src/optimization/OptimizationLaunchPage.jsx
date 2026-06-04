@@ -84,6 +84,10 @@ function resolveBundlePath(moduleRow) {
   return moduleRow?.source_ref || moduleRow?.bundle_name || "uploaded-bundle.zip";
 }
 
+function isBundleMutationBlocked(moduleRow) {
+  return ["behind", "diverged", "sync_error"].includes(String(moduleRow?.sync_status || "").toLowerCase());
+}
+
 function formatRunPlanLabel(plan) {
   if (!plan) {
     return "";
@@ -129,6 +133,7 @@ export function OptimizationLaunchPage() {
   const [executionLmProfileId, setExecutionLmProfileId] = useState("");
   const [helperLmProfileId, setHelperLmProfileId] = useState("");
   const [sourceRunPlanId, setSourceRunPlanId] = useState("");
+  const [targetBundleVersion, setTargetBundleVersion] = useState("");
   const [sourceRunPlans, setSourceRunPlans] = useState([]);
   const [isLoadingSourceRunPlans, setIsLoadingSourceRunPlans] = useState(false);
   const [sourceDatasetPreview, setSourceDatasetPreview] = useState(null);
@@ -145,6 +150,11 @@ export function OptimizationLaunchPage() {
   const selectedModule = useMemo(() => modules.find((item) => item.id === selectedModuleId) || null, [modules, selectedModuleId]);
   const selectedStrategyDef = STRATEGY_BY_ID[selectedStrategy] || STRATEGY_OPTIONS[0];
   const isLoading = isLoadingModules || isLoadingProfiles;
+  const mutationBlocked = isBundleMutationBlocked(selectedModule);
+
+  useEffect(() => {
+    setTargetBundleVersion(selectedModule?.bundle_version || "");
+  }, [selectedModule?.id, selectedModule?.bundle_version]);
 
   const defaultRequestConfig = useMemo(
     () => ({
@@ -285,6 +295,14 @@ export function OptimizationLaunchPage() {
       setValidationError("Source run plan is required to launch optimization.");
       return;
     }
+    if (!targetBundleVersion.trim()) {
+      setValidationError("Target bundle version is required before launching optimization.");
+      return;
+    }
+    if (mutationBlocked) {
+      setValidationError("This bundle must be synced before optimization can write back to the tracked branch.");
+      return;
+    }
     setIsSubmitting(true);
     try {
       const response = await fetch(`${apiBase}/optimization/jobs`, {
@@ -300,9 +318,13 @@ export function OptimizationLaunchPage() {
           validation_dataset_id: null,
           execution_lm_profile_id: executionLmProfileId,
           helper_lm_profile_id: helperLmProfileId || null,
-          request_config: defaultRequestConfig,
+          request_config: {
+            ...defaultRequestConfig,
+            target_bundle_version: targetBundleVersion.trim(),
+          },
           normalized_config: {
             optimizer_family: selectedStrategy,
+            target_bundle_version: targetBundleVersion.trim(),
           },
           train_inputs: [],
           val_inputs: [],
@@ -331,7 +353,7 @@ export function OptimizationLaunchPage() {
             <h1 className="t-display" style={{ fontSize: 22 }}>Optimization Launch</h1>
             <p className="muted t-sm">Create an optimization run with strategy family, role routing, and module context.</p>
           </div>
-          <Button variant="primary" onClick={submit} disabled={isSubmitting || isLoading}>
+          <Button variant="primary" onClick={submit} disabled={isSubmitting || isLoading || mutationBlocked}>
             {isSubmitting ? "Launching..." : "Launch optimization job"}
           </Button>
         </header>
@@ -374,6 +396,30 @@ export function OptimizationLaunchPage() {
             </label>
 
           <FieldHelp text="The selected module is the source for optimization. Re-run its bundle upload if this is stale." />
+
+          {selectedModule ? (
+            <div className="optimization-source-preview" style={{ marginTop: 8 }}>
+              <p><strong>Current version:</strong> {selectedModule.bundle_version || "unknown"}</p>
+              <p><strong>Current commit:</strong> <span className="mono">{selectedModule.current_commit_sha || "unknown"}</span></p>
+              <p><strong>Sync status:</strong> {selectedModule.sync_status || "unknown"}</p>
+              {mutationBlocked ? (
+                <p className="optimization-source-preview-note">This bundle cannot be mutated until it is manually synced in Module Bundles.</p>
+              ) : null}
+            </div>
+          ) : null}
+
+          <label className="col gap-1" htmlFor="optimization-target-version" style={{ marginTop: 12 }}>
+            <span className="t-label">Target bundle version</span>
+            <input
+              id="optimization-target-version"
+              className="bundles-input"
+              type="text"
+              value={targetBundleVersion}
+              onChange={(event) => setTargetBundleVersion(event.target.value)}
+              placeholder="e.g. 1.2.4-rc1"
+            />
+          </label>
+          <FieldHelp text="Freeform version string used for direct-branch optimization writeback. Choose any version format your repo expects." />
 
           <label className="col gap-1" htmlFor="optimization-source-run-plan">
             <span className="t-label">Source run plan</span>
