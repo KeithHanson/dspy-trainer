@@ -92,6 +92,15 @@ def _github_clone_url(repo_url: str, pat: str) -> str:
     return urlunparse(parsed._replace(netloc=f"x-access-token:{pat}@{parsed.netloc}"))
 
 
+def _normalize_tracked_bundle_name(name: str) -> str:
+    normalized = str(name or "").strip()
+    if not normalized:
+        return normalized
+    normalized = re.sub(r"-imported-optimized-[0-9a-fA-F-]{36}$", "", normalized)
+    normalized = re.sub(r"-optimized-[0-9a-fA-F-]{36}$", "", normalized)
+    return normalized or str(name or "").strip()
+
+
 def _classify_sync_status(local_commit_sha: str, upstream_commit_sha: str, merge_base_sha: str | None) -> str:
     if local_commit_sha == upstream_commit_sha:
         return "synced"
@@ -1737,6 +1746,8 @@ class AppServices:
             return None
 
         base_bundle_name = str(source_module.get("bundle_name") or source_root.name or "module-bundle").strip() or "module-bundle"
+        if str(source_module.get("source") or "") == "github":
+            base_bundle_name = _normalize_tracked_bundle_name(base_bundle_name)
         base_bundle_version = str(source_module.get("bundle_version") or "").strip() or "0.1.0"
         request_config = self._json_dict(job.get("request_config"))
         normalized_config = self._json_dict(job.get("normalized_config"))

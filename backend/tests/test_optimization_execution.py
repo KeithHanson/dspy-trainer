@@ -1440,6 +1440,104 @@ def test_materialize_optimized_bundle_updates_existing_checkout(tmp_path, monkey
     assert any(call[0][:4] == ["git", "push", "origin", "main"] for call in git_calls)
 
 
+def test_materialize_optimized_bundle_strips_legacy_generated_suffix_from_name(tmp_path, monkeypatch):
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+
+    source_bundle = tmp_path / "source-bundle"
+    source_bundle.mkdir()
+    (source_bundle / "module.py").write_text(
+        "import dspy\nclass Sig(dspy.Signature):\n  q=dspy.InputField()\n  a=dspy.OutputField()\nclass Agent(dspy.Module):\n  def forward(self, q: str):\n    return dspy.Prediction(a='x')\ndef build_program():\n  return Agent()\n",
+        encoding="utf-8",
+    )
+    (source_bundle / "metric.py").write_text(
+        "def judge_metric(example, prediction, trace=None):\n  return {'score': 1.0, 'rationale': 'ok', 'flags': [], 'raw_response': {}}\n",
+        encoding="utf-8",
+    )
+    (source_bundle / "bundle.toml").write_text(
+        "name='support-triage-agent-imported-optimized-2af601ca-fd59-41e3-931c-228c1252918e'\nversion='0.1.0'\nscore_pass_threshold=0.8\n",
+        encoding="utf-8",
+    )
+    artifact_dir = tmp_path / "artifacts-legacy"
+    artifact_dir.mkdir()
+    artifact_path = artifact_dir / "program.json"
+    artifact_path.write_text('{"answer": "Paris"}', encoding="utf-8")
+
+    async def fake_get_optimization_job(job_id):
+        return {
+            "id": job_id,
+            "status": "succeeded",
+            "module_import_id": "mod-1",
+            "artifact_path": str(artifact_path),
+            "request_config": {"target_bundle_version": "0.1.1"},
+            "normalized_config": {},
+        }
+
+    async def fake_get_module(module_id):
+        if module_id == "mod-1":
+            return {
+                "id": "mod-1",
+                "source": "github",
+                "bundle_name": "support-triage-agent-imported-optimized-2af601ca-fd59-41e3-931c-228c1252918e",
+                "bundle_version": "0.1.0",
+                "source_ref": str(source_bundle),
+                "checkout_path": str(source_bundle),
+                "github_branch": "main",
+                "current_revision_id": "rev-before",
+            }
+        return None
+
+    async def fake_update_module_bundle_metadata_record(module_id, *, bundle_name, bundle_version):
+        assert module_id == "mod-1"
+        assert bundle_name == "support-triage-agent"
+        assert bundle_version == "0.1.1"
+
+    async def fake_set_validation_status(module_id, status, diagnostics, **kwargs):
+        return True
+
+    async def fake_set_module_sync_state(module_id, **kwargs):
+        return None
+
+    async def fake_run_git_command(args, *, cwd=None):
+        if args[:4] == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            return "main"
+        if args[:3] == ["git", "rev-parse", "HEAD"]:
+            return "commit-after"
+        return ""
+
+    async def fake_get_updated_module(module_id):
+        return {
+            "id": "mod-1",
+            "source": "github",
+            "source_ref": str(source_bundle),
+            "checkout_path": str(source_bundle),
+            "github_branch": "main",
+            "bundle_name": "support-triage-agent",
+            "bundle_version": "0.1.1",
+            "validation_status": "passed",
+            "smoke_status": "pending",
+            "diagnostics": [],
+            "current_revision_id": "rev-after",
+        }
+
+    async def fake_ensure_module_mutation_allowed(module_id):
+        return {"sync_status": "synced"}
+
+    monkeypatch.setattr(services, "get_optimization_job", fake_get_optimization_job)
+    monkeypatch.setattr(services, "get_module", fake_get_updated_module)
+    monkeypatch.setattr(services, "_update_module_bundle_metadata_record", fake_update_module_bundle_metadata_record)
+    monkeypatch.setattr(services, "set_validation_status", fake_set_validation_status)
+    monkeypatch.setattr(services, "_set_module_sync_state", fake_set_module_sync_state)
+    monkeypatch.setattr(services, "_run_git_command", fake_run_git_command)
+    monkeypatch.setattr(services, "ensure_module_mutation_allowed", fake_ensure_module_mutation_allowed)
+
+    result = asyncio.run(services.materialize_optimized_bundle("opt-legacy"))
+
+    assert result is not None
+    bundle_toml = source_bundle.joinpath("bundle.toml").read_text(encoding="utf-8")
+    assert 'name = "support-triage-agent"' in bundle_toml
+    assert 'version = "0.1.1"' in bundle_toml
+
+
 def test_run_optimization_job_fails_when_writeback_preflight_blocks(monkeypatch):
     services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
     state = {
