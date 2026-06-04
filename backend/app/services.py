@@ -1071,7 +1071,10 @@ class AppServices:
             raise RuntimeError("http client not initialized")
         headers = {"Authorization": f"Bearer {api_key}"}
         url = f"{self.settings.litellm_base_url.rstrip('/')}{path}"
-        response = await self.http_client.post(url, json=payload, headers=headers)
+        try:
+            response = await self.http_client.post(url, json=payload, headers=headers, timeout=60.0)
+        except httpx.TimeoutException as exc:
+            raise RuntimeError(f"LiteLLM POST {path} timed out after 60s") from exc
         if response.status_code >= 400:
             raise RuntimeError(f"LiteLLM POST {path} failed ({response.status_code}): {response.text}")
         data = response.json()
