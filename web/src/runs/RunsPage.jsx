@@ -601,7 +601,7 @@ function canCancelRunPlan(status) {
 }
 
 function canDeleteRunPlan(status) {
-  return status === "succeeded" || status === "failed" || status === "canceled";
+  return status === "draft" || status === "succeeded" || status === "failed" || status === "canceled";
 }
 
 function shortId(value) {

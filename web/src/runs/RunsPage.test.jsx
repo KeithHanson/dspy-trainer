@@ -86,6 +86,43 @@ describe("RunsPage", () => {
     vi.unstubAllGlobals();
   });
 
+  it("shows delete for draft runs in the jobs list", async () => {
+    const fetchMock = vi.fn((url, init) => {
+      if (String(url).includes("/agent-run-plans?") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([
+            { id: "plan-1", status: "draft", completed_tasks: 0, total_tasks: 0, failed_tasks: 0, created_at: "2026-01-01T00:00:00+00:00" },
+          ]),
+        });
+      }
+      if (String(url).endsWith("/workers") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue({ items: [], total_workers: 8, reported_workers: 0, available_workers: 0, busy_workers: 0 }),
+        });
+      }
+      if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([]),
+        });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter initialEntries={["/runs"]}>
+        <RunsPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByRole("button", { name: "Delete" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
+    vi.unstubAllGlobals();
+  });
+
   it("renders run detail when plan query present", async () => {
     const fetchMock = vi.fn((url, init) => {
       if (String(url).endsWith("/agent-run-plans/plan-1") && init?.method === "GET") {
