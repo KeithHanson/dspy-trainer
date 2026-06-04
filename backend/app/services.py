@@ -3920,7 +3920,9 @@ class AppServices:
         async with self.postgres_pool.acquire() as conn:
             plan = await conn.fetchrow(
                 """
-                select id, project_id, module_import_id, scenario_id, dataset_version, plan_name, eval_inputs, runs_per_question, max_workers,
+                select id, project_id, module_import_id, scenario_id, dataset_version, plan_name,
+                       bundle_revision_id, bundle_commit_sha, bundle_version,
+                       eval_inputs, runs_per_question, max_workers,
                        mlflow_experiment_id, mlflow_parent_run_id
                 from agent_run_plans where id = $1
                 """,
