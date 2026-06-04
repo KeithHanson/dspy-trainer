@@ -488,3 +488,13 @@ def test_smoke_test_rerun_overwrites_status(monkeypatch):
         assert diagnostics["status"] == "runnable"
         assert diagnostics["smoke_status"] == "passed"
         assert diagnostics["diagnostics"][0]["code"] == "bundle_eval_completed"
+
+
+def test_sample_bundle_download(monkeypatch):
+    _patch_services(monkeypatch)
+    with TestClient(main_mod.app) as client:
+        response = client.get("/samples/module-bundle")
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "application/zip"
+        assert "attachment; filename=\"example-bundle.zip\"" in response.headers["content-disposition"]
+        assert len(response.content) > 0

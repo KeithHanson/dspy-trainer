@@ -1,11 +1,13 @@
 from contextlib import asynccontextmanager
+from io import BytesIO
 import os
 from pathlib import Path
 from typing import Any
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
@@ -37,6 +39,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+SAMPLE_BUNDLE_DIR = Path(__file__).resolve().parents[1] / "sample_bundles" / "example-bundle"
+
+
+def _iter_sample_bundle_files(bundle_dir: Path) -> list[Path]:
+    return sorted(path for path in bundle_dir.rglob("*") if path.is_file())
 
 
 class ModuleImportRequest(BaseModel):
@@ -225,6 +234,21 @@ async def ready(request: Request):
 async def list_workers(request: Request):
     services: AppServices = request.app.state.services
     return await services.list_workers()
+
+
+@app.get("/samples/module-bundle")
+async def download_module_bundle_sample():
+    if not SAMPLE_BUNDLE_DIR.exists() or not SAMPLE_BUNDLE_DIR.is_dir():
+        return JSONResponse(status_code=500, content={"error": "sample bundle directory is missing"})
+
+    bundle = BytesIO()
+    with ZipFile(bundle, mode="w", compression=ZIP_DEFLATED) as archive:
+        root_name = SAMPLE_BUNDLE_DIR.name
+        for file_path in _iter_sample_bundle_files(SAMPLE_BUNDLE_DIR):
+            archive_name = f"{root_name}/{file_path.relative_to(SAMPLE_BUNDLE_DIR).as_posix()}"
+            archive.write(file_path, arcname=archive_name)
+    headers = {"Content-Disposition": 'attachment; filename="example-bundle.zip"'}
+    return Response(content=bundle.getvalue(), media_type="application/zip", headers=headers)
 
 
 @app.post("/modules/import")

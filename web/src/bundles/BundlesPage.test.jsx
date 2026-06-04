@@ -5,6 +5,48 @@ import { vi } from "vitest";
 import { BundlesPage } from "./BundlesPage";
 
 describe("BundlesPage", () => {
+  it("downloads the example bundle starter", async () => {
+    const blob = new Blob(["zip"], { type: "application/zip" });
+    const fetchMock = vi.fn((url) => {
+      if (String(url).endsWith("/samples/module-bundle")) {
+        return Promise.resolve({ ok: true, blob: vi.fn().mockResolvedValue(blob) });
+      }
+      if (String(url).endsWith("/modules")) {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    if (!URL.createObjectURL) {
+      URL.createObjectURL = vi.fn();
+    }
+    if (!URL.revokeObjectURL) {
+      URL.revokeObjectURL = vi.fn();
+    }
+    const urlMock = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:test");
+    const revokeMock = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter>
+        <BundlesPage />
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Download example" }));
+
+    expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/samples\/module-bundle$/), { method: "GET" });
+    expect(urlMock).toHaveBeenCalledTimes(1);
+    expect(anchorClick).toHaveBeenCalledTimes(1);
+    expect(revokeMock).toHaveBeenCalledWith("blob:test");
+
+    vi.unstubAllGlobals();
+    urlMock.mockRestore();
+    revokeMock.mockRestore();
+    anchorClick.mockRestore();
+  });
+
   it("shows github import panel when import query is present", async () => {
     vi.stubGlobal("fetch", vi.fn(() => Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ github: { configured: true } }) })));
     render(
