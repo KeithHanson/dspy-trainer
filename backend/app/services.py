@@ -271,11 +271,27 @@ class AppServices:
         digest = hashlib.sha256(requirements_bytes).hexdigest()
         cache_key = str(requirements_path)
         if self._installed_bundle_requirements.get(cache_key) == digest:
+            logger.info(
+                "bundle_requirements_install_skipped_cached bundle_path=%s requirements_path=%s",
+                root,
+                requirements_path,
+            )
             return
 
         async with self._bundle_requirements_lock:
             if self._installed_bundle_requirements.get(cache_key) == digest:
+                logger.info(
+                    "bundle_requirements_install_skipped_cached bundle_path=%s requirements_path=%s",
+                    root,
+                    requirements_path,
+                )
                 return
+
+            logger.info(
+                "bundle_requirements_install_started bundle_path=%s requirements_path=%s",
+                root,
+                requirements_path,
+            )
 
             def run_install() -> None:
                 completed = subprocess.run(
@@ -299,8 +315,21 @@ class AppServices:
                     detail = stderr or stdout or "pip install failed"
                     raise RuntimeError(f"failed to install bundle requirements: {detail}")
 
-            await asyncio.to_thread(run_install)
+            try:
+                await asyncio.to_thread(run_install)
+            except Exception:
+                logger.exception(
+                    "bundle_requirements_install_failed bundle_path=%s requirements_path=%s",
+                    root,
+                    requirements_path,
+                )
+                raise
             self._installed_bundle_requirements[cache_key] = digest
+            logger.info(
+                "bundle_requirements_install_succeeded bundle_path=%s requirements_path=%s",
+                root,
+                requirements_path,
+            )
 
     @staticmethod
     def _merge_process_log(existing_log: str | None, additions: list[str]) -> str:
