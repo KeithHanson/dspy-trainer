@@ -21,7 +21,7 @@ async def fake_disconnect(self):
     return None
 
 
-async def fake_create_evaluation_plan(self, project_id, scenario_id, dataset_version, name, runs_per_question, max_workers, module_import_id, lm_profile_id, eval_inputs):
+async def fake_create_evaluation_plan(self, project_id, scenario_id, dataset_version, name, runs_per_question, max_workers, module_import_id, dataset_id, lm_profile_id):
     global NEXT_PLAN_ID
     plan_id = f"eval-plan-{NEXT_PLAN_ID}"
     NEXT_PLAN_ID += 1
@@ -34,8 +34,8 @@ async def fake_create_evaluation_plan(self, project_id, scenario_id, dataset_ver
         "runs_per_question": runs_per_question,
         "max_workers": max_workers,
         "module_import_id": module_import_id,
+        "dataset_id": dataset_id,
         "lm_profile_id": lm_profile_id,
-        "eval_inputs": eval_inputs,
         "created_at": "2026-01-01T00:00:00+00:00",
         "updated_at": "2026-01-01T00:00:00+00:00",
     }
@@ -58,7 +58,7 @@ async def fake_delete_evaluation_plan(self, evaluation_plan_id):
     return True
 
 
-async def fake_update_evaluation_plan(self, evaluation_plan_id, project_id, scenario_id, dataset_version, name, runs_per_question, max_workers, module_import_id, lm_profile_id, eval_inputs):
+async def fake_update_evaluation_plan(self, evaluation_plan_id, project_id, scenario_id, dataset_version, name, runs_per_question, max_workers, module_import_id, dataset_id, lm_profile_id):
     plan = PLANS.get(evaluation_plan_id)
     if plan is None:
         return None
@@ -71,8 +71,8 @@ async def fake_update_evaluation_plan(self, evaluation_plan_id, project_id, scen
             "runs_per_question": runs_per_question,
             "max_workers": max_workers,
             "module_import_id": module_import_id,
+            "dataset_id": dataset_id,
             "lm_profile_id": lm_profile_id,
-            "eval_inputs": eval_inputs,
         }
     )
     return plan
@@ -130,7 +130,7 @@ def test_create_list_get_evaluation_plans(monkeypatch):
                 "runs_per_question": 3,
                 "max_workers": 8,
                 "module_import_id": "mod-1",
-                "eval_inputs": [{"input": {"question": "q1"}, "label": {"expected": "a1"}}],
+                "dataset_id": "dataset-1",
             },
         )
         assert created.status_code == 200
@@ -168,7 +168,7 @@ def test_delete_evaluation_plan(monkeypatch):
                 "runs_per_question": 1,
                 "max_workers": 1,
                 "module_import_id": "mod-1",
-                "eval_inputs": [],
+                "dataset_id": "dataset-1",
             },
         )
         assert created.status_code == 200
@@ -196,7 +196,7 @@ def test_update_evaluation_plan(monkeypatch):
                 "runs_per_question": 1,
                 "max_workers": 1,
                 "module_import_id": "mod-1",
-                "eval_inputs": [],
+                "dataset_id": "dataset-1",
             },
         )
         plan_id = created.json()["id"]
@@ -211,14 +211,15 @@ def test_update_evaluation_plan(monkeypatch):
                 "runs_per_question": 3,
                 "max_workers": 4,
                 "module_import_id": "mod-2",
+                "dataset_id": "dataset-2",
                 "lm_profile_id": "lm-2",
-                "eval_inputs": [{"input": {"question": "q"}, "label": {"expected": "a"}}],
             },
         )
         assert updated.status_code == 200
         assert updated.json()["id"] == plan_id
         assert updated.json()["name"] == "Updated"
         assert updated.json()["dataset_version"] == "v2"
+        assert updated.json()["dataset_id"] == "dataset-2"
 
 
 def test_generate_evaluation_plan_rows(monkeypatch):

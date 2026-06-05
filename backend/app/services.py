@@ -868,6 +868,25 @@ class AppServices:
             await conn.execute("alter table lm_profiles add column if not exists virtual_key text;")
             await conn.execute(
                 """
+                create table if not exists evaluation_datasets (
+                  id text primary key,
+                  project_id text not null,
+                  name text not null,
+                  description text,
+                  module_import_id text not null references module_imports(id) on delete restrict,
+                  records jsonb not null default '[]'::jsonb,
+                  record_count int not null default 0,
+                  created_at timestamptz not null,
+                  updated_at timestamptz not null
+                );
+                """
+            )
+            await conn.execute("alter table evaluation_datasets add column if not exists description text;")
+            await conn.execute("alter table evaluation_datasets add column if not exists module_import_id text references module_imports(id) on delete restrict;")
+            await conn.execute("alter table evaluation_datasets add column if not exists records jsonb not null default '[]'::jsonb;")
+            await conn.execute("alter table evaluation_datasets add column if not exists record_count int not null default 0;")
+            await conn.execute(
+                """
                 create table if not exists evaluation_plans (
                   id text primary key,
                   project_id text not null,
@@ -877,6 +896,7 @@ class AppServices:
                   runs_per_question int not null default 1,
                   max_workers int not null default 1,
                   module_import_id text,
+                  dataset_id text references evaluation_datasets(id) on delete restrict,
                   eval_inputs jsonb not null default '[]'::jsonb,
                   created_at timestamptz not null,
                   updated_at timestamptz not null
@@ -887,6 +907,7 @@ class AppServices:
             await conn.execute("alter table evaluation_plans add column if not exists runs_per_question int not null default 1;")
             await conn.execute("alter table evaluation_plans add column if not exists max_workers int not null default 1;")
             await conn.execute("alter table evaluation_plans add column if not exists module_import_id text;")
+            await conn.execute("alter table evaluation_plans add column if not exists dataset_id text references evaluation_datasets(id) on delete restrict;")
             await conn.execute("alter table evaluation_plans add column if not exists lm_profile_id text references lm_profiles(id) on delete set null;")
             await conn.execute(
                 """
@@ -898,6 +919,7 @@ class AppServices:
                   scenario_id text not null,
                   dataset_version text not null,
                   plan_name text not null default 'RunPlan',
+                  dataset_id text references evaluation_datasets(id) on delete set null,
                   lm_profile_id text references lm_profiles(id) on delete set null,
                   bundle_path text not null,
                   bundle_revision_id text,
@@ -918,6 +940,7 @@ class AppServices:
                 """
             )
             await conn.execute("alter table agent_run_plans add column if not exists plan_name text not null default 'RunPlan';")
+            await conn.execute("alter table agent_run_plans add column if not exists dataset_id text references evaluation_datasets(id) on delete set null;")
             await conn.execute("alter table agent_run_plans add column if not exists lm_profile_id text references lm_profiles(id) on delete set null;")
             await conn.execute("alter table agent_run_plans add column if not exists bundle_revision_id text;")
             await conn.execute("alter table agent_run_plans add column if not exists bundle_commit_sha text;")
@@ -2650,8 +2673,8 @@ class AppServices:
             runs_per_question=max(1, int(source_plan.get("runs_per_question") or 1)),
             max_workers=max(1, int(source_plan.get("max_workers") or 1)),
             module_import_id=module_import_id,
+            dataset_id=str(source_plan.get("dataset_id") or ""),
             lm_profile_id=source_plan.get("lm_profile_id"),
-            eval_inputs=self._json_list(source_plan.get("eval_inputs")),
         )
         run_plan = await self.create_agent_run_plan(
             project_id=str(source_plan["project_id"]),
@@ -3723,6 +3746,260 @@ class AppServices:
             )
         return str(result).startswith("UPDATE 1")
 
+    @staticmethod
+    def _normalize_evaluation_dataset_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for index, record in enumerate(records):
+            if not isinstance(record, dict):
+                raise ValueError(f"dataset record {index + 1} must be an object")
+            input_payload = record.get("input")
+            label_payload = record.get("label")
+            if not isinstance(input_payload, dict) or not input_payload:
+                raise ValueError(f"dataset record {index + 1} must include a non-empty input object")
+            if not isinstance(label_payload, dict) or not label_payload:
+                raise ValueError(f"dataset record {index + 1} must include a non-empty label object")
+            record_id = str(record.get("id") or "").strip() or f"item-{uuid4()}"
+            normalized.append({"id": record_id, "input": input_payload, "label": label_payload})
+        if not normalized:
+            raise ValueError("dataset must include at least one record")
+        return normalized
+
+    @staticmethod
+    def _validate_payload_against_contract(
+        payload: dict[str, Any],
+        fields: Any,
+        *,
+        dataset_index: int,
+        payload_label: str,
+    ) -> None:
+        if not isinstance(fields, list):
+            return
+        missing: list[str] = []
+        for field in fields:
+            if not isinstance(field, dict):
+                continue
+            if field.get("required", True) is False:
+                continue
+            key = str(field.get("key") or "").strip()
+            if not key:
+                continue
+            if key not in payload:
+                missing.append(key)
+                continue
+            value = payload.get(key)
+            if value is None or (isinstance(value, str) and not value.strip()):
+                missing.append(key)
+        if missing:
+            joined = ", ".join(missing)
+            raise ValueError(f"dataset record {dataset_index} is missing required {payload_label} field(s): {joined}")
+
+    async def _validate_evaluation_dataset_records(
+        self,
+        *,
+        module_import_id: str,
+        records: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        normalized = self._normalize_evaluation_dataset_records(records)
+        module = await self.get_module(module_import_id)
+        if module is None:
+            raise ValueError("module not found")
+        evaluation_contract = module.get("evaluation_contract") if isinstance(module, dict) else None
+        if isinstance(evaluation_contract, dict):
+            input_fields = evaluation_contract.get("input_fields")
+            label_fields = evaluation_contract.get("label_fields")
+            for index, record in enumerate(normalized, start=1):
+                self._validate_payload_against_contract(record["input"], input_fields, dataset_index=index, payload_label="input")
+                self._validate_payload_against_contract(record["label"], label_fields, dataset_index=index, payload_label="label")
+        return normalized
+
+    @staticmethod
+    def _summarize_dataset_payload(records: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
+        input_keys: list[str] = []
+        label_keys: list[str] = []
+        for record in records:
+            input_payload = record.get("input") if isinstance(record, dict) else None
+            label_payload = record.get("label") if isinstance(record, dict) else None
+            if isinstance(input_payload, dict):
+                for key in input_payload.keys():
+                    if key not in input_keys:
+                        input_keys.append(str(key))
+            if isinstance(label_payload, dict):
+                for key in label_payload.keys():
+                    if key not in label_keys:
+                        label_keys.append(str(key))
+        return input_keys, label_keys
+
+    async def create_evaluation_dataset(
+        self,
+        *,
+        project_id: str,
+        name: str,
+        description: str | None,
+        module_import_id: str,
+        records: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        normalized_records = await self._validate_evaluation_dataset_records(module_import_id=module_import_id, records=records)
+        now = datetime.now(timezone.utc)
+        dataset_id = str(uuid4())
+        async with self.postgres_pool.acquire() as conn:
+            await conn.execute(
+                """
+                insert into evaluation_datasets (
+                  id, project_id, name, description, module_import_id, records, record_count, created_at, updated_at
+                )
+                values ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9)
+                """,
+                dataset_id,
+                project_id,
+                name.strip() or "Untitled dataset",
+                _clean_optional_text(description),
+                module_import_id,
+                json.dumps(normalized_records),
+                len(normalized_records),
+                now,
+                now,
+            )
+        result = await self.get_evaluation_dataset(dataset_id)
+        if result is None:
+            raise RuntimeError("failed to load evaluation dataset")
+        return result
+
+    async def get_evaluation_dataset(self, dataset_id: str) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                select d.id, d.project_id, d.name, d.description, d.module_import_id, d.records, d.record_count,
+                       d.created_at, d.updated_at, m.bundle_name, m.bundle_version
+                from evaluation_datasets d
+                join module_imports m on m.id = d.module_import_id
+                where d.id = $1
+                """,
+                dataset_id,
+            )
+        if row is None:
+            return None
+        records = self._json_list(row["records"])
+        input_keys, label_keys = self._summarize_dataset_payload(records)
+        return {
+            "id": row["id"],
+            "project_id": row["project_id"],
+            "name": row["name"],
+            "description": row["description"],
+            "module_import_id": row["module_import_id"],
+            "bundle_name": row["bundle_name"],
+            "bundle_version": row["bundle_version"],
+            "records": records,
+            "record_count": int(row["record_count"] or len(records)),
+            "input_keys": input_keys,
+            "label_keys": label_keys,
+            "created_at": row["created_at"].isoformat(),
+            "updated_at": row["updated_at"].isoformat(),
+        }
+
+    async def list_evaluation_datasets(self) -> list[dict[str, Any]]:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                select d.id, d.project_id, d.name, d.description, d.module_import_id, d.records, d.record_count,
+                       d.created_at, d.updated_at, m.bundle_name, m.bundle_version
+                from evaluation_datasets d
+                join module_imports m on m.id = d.module_import_id
+                order by d.created_at desc
+                """
+            )
+        payloads: list[dict[str, Any]] = []
+        for row in rows:
+            records = self._json_list(row["records"])
+            input_keys, label_keys = self._summarize_dataset_payload(records)
+            payloads.append(
+                {
+                    "id": row["id"],
+                    "project_id": row["project_id"],
+                    "name": row["name"],
+                    "description": row["description"],
+                    "module_import_id": row["module_import_id"],
+                    "bundle_name": row["bundle_name"],
+                    "bundle_version": row["bundle_version"],
+                    "records": records,
+                    "record_count": int(row["record_count"] or len(records)),
+                    "input_keys": input_keys,
+                    "label_keys": label_keys,
+                    "created_at": row["created_at"].isoformat(),
+                    "updated_at": row["updated_at"].isoformat(),
+                }
+            )
+        return payloads
+
+    async def update_evaluation_dataset(
+        self,
+        *,
+        dataset_id: str,
+        project_id: str,
+        name: str,
+        description: str | None,
+        module_import_id: str,
+        records: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        normalized_records = await self._validate_evaluation_dataset_records(module_import_id=module_import_id, records=records)
+        now = datetime.now(timezone.utc)
+        async with self.postgres_pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                update evaluation_datasets
+                set project_id = $2,
+                    name = $3,
+                    description = $4,
+                    module_import_id = $5,
+                    records = $6::jsonb,
+                    record_count = $7,
+                    updated_at = $8
+                where id = $1
+                """,
+                dataset_id,
+                project_id,
+                name.strip() or "Untitled dataset",
+                _clean_optional_text(description),
+                module_import_id,
+                json.dumps(normalized_records),
+                len(normalized_records),
+                now,
+            )
+        if not str(result).startswith("UPDATE 1"):
+            return None
+        return await self.get_evaluation_dataset(dataset_id)
+
+    async def duplicate_evaluation_dataset(self, dataset_id: str, name: str | None = None) -> dict[str, Any] | None:
+        dataset = await self.get_evaluation_dataset(dataset_id)
+        if dataset is None:
+            return None
+        duplicate_name = str(name or "").strip() or f"{dataset['name']} copy"
+        duplicate_records = self._json_list(dataset.get("records"))
+        return await self.create_evaluation_dataset(
+            project_id=str(dataset["project_id"]),
+            name=duplicate_name,
+            description=dataset.get("description"),
+            module_import_id=str(dataset["module_import_id"]),
+            records=duplicate_records,
+        )
+
+    async def delete_evaluation_dataset(self, dataset_id: str) -> bool:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            referenced = await conn.fetchval("select 1 from evaluation_plans where dataset_id = $1", dataset_id)
+            if referenced is not None:
+                raise ValueError("dataset is referenced by one or more evaluation plans")
+            result = await conn.execute("delete from evaluation_datasets where id = $1", dataset_id)
+        return str(result).startswith("DELETE 1")
+
     async def create_agent_run_plan(
         self,
         project_id: str,
@@ -3742,6 +4019,7 @@ class AppServices:
         plan_id = str(uuid4())
         plan_name_value = "RunPlan"
         effective_lm_profile_id = lm_profile_id
+        effective_dataset_id: str | None = None
         execution_state = await self.resolve_module_execution_state(module_import_id, bundle_path)
         if execution_state is None:
             return None
@@ -3752,13 +4030,20 @@ class AppServices:
             effective_eval_inputs = eval_inputs
             if evaluation_plan_id:
                 plan_row = await conn.fetchrow(
-                    "select name, eval_inputs, lm_profile_id from evaluation_plans where id = $1",
+                    "select name, dataset_id, lm_profile_id from evaluation_plans where id = $1",
                     evaluation_plan_id,
                 )
                 if plan_row is None:
                     return None
                 plan_name_value = str(plan_row["name"] or "RunPlan").strip() or "RunPlan"
-                effective_eval_inputs = self._json_list(plan_row["eval_inputs"])
+                dataset_id = str(plan_row["dataset_id"] or "").strip()
+                if not dataset_id:
+                    return None
+                effective_dataset_id = dataset_id
+                dataset_row = await conn.fetchrow("select records from evaluation_datasets where id = $1", dataset_id)
+                if dataset_row is None:
+                    return None
+                effective_eval_inputs = self._json_list(dataset_row["records"])
                 if effective_lm_profile_id is None:
                     effective_lm_profile_id = plan_row["lm_profile_id"]
             if effective_lm_profile_id:
@@ -3769,12 +4054,12 @@ class AppServices:
                 """
                 insert into agent_run_plans (
                   id, status, project_id, module_import_id, scenario_id, dataset_version,
-                  plan_name, lm_profile_id, bundle_path, bundle_revision_id, bundle_commit_sha, bundle_version,
+                  plan_name, dataset_id, lm_profile_id, bundle_path, bundle_revision_id, bundle_commit_sha, bundle_version,
                   eval_inputs, mlflow_experiment_id, mlflow_parent_run_id, runs_per_question, max_workers,
                   total_tasks, completed_tasks, failed_tasks, failure_reason,
                   created_at, updated_at
                 )
-                values ($1, 'draft', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, null, null, $13, $14, 0, 0, 0, null, $15, $16)
+                values ($1, 'draft', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, null, null, $14, $15, 0, 0, 0, null, $16, $17)
                 """,
                 plan_id,
                 project_id,
@@ -3782,6 +4067,7 @@ class AppServices:
                 scenario_id,
                 dataset_version,
                 plan_name_value,
+                effective_dataset_id,
                 effective_lm_profile_id,
                 execution_state["bundle_path"],
                 execution_state["bundle_revision_id"],
@@ -3803,15 +4089,23 @@ class AppServices:
         name: str,
         runs_per_question: int,
         max_workers: int,
-        module_import_id: str | None,
+        module_import_id: str,
+        dataset_id: str,
         lm_profile_id: str | None,
-        eval_inputs: list[dict[str, Any]],
     ) -> dict[str, Any]:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
         now = datetime.now(timezone.utc)
         plan_id = str(uuid4())
         async with self.postgres_pool.acquire() as conn:
+            module_exists = await conn.fetchval("select 1 from module_imports where id = $1", module_import_id)
+            if module_exists is None:
+                raise ValueError("module not found")
+            dataset_module_id = await conn.fetchval("select module_import_id from evaluation_datasets where id = $1", dataset_id)
+            if dataset_module_id is None:
+                raise ValueError("evaluation dataset not found")
+            if str(dataset_module_id) != str(module_import_id):
+                raise ValueError("evaluation dataset must belong to the selected module")
             if lm_profile_id:
                 profile_exists = await conn.fetchval("select 1 from lm_profiles where id = $1 and archived_at is null", lm_profile_id)
                 if profile_exists is None:
@@ -3819,9 +4113,9 @@ class AppServices:
             await conn.execute(
                 """
                 insert into evaluation_plans (
-                  id, project_id, scenario_id, dataset_version, name, runs_per_question, max_workers, module_import_id, lm_profile_id, eval_inputs, created_at, updated_at
+                  id, project_id, scenario_id, dataset_version, name, runs_per_question, max_workers, module_import_id, dataset_id, lm_profile_id, created_at, updated_at
                 )
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                 """,
                 plan_id,
                 project_id,
@@ -3831,8 +4125,8 @@ class AppServices:
                 max(1, runs_per_question),
                 max(1, max_workers),
                 module_import_id,
+                dataset_id,
                 lm_profile_id,
-                __import__("json").dumps(eval_inputs),
                 now,
                 now,
             )
@@ -3847,9 +4141,12 @@ class AppServices:
         async with self.postgres_pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                select id, project_id, scenario_id, dataset_version, name, runs_per_question, max_workers, module_import_id, lm_profile_id, eval_inputs, created_at, updated_at
-                from evaluation_plans
-                where id = $1
+                select p.id, p.project_id, p.scenario_id, p.dataset_version, p.name, p.runs_per_question, p.max_workers,
+                       p.module_import_id, p.dataset_id, p.lm_profile_id, p.created_at, p.updated_at,
+                       d.name as dataset_name
+                from evaluation_plans p
+                join evaluation_datasets d on d.id = p.dataset_id
+                where p.id = $1
                 """,
                 evaluation_plan_id,
             )
@@ -3864,8 +4161,9 @@ class AppServices:
             "runs_per_question": row["runs_per_question"],
             "max_workers": row["max_workers"],
             "module_import_id": row["module_import_id"],
+            "dataset_id": row["dataset_id"],
+            "dataset_name": row["dataset_name"],
             "lm_profile_id": row["lm_profile_id"],
-            "eval_inputs": self._json_list(row["eval_inputs"]),
             "created_at": row["created_at"].isoformat(),
             "updated_at": row["updated_at"].isoformat(),
         }
@@ -3876,9 +4174,12 @@ class AppServices:
         async with self.postgres_pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                select id, project_id, scenario_id, dataset_version, name, runs_per_question, max_workers, module_import_id, lm_profile_id, eval_inputs, created_at, updated_at
-                from evaluation_plans
-                order by created_at desc
+                select p.id, p.project_id, p.scenario_id, p.dataset_version, p.name, p.runs_per_question, p.max_workers,
+                       p.module_import_id, p.dataset_id, p.lm_profile_id, p.created_at, p.updated_at,
+                       d.name as dataset_name
+                from evaluation_plans p
+                join evaluation_datasets d on d.id = p.dataset_id
+                order by p.created_at desc
                 """
             )
         return [
@@ -3891,8 +4192,9 @@ class AppServices:
                 "runs_per_question": row["runs_per_question"],
                 "max_workers": row["max_workers"],
                 "module_import_id": row["module_import_id"],
+                "dataset_id": row["dataset_id"],
+                "dataset_name": row["dataset_name"],
                 "lm_profile_id": row["lm_profile_id"],
-                "eval_inputs": self._json_list(row["eval_inputs"]),
                 "created_at": row["created_at"].isoformat(),
                 "updated_at": row["updated_at"].isoformat(),
             }
@@ -3915,9 +4217,9 @@ class AppServices:
         name: str,
         runs_per_question: int,
         max_workers: int,
-        module_import_id: str | None,
+        module_import_id: str,
+        dataset_id: str,
         lm_profile_id: str | None,
-        eval_inputs: list[dict[str, Any]],
     ) -> dict[str, Any] | None:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
@@ -3926,6 +4228,14 @@ class AppServices:
             exists = await conn.fetchval("select 1 from evaluation_plans where id = $1", evaluation_plan_id)
             if exists is None:
                 return None
+            module_exists = await conn.fetchval("select 1 from module_imports where id = $1", module_import_id)
+            if module_exists is None:
+                raise ValueError("module not found")
+            dataset_module_id = await conn.fetchval("select module_import_id from evaluation_datasets where id = $1", dataset_id)
+            if dataset_module_id is None:
+                raise ValueError("evaluation dataset not found")
+            if str(dataset_module_id) != str(module_import_id):
+                raise ValueError("evaluation dataset must belong to the selected module")
             if lm_profile_id:
                 profile_exists = await conn.fetchval("select 1 from lm_profiles where id = $1 and archived_at is null", lm_profile_id)
                 if profile_exists is None:
@@ -3940,8 +4250,8 @@ class AppServices:
                     runs_per_question = $6,
                     max_workers = $7,
                     module_import_id = $8,
-                    lm_profile_id = $9,
-                    eval_inputs = $10::jsonb,
+                    dataset_id = $9,
+                    lm_profile_id = $10,
                     updated_at = $11
                 where id = $1
                 """,
@@ -3953,8 +4263,8 @@ class AppServices:
                 max(1, runs_per_question),
                 max(1, max_workers),
                 module_import_id,
+                dataset_id,
                 lm_profile_id,
-                __import__("json").dumps(eval_inputs),
                 now,
             )
         return await self.get_evaluation_plan(evaluation_plan_id)
@@ -4137,7 +4447,7 @@ class AppServices:
             row = await conn.fetchrow(
                 """
                 select id, status, project_id, module_import_id, scenario_id, dataset_version,
-                       plan_name, lm_profile_id, bundle_path, bundle_revision_id, bundle_commit_sha, bundle_version,
+                       plan_name, dataset_id, lm_profile_id, bundle_path, bundle_revision_id, bundle_commit_sha, bundle_version,
                        eval_inputs, mlflow_experiment_id, mlflow_parent_run_id, runs_per_question, max_workers,
                        (select count(*) from agent_run_tasks t where t.plan_id = agent_run_plans.id and t.status = 'running') as running_tasks,
                        total_tasks, completed_tasks, failed_tasks, failure_reason,
@@ -4158,6 +4468,7 @@ class AppServices:
             "scenario_id": row["scenario_id"],
             "dataset_version": row["dataset_version"],
             "plan_name": row["plan_name"],
+            "dataset_id": self._row_value(row, "dataset_id"),
             "lm_profile_id": row["lm_profile_id"],
             "bundle_path": row["bundle_path"],
             "bundle_revision_id": self._row_value(row, "bundle_revision_id"),
@@ -4185,7 +4496,7 @@ class AppServices:
             rows = await conn.fetch(
                 """
                 select id, status, project_id, module_import_id, scenario_id, dataset_version,
-                       plan_name, lm_profile_id, bundle_path, bundle_revision_id, bundle_commit_sha, bundle_version,
+                       plan_name, dataset_id, lm_profile_id, bundle_path, bundle_revision_id, bundle_commit_sha, bundle_version,
                        eval_inputs, mlflow_experiment_id, mlflow_parent_run_id, runs_per_question, max_workers,
                        (
                          select avg(t.score)
@@ -4220,6 +4531,7 @@ class AppServices:
                 "scenario_id": row["scenario_id"],
                 "dataset_version": row["dataset_version"],
                 "plan_name": row["plan_name"],
+                "dataset_id": self._row_value(row, "dataset_id"),
                 "lm_profile_id": row["lm_profile_id"],
                 "bundle_path": row["bundle_path"],
                 "bundle_revision_id": self._row_value(row, "bundle_revision_id"),
@@ -4328,7 +4640,7 @@ class AppServices:
             plan = await conn.fetchrow(
                 """
                 select id, project_id, module_import_id, scenario_id, dataset_version, plan_name,
-                       bundle_revision_id, bundle_commit_sha, bundle_version,
+                       dataset_id, bundle_revision_id, bundle_commit_sha, bundle_version,
                        eval_inputs, runs_per_question, max_workers,
                        mlflow_experiment_id, mlflow_parent_run_id
                 from agent_run_plans where id = $1

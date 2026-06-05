@@ -151,9 +151,21 @@ class EvaluationPlanCreateRequest(BaseModel):
     name: str = "Untitled plan"
     runs_per_question: int = 1
     max_workers: int = 1
-    module_import_id: str | None = None
+    module_import_id: str
+    dataset_id: str
     lm_profile_id: str | None = None
-    eval_inputs: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class EvaluationDatasetCreateRequest(BaseModel):
+    project_id: str
+    name: str
+    description: str | None = None
+    module_import_id: str
+    records: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class EvaluationDatasetDuplicateRequest(BaseModel):
+    name: str | None = None
 
 
 class EvaluationPlanGenerateRowsRequest(BaseModel):
@@ -684,6 +696,80 @@ async def get_optimization_dataset(dataset_id: str, request: Request):
     return result
 
 
+@app.post("/evaluation-datasets")
+async def create_evaluation_dataset(request: Request, payload: EvaluationDatasetCreateRequest):
+    services: AppServices = request.app.state.services
+    try:
+        result = await services.create_evaluation_dataset(
+            project_id=payload.project_id,
+            name=payload.name,
+            description=payload.description,
+            module_import_id=payload.module_import_id,
+            records=payload.records,
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    return result
+
+
+@app.get("/evaluation-datasets")
+async def list_evaluation_datasets(request: Request):
+    services: AppServices = request.app.state.services
+    return await services.list_evaluation_datasets()
+
+
+@app.get("/evaluation-datasets/{dataset_id}")
+async def get_evaluation_dataset(dataset_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    result = await services.get_evaluation_dataset(dataset_id)
+    if result is None:
+        return JSONResponse(status_code=404, content={"error": "evaluation dataset not found"})
+    return result
+
+
+@app.patch("/evaluation-datasets/{dataset_id}")
+async def update_evaluation_dataset(dataset_id: str, request: Request, payload: EvaluationDatasetCreateRequest):
+    services: AppServices = request.app.state.services
+    try:
+        result = await services.update_evaluation_dataset(
+            dataset_id=dataset_id,
+            project_id=payload.project_id,
+            name=payload.name,
+            description=payload.description,
+            module_import_id=payload.module_import_id,
+            records=payload.records,
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    if result is None:
+        return JSONResponse(status_code=404, content={"error": "evaluation dataset not found"})
+    return result
+
+
+@app.post("/evaluation-datasets/{dataset_id}/duplicate")
+async def duplicate_evaluation_dataset(dataset_id: str, request: Request, payload: EvaluationDatasetDuplicateRequest):
+    services: AppServices = request.app.state.services
+    try:
+        result = await services.duplicate_evaluation_dataset(dataset_id=dataset_id, name=payload.name)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    if result is None:
+        return JSONResponse(status_code=404, content={"error": "evaluation dataset not found"})
+    return result
+
+
+@app.delete("/evaluation-datasets/{dataset_id}")
+async def delete_evaluation_dataset(dataset_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    try:
+        deleted = await services.delete_evaluation_dataset(dataset_id)
+    except ValueError as exc:
+        return JSONResponse(status_code=409, content={"error": str(exc)})
+    if not deleted:
+        return JSONResponse(status_code=404, content={"error": "evaluation dataset not found"})
+    return {"id": dataset_id, "deleted": True}
+
+
 @app.post("/agent-run-plans")
 async def create_agent_run_plan(request: Request, payload: AgentRunPlanCreateRequest):
     services: AppServices = request.app.state.services
@@ -769,8 +855,8 @@ async def create_evaluation_plan(request: Request, payload: EvaluationPlanCreate
             runs_per_question=payload.runs_per_question,
             max_workers=payload.max_workers,
             module_import_id=payload.module_import_id,
+            dataset_id=payload.dataset_id,
             lm_profile_id=payload.lm_profile_id,
-            eval_inputs=payload.eval_inputs,
         )
     except ValueError as exc:
         return JSONResponse(status_code=404, content={"error": str(exc)})
@@ -968,8 +1054,8 @@ async def update_evaluation_plan(evaluation_plan_id: str, request: Request, payl
             runs_per_question=payload.runs_per_question,
             max_workers=payload.max_workers,
             module_import_id=payload.module_import_id,
+            dataset_id=payload.dataset_id,
             lm_profile_id=payload.lm_profile_id,
-            eval_inputs=payload.eval_inputs,
         )
     except ValueError as exc:
         return JSONResponse(status_code=404, content={"error": str(exc)})
