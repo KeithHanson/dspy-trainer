@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { Button } from "../components/primitives/Button";
-import { Icon } from "../components/Icon";
 import { EmptyState } from "../components/states/EmptyState";
 import { ErrorState } from "../components/states/ErrorState";
 import { LoadingState } from "../components/states/LoadingState";
@@ -10,164 +9,34 @@ const PROJECT_ID = "proj-1";
 const SCENARIO_ID = "scn-1";
 const DATASET_VERSION = "v1";
 
-const SAMPLE_ROWS = [
-  {
-    input: "Ticket: I was charged twice for order #8842.\nHistory: Customer already contacted support yesterday and shared the order receipt.",
-    expected: "Category=billing_dispute; Priority=high; Reply acknowledges duplicate charge concern, confirms review, and requests transaction ID + charge timestamps.",
-  },
-  {
-    input: "Ticket: My account is locked and payroll runs in 30 minutes.\nHistory: First contact, no troubleshooting steps completed yet.",
-    expected: "Category=account_access; Priority=high; Reply gives immediate unlock steps and offers escalation path.",
-  },
-];
-
 function getBundleDisplayName(bundle) {
   return bundle?.bundle_name || bundle?.id || "Untitled bundle";
 }
 
-function normalizeContractFields(fields) {
-  if (!Array.isArray(fields)) {
-    return [];
+function formatCreatedAt(value) {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return "unknown";
   }
-  return fields
-    .filter((field) => field && typeof field.key === "string" && field.key.trim())
-    .map((field) => ({
-      key: field.key.trim(),
-      label: typeof field.label === "string" && field.label.trim() ? field.label.trim() : field.key.trim(),
-      description: typeof field.description === "string" && field.description.trim() ? field.description.trim() : "",
-      required: field.required !== false,
-      multiline: field.multiline === true,
-    }));
+  return parsed.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
-function getEvaluationContract(bundle) {
-  const contract = bundle?.evaluation_contract;
-  return {
-    inputFields: normalizeContractFields(contract?.input_fields),
-    labelFields: normalizeContractFields(contract?.label_fields),
-    inputTemplate: contract?.input_template && typeof contract.input_template === "object" && !Array.isArray(contract.input_template) ? contract.input_template : null,
-    labelTemplate: contract?.label_template && typeof contract.label_template === "object" && !Array.isArray(contract.label_template) ? contract.label_template : null,
-  };
-}
-
-function stringifyJson(value) {
-  return JSON.stringify(value, null, 2);
-}
-
-function buildTemplatePayload(fields, fallbackTemplate) {
-  if (fallbackTemplate && typeof fallbackTemplate === "object" && !Array.isArray(fallbackTemplate) && Object.keys(fallbackTemplate).length) {
-    return fallbackTemplate;
-  }
-  if (!fields.length) {
-    return {};
-  }
-  return Object.fromEntries(fields.map((field) => [field.key, ""]));
-}
-
-function createRowFromPayloads(id, inputPayload, labelPayload) {
-  return {
-    id,
-    inputText: stringifyJson(inputPayload),
-    labelText: stringifyJson(labelPayload),
-  };
-}
-
-function createEmptyRow(contract, id) {
-  return createRowFromPayloads(
-    id,
-    buildTemplatePayload(contract?.inputFields || [], contract?.inputTemplate),
-    buildTemplatePayload(contract?.labelFields || [], contract?.labelTemplate),
-  );
-}
-
-function coerceLegacyPayload(payload, fallbackKey) {
-  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
-    return payload;
-  }
-  const text = typeof payload === "string" ? payload.trim() : "";
-  return text ? { [fallbackKey]: text } : {};
-}
-
-function parseJsonObject(text, sideLabel) {
-  const trimmed = text.trim();
-  if (!trimmed) {
-    return { value: {}, error: `${sideLabel} is required.` };
-  }
+async function parseApiError(response, fallback) {
   try {
-    const parsed = JSON.parse(trimmed);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return { value: {}, error: `${sideLabel} must be a JSON object.` };
+    const body = await response.json();
+    if (body?.error) {
+      return `${fallback}: ${body.error}`;
     }
-    return { value: parsed, error: "" };
   } catch {
-    return { value: {}, error: `${sideLabel} must be valid JSON.` };
+    return fallback;
   }
-}
-
-function hasMeaningfulValue(value) {
-  if (typeof value === "string") {
-    return value.trim().length > 0;
-  }
-  if (Array.isArray(value)) {
-    return value.some((item) => hasMeaningfulValue(item));
-  }
-  if (value && typeof value === "object") {
-    return Object.values(value).some((item) => hasMeaningfulValue(item));
-  }
-  return value !== null && value !== undefined;
-}
-
-function validatePayloadAgainstContract(payload, fields, sideLabel) {
-  if (!fields.length) {
-    return Object.keys(payload).length ? "" : `${sideLabel} must not be empty.`;
-  }
-  const missing = fields
-    .filter((field) => field.required)
-    .filter((field) => !Object.prototype.hasOwnProperty.call(payload, field.key) || !hasMeaningfulValue(payload[field.key]));
-  if (!missing.length) {
-    return "";
-  }
-  return `${sideLabel} is missing required field${missing.length === 1 ? "" : "s"}: ${missing.map((field) => field.key).join(", ")}.`;
-}
-
-function analyzeRow(row, contract) {
-  const inputParsed = parseJsonObject(row.inputText, "Input JSON");
-  const labelParsed = parseJsonObject(row.labelText, "Expected response JSON");
-  const inputBlank = !hasMeaningfulValue(inputParsed.value);
-  const labelBlank = !hasMeaningfulValue(labelParsed.value);
-  const blank = inputBlank && labelBlank;
-
-  if (blank) {
-    return { blank: true, valid: false, errors: [], input: {}, label: {} };
-  }
-
-  const errors = [];
-  if (inputParsed.error && !inputBlank) {
-    errors.push(inputParsed.error);
-  }
-  if (labelParsed.error && !labelBlank) {
-    errors.push(labelParsed.error);
-  }
-  if (!inputParsed.error) {
-    const contractError = validatePayloadAgainstContract(inputParsed.value, contract.inputFields, "Input JSON");
-    if (contractError) {
-      errors.push(contractError);
-    }
-  }
-  if (!labelParsed.error) {
-    const contractError = validatePayloadAgainstContract(labelParsed.value, contract.labelFields, "Expected response JSON");
-    if (contractError) {
-      errors.push(contractError);
-    }
-  }
-
-  return {
-    blank: false,
-    valid: errors.length === 0,
-    errors,
-    input: inputParsed.value,
-    label: labelParsed.value,
-  };
+  return fallback;
 }
 
 export function PlansPage() {
@@ -177,13 +46,25 @@ export function PlansPage() {
   const editingPlanId = searchParams.get("id") || "";
   const savedFlag = searchParams.get("saved") === "1";
 
-  return showBuilder ? <PlanBuilder onBack={(opts) => {
-    if (opts?.runPlanId) {
-      navigate(`/runs?plan=${encodeURIComponent(opts.runPlanId)}`);
-      return;
-    }
-    navigate(opts?.saved ? "/plans?saved=1" : "/plans");
-  }} planId={editingPlanId} /> : <PlansList onCreate={() => navigate("/plans?new=1")} onEdit={(id) => navigate(`/plans?new=1&id=${encodeURIComponent(id)}`)} onRunNavigate={(id) => navigate(`/runs?plan=${encodeURIComponent(id)}`)} showSavedNotice={savedFlag} />;
+  return showBuilder ? (
+    <PlanBuilder
+      planId={editingPlanId}
+      onBack={(opts) => {
+        if (opts?.runPlanId) {
+          navigate(`/runs?plan=${encodeURIComponent(opts.runPlanId)}`);
+          return;
+        }
+        navigate(opts?.saved ? "/plans?saved=1" : "/plans");
+      }}
+    />
+  ) : (
+    <PlansList
+      onCreate={() => navigate("/plans?new=1")}
+      onEdit={(id) => navigate(`/plans?new=1&id=${encodeURIComponent(id)}`)}
+      onRunNavigate={(id) => navigate(`/runs?plan=${encodeURIComponent(id)}`)}
+      showSavedNotice={savedFlag}
+    />
+  );
 }
 
 function PlansList({ onCreate, onEdit, onRunNavigate, showSavedNotice }) {
@@ -310,7 +191,7 @@ function PlansList({ onCreate, onEdit, onRunNavigate, showSavedNotice }) {
         <header className="row between plans-head">
           <div className="col gap-1">
             <h1 className="t-display" style={{ fontSize: 22 }}>Evaluation Plans</h1>
-            <p className="muted t-sm">Dataset items + expected responses for reusable agent checks.</p>
+            <p className="muted t-sm">Saved run configuration for a bundle, dataset, LM profile, and execution settings.</p>
           </div>
           <div className="row gap-2">
             <Button onClick={loadPlans} disabled={isLoading}>{isLoading ? "Refreshing..." : "Refresh"}</Button>
@@ -325,46 +206,44 @@ function PlansList({ onCreate, onEdit, onRunNavigate, showSavedNotice }) {
         {!isLoading && !error ? (
           plans.length ? (
             <div className="col gap-2">
-              {plans.map((plan) => {
-                const count = Array.isArray(plan.eval_inputs) ? plan.eval_inputs.length : 0;
-                return (
-                  <article key={plan.id} className="panel card-pad plans-row">
-                    <div className="plans-row-icon center">
-                      <Icon name="layers" size={18} />
-                    </div>
-                    <div className="col gap-1" style={{ flex: 1 }}>
-                      <div className="row gap-2">
-                        <button type="button" className="plans-name-link" onClick={() => onEdit(plan.id)}>{plan.name || "Untitled plan"}</button>
-                      </div>
-                      <span className="cap mono">{count} items x {plan.runs_per_question || 1} runs = {count * (plan.runs_per_question || 1)} tasks · {plan.max_workers || 1} workers</span>
-                      <span className="cap mono">LM profile: {plan.lm_profile_id ? (profileNames[plan.lm_profile_id] || plan.lm_profile_id) : "none"}</span>
-                    </div>
+              {plans.map((plan) => (
+                <article key={plan.id} className="panel card-pad plans-row">
+                  <div className="plans-row-icon center">
+                    <span className="plans-count">{plan.dataset_id ? 1 : 0}</span>
+                  </div>
+                  <div className="col gap-1" style={{ flex: 1 }}>
                     <div className="row gap-2">
-                      <Button size="sm" variant="primary" icon="activity" onClick={(event) => {
-                        event.stopPropagation();
-                        runPlan(plan);
-                      }} disabled={runningPlanId === plan.id}>
-                        {runningPlanId === plan.id ? "Starting..." : "Run"}
-                      </Button>
-                      <Button size="sm" onClick={(event) => {
-                        event.stopPropagation();
-                        onEdit(plan.id);
-                      }}>
-                        Edit
-                      </Button>
-                      <Button size="sm" variant="danger" onClick={(event) => {
-                        event.stopPropagation();
-                        deletePlan(plan.id);
-                      }} disabled={deletingPlanId === plan.id}>
-                        {deletingPlanId === plan.id ? "Deleting..." : "Delete"}
-                      </Button>
+                      <button type="button" className="plans-name-link" onClick={() => onEdit(plan.id)}>{plan.name || "Untitled plan"}</button>
                     </div>
-                  </article>
-                );
-              })}
+                    <span className="cap mono">Dataset: {plan.dataset_name || plan.dataset_id || "none"}</span>
+                    <span className="cap mono">{plan.runs_per_question || 1} runs per input · {plan.max_workers || 1} workers</span>
+                    <span className="cap mono">LM profile: {plan.lm_profile_id ? (profileNames[plan.lm_profile_id] || plan.lm_profile_id) : "none"}</span>
+                  </div>
+                  <div className="row gap-2">
+                    <Button size="sm" variant="primary" icon="activity" onClick={(event) => {
+                      event.stopPropagation();
+                      runPlan(plan);
+                    }} disabled={runningPlanId === plan.id}>
+                      {runningPlanId === plan.id ? "Starting..." : "Run"}
+                    </Button>
+                    <Button size="sm" onClick={(event) => {
+                      event.stopPropagation();
+                      onEdit(plan.id);
+                    }}>
+                      Edit
+                    </Button>
+                    <Button size="sm" variant="danger" onClick={(event) => {
+                      event.stopPropagation();
+                      deletePlan(plan.id);
+                    }} disabled={deletingPlanId === plan.id}>
+                      {deletingPlanId === plan.id ? "Deleting..." : "Delete"}
+                    </Button>
+                  </div>
+                </article>
+              ))}
             </div>
           ) : (
-            <EmptyState title="No plans yet" description="Create your first evaluation plan from a validated module bundle." />
+            <EmptyState title="No plans yet" description="Create your first evaluation plan from a validated module bundle and dataset." />
           )
         ) : null}
       </div>
@@ -375,7 +254,11 @@ function PlansList({ onCreate, onEdit, onRunNavigate, showSavedNotice }) {
 function PlanBuilder({ onBack, planId }) {
   const apiBase = useMemo(() => (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, ""), []);
   const [modules, setModules] = useState([]);
+  const [datasets, setDatasets] = useState([]);
+  const [lmProfiles, setLmProfiles] = useState([]);
   const [isLoadingModules, setIsLoadingModules] = useState(false);
+  const [isLoadingDatasets, setIsLoadingDatasets] = useState(false);
+  const [isLoadingPlan, setIsLoadingPlan] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [submitError, setSubmitError] = useState("");
   const [validationError, setValidationError] = useState("");
@@ -383,71 +266,75 @@ function PlanBuilder({ onBack, planId }) {
   const [name, setName] = useState("");
   const [runs, setRuns] = useState(3);
   const [workers, setWorkers] = useState(8);
-  const [rows, setRows] = useState([createEmptyRow(null, "q-1")]);
   const [selectedBundleId, setSelectedBundleId] = useState("");
-  const [lmProfiles, setLmProfiles] = useState([]);
+  const [selectedDatasetId, setSelectedDatasetId] = useState("");
   const [selectedLmProfileId, setSelectedLmProfileId] = useState("");
-  const [isLoadingPlan, setIsLoadingPlan] = useState(false);
-  const [isGeneratorOpen, setIsGeneratorOpen] = useState(false);
-  const [generatorPrompt, setGeneratorPrompt] = useState("");
-  const [generatorLmProfileId, setGeneratorLmProfileId] = useState("");
-  const [isGeneratingRows, setIsGeneratingRows] = useState(false);
-  const [generatedRowsPreview, setGeneratedRowsPreview] = useState([]);
-  const [generationError, setGenerationError] = useState("");
   const isEditing = Boolean(planId);
 
   const validModules = useMemo(() => modules.filter((item) => item.validation_status === "passed"), [modules]);
   const selectedBundle = useMemo(() => validModules.find((item) => item.id === selectedBundleId) || null, [selectedBundleId, validModules]);
-  const evaluationContract = useMemo(() => getEvaluationContract(selectedBundle), [selectedBundle]);
-  const analyzedRows = useMemo(() => rows.map((row) => ({ row, ...analyzeRow(row, evaluationContract) })), [rows, evaluationContract]);
-  const completeRows = useMemo(() => analyzedRows.filter((item) => item.valid), [analyzedRows]);
-  const invalidRows = useMemo(() => analyzedRows.filter((item) => !item.blank && !item.valid), [analyzedRows]);
-  const totalTasks = completeRows.length * runs;
-  const canLoadSampleSet = useMemo(() => evaluationContract.inputFields.length <= 1 && evaluationContract.labelFields.length <= 1, [evaluationContract]);
-  const inputPlaceholder = useMemo(() => stringifyJson(buildTemplatePayload(evaluationContract.inputFields, evaluationContract.inputTemplate)), [evaluationContract]);
-  const labelPlaceholder = useMemo(() => stringifyJson(buildTemplatePayload(evaluationContract.labelFields, evaluationContract.labelTemplate)), [evaluationContract]);
-
-  const loadModules = async () => {
-    setIsLoadingModules(true);
-    setLoadError("");
-    try {
-      const response = await fetch(`${apiBase}/modules`, { method: "GET" });
-      if (!response.ok) {
-        throw new Error(`Could not load bundles (${response.status})`);
-      }
-      const payload = await response.json();
-      const moduleRows = Array.isArray(payload) ? payload : [];
-      setModules(moduleRows);
-      if (!selectedBundleId && moduleRows.length) {
-        const firstValid = moduleRows.find((item) => item.validation_status === "passed");
-        if (firstValid) {
-          setSelectedBundleId(firstValid.id);
-        }
-      }
-    } catch (err) {
-      setLoadError(err instanceof Error ? err.message : "Could not load bundles");
-    } finally {
-      setIsLoadingModules(false);
-    }
-  };
-
-  const loadLmProfiles = async () => {
-    try {
-      const response = await fetch(`${apiBase}/lm-profiles`, { method: "GET" });
-      if (!response.ok) {
-        throw new Error("Could not load LM profiles");
-      }
-      const payload = await response.json();
-      setLmProfiles(Array.isArray(payload) ? payload : []);
-    } catch {
-      setLmProfiles([]);
-    }
-  };
+  const bundleDatasets = useMemo(() => datasets.filter((item) => item.module_import_id === selectedBundleId), [datasets, selectedBundleId]);
+  const selectedDataset = useMemo(() => bundleDatasets.find((item) => item.id === selectedDatasetId) || null, [bundleDatasets, selectedDatasetId]);
+  const totalTasks = (selectedDataset?.record_count || 0) * runs;
 
   useEffect(() => {
+    const loadModules = async () => {
+      setIsLoadingModules(true);
+      setLoadError("");
+      try {
+        const response = await fetch(`${apiBase}/modules`, { method: "GET" });
+        if (!response.ok) {
+          throw new Error(`Could not load bundles (${response.status})`);
+        }
+        const payload = await response.json();
+        const moduleRows = Array.isArray(payload) ? payload : [];
+        setModules(moduleRows);
+        if (!selectedBundleId && moduleRows.length) {
+          const firstValid = moduleRows.find((item) => item.validation_status === "passed");
+          if (firstValid) {
+            setSelectedBundleId(firstValid.id);
+          }
+        }
+      } catch (err) {
+        setLoadError(err instanceof Error ? err.message : "Could not load bundles");
+      } finally {
+        setIsLoadingModules(false);
+      }
+    };
+
+    const loadDatasets = async () => {
+      setIsLoadingDatasets(true);
+      try {
+        const response = await fetch(`${apiBase}/evaluation-datasets`, { method: "GET" });
+        if (!response.ok) {
+          throw new Error(`Could not load datasets (${response.status})`);
+        }
+        const payload = await response.json();
+        setDatasets(Array.isArray(payload) ? payload : []);
+      } catch (err) {
+        setLoadError(err instanceof Error ? err.message : "Could not load datasets");
+      } finally {
+        setIsLoadingDatasets(false);
+      }
+    };
+
+    const loadLmProfiles = async () => {
+      try {
+        const response = await fetch(`${apiBase}/lm-profiles`, { method: "GET" });
+        if (!response.ok) {
+          throw new Error("Could not load LM profiles");
+        }
+        const payload = await response.json();
+        setLmProfiles(Array.isArray(payload) ? payload : []);
+      } catch {
+        setLmProfiles([]);
+      }
+    };
+
     loadModules();
+    loadDatasets();
     loadLmProfiles();
-  }, []);
+  }, [apiBase]);
 
   useEffect(() => {
     const loadPlan = async () => {
@@ -465,20 +352,9 @@ function PlanBuilder({ onBack, planId }) {
         setName(payload.name || "");
         setRuns(Math.max(1, Number(payload.runs_per_question || 1)));
         setWorkers(Math.max(1, Number(payload.max_workers || 1)));
-        if (typeof payload.module_import_id === "string" && payload.module_import_id) {
-          setSelectedBundleId(payload.module_import_id);
-        }
+        setSelectedBundleId(typeof payload.module_import_id === "string" ? payload.module_import_id : "");
+        setSelectedDatasetId(typeof payload.dataset_id === "string" ? payload.dataset_id : "");
         setSelectedLmProfileId(typeof payload.lm_profile_id === "string" ? payload.lm_profile_id : "");
-        const fromInputs = Array.isArray(payload.eval_inputs)
-          ? payload.eval_inputs.map((item, idx) => ({
-              id: `loaded-${idx}`,
-              inputText: stringifyJson(coerceLegacyPayload(item?.input, "question")),
-              labelText: stringifyJson(coerceLegacyPayload(item?.label, "expected")),
-            }))
-          : [];
-        if (fromInputs.length) {
-          setRows(fromInputs);
-        }
       } catch (err) {
         setSubmitError(err instanceof Error ? err.message : "Could not load plan");
       } finally {
@@ -489,94 +365,18 @@ function PlanBuilder({ onBack, planId }) {
   }, [apiBase, planId]);
 
   useEffect(() => {
-    if (!generatorLmProfileId && selectedLmProfileId) {
-      setGeneratorLmProfileId(selectedLmProfileId);
-    }
-  }, [selectedLmProfileId, generatorLmProfileId]);
-
-  useEffect(() => {
-    setRows((prev) => {
-      if (prev.length !== 1) {
-        return prev;
-      }
-      const current = analyzeRow(prev[0], { inputFields: [], labelFields: [], inputTemplate: null, labelTemplate: null });
-      if (!current.blank) {
-        return prev;
-      }
-      return [createEmptyRow(evaluationContract, prev[0].id)];
-    });
-  }, [evaluationContract]);
-
-  const updateRow = (id, field, value) => {
-    setRows((prev) => prev.map((row) => (row.id === id ? { ...row, [field]: value } : row)));
-  };
-
-  const addRow = () => {
-    setRows((prev) => [...prev, createEmptyRow(evaluationContract, `q-${Date.now()}`)]);
-  };
-
-  const insertGeneratedRows = () => {
-    if (!generatedRowsPreview.length) {
+    if (!selectedBundleId) {
       return;
     }
-    setRows((prev) => [
-      ...prev,
-      ...generatedRowsPreview.map((row, idx) => ({ ...row, id: `generated-${Date.now()}-${idx}` })),
-    ]);
-    setIsGeneratorOpen(false);
-    setGeneratedRowsPreview([]);
-    setGenerationError("");
-  };
-
-  const generateRowsPreview = async () => {
-    setGenerationError("");
-    setGeneratedRowsPreview([]);
-    if (!generatorLmProfileId) {
-      setGenerationError("Select an LM profile before generating rows.");
+    if (!bundleDatasets.length) {
+      setSelectedDatasetId("");
       return;
     }
-    if (!generatorPrompt.trim()) {
-      setGenerationError("Describe the data you need before generating rows.");
-      return;
+    const stillValid = bundleDatasets.some((item) => item.id === selectedDatasetId);
+    if (!stillValid) {
+      setSelectedDatasetId(bundleDatasets[0].id);
     }
-    setIsGeneratingRows(true);
-    try {
-      const response = await fetch(`${apiBase}/evaluation-plans/generate-rows`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          lm_profile_id: generatorLmProfileId,
-          module_import_id: selectedBundleId || null,
-          operator_prompt: generatorPrompt,
-          existing_rows: completeRows.map((item) => ({ input: item.input, label: item.label })),
-          max_rows: 10,
-        }),
-      });
-      if (!response.ok) {
-        throw new Error(await parseApiError(response, `Could not generate rows (${response.status})`));
-      }
-      const payload = await response.json();
-      const previewRows = Array.isArray(payload?.items)
-        ? payload.items.map((item, idx) => ({
-            id: `preview-${idx}`,
-            inputText: stringifyJson(coerceLegacyPayload(item?.input, evaluationContract.inputFields[0]?.key || "question")),
-            labelText: stringifyJson(coerceLegacyPayload(item?.label, evaluationContract.labelFields[0]?.key || "expected")),
-          })).filter((item) => analyzeRow(item, evaluationContract).valid)
-        : [];
-      if (!previewRows.length) {
-        throw new Error("Generated rows could not be previewed.");
-      }
-      setGeneratedRowsPreview(previewRows);
-    } catch (error) {
-      setGenerationError(error instanceof Error ? error.message : "Could not generate rows");
-    } finally {
-      setIsGeneratingRows(false);
-    }
-  };
-
-  const deleteRow = (id) => {
-    setRows((prev) => (prev.length > 1 ? prev.filter((row) => row.id !== id) : prev));
-  };
+  }, [bundleDatasets, selectedBundleId, selectedDatasetId]);
 
   const savePlan = async (runAfterSave) => {
     setValidationError("");
@@ -589,42 +389,37 @@ function PlanBuilder({ onBack, planId }) {
       setValidationError("Select a validated module bundle.");
       return;
     }
+    if (!selectedDatasetId) {
+      setValidationError("Select a dataset for this plan.");
+      return;
+    }
     if (!selectedLmProfileId) {
       setValidationError("Select an LM profile.");
-      return;
-    }
-    if (invalidRows.length) {
-      setValidationError(`Fix ${invalidRows.length} invalid dataset item${invalidRows.length === 1 ? "" : "s"} before saving.`);
-      return;
-    }
-    if (!completeRows.length) {
-      setValidationError("Add at least one dataset item and expected response.");
       return;
     }
 
     setIsSaving(true);
     try {
       let runPlanId = "";
-
-      const evalInputs = completeRows.map((row) => ({ input: row.input, label: row.label }));
+      const payload = {
+        project_id: PROJECT_ID,
+        scenario_id: SCENARIO_ID,
+        dataset_version: DATASET_VERSION,
+        name: name.trim(),
+        runs_per_question: runs,
+        max_workers: workers,
+        module_import_id: selectedBundleId,
+        dataset_id: selectedDatasetId,
+        lm_profile_id: selectedLmProfileId || null,
+      };
 
       const savedPlanResp = await fetch(isEditing ? `${apiBase}/evaluation-plans/${planId}` : `${apiBase}/evaluation-plans`, {
         method: isEditing ? "PATCH" : "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          project_id: PROJECT_ID,
-          scenario_id: SCENARIO_ID,
-          dataset_version: DATASET_VERSION,
-          eval_inputs: evalInputs,
-          name: name.trim(),
-          runs_per_question: runs,
-          max_workers: workers,
-          module_import_id: selectedBundleId,
-          lm_profile_id: selectedLmProfileId || null,
-        }),
+        body: JSON.stringify(payload),
       });
       if (!savedPlanResp.ok) {
-        throw new Error(`Could not save plan (${savedPlanResp.status})`);
+        throw new Error(await parseApiError(savedPlanResp, `Could not save plan (${savedPlanResp.status})`));
       }
       const savedPlan = await savedPlanResp.json();
 
@@ -669,7 +464,7 @@ function PlanBuilder({ onBack, planId }) {
       <header className="page-head row between plans-builder-head">
         <div className="col gap-1">
           <h1 className="t-h1">{isEditing ? "Edit plan" : "New evaluation plan"}</h1>
-          <p className="cap">Define dataset inputs and expected responses, then tune stress configuration.</p>
+          <p className="cap">Choose a bundle, dataset, and LM profile, then tune the execution settings.</p>
         </div>
         <div className="row gap-2">
           <Button onClick={onBack}>Cancel</Button>
@@ -680,18 +475,10 @@ function PlanBuilder({ onBack, planId }) {
 
       <div className="plans-builder-body">
         <div className="page-body plans-builder-main">
-          {loadError ? <ErrorState title="Could not load bundles" description={loadError} /> : null}
-          {isLoadingModules ? <LoadingState label="Loading module bundles..." /> : null}
+          {loadError ? <ErrorState title="Could not load plan builder data" description={loadError} /> : null}
+          {isLoadingModules || isLoadingDatasets ? <LoadingState label="Loading plan builder data..." /> : null}
           {isLoadingPlan ? <LoadingState label="Loading existing plan..." /> : null}
-          {validationError ? (
-            <div className="plans-validation-alert" role="alert" aria-live="polite">
-              <div className="row gap-2">
-                <Icon name="activity" size={14} />
-                <span className="plans-validation-title">Validation required</span>
-              </div>
-              <p className="plans-validation-copy">{validationError}</p>
-            </div>
-          ) : null}
+          {validationError ? <ErrorState title="Validation required" description={validationError} /> : null}
           {submitError ? <ErrorState title="Could not save plan" description={submitError} /> : null}
 
           <section className="panel card-pad plans-form-block">
@@ -723,6 +510,27 @@ function PlanBuilder({ onBack, planId }) {
 
           <section className="panel card-pad plans-form-block">
             <div className="row between" style={{ marginBottom: 10 }}>
+              <h2 className="t-h2">Dataset</h2>
+              <Link className="lnk cap" to={selectedBundleId ? `/datasets/new` : "/datasets"}>{selectedBundleId ? "Create dataset" : "Open datasets"}</Link>
+            </div>
+            {!selectedBundleId ? (
+              <EmptyState title="Select a bundle first" description="Choose a module bundle to see compatible datasets." />
+            ) : bundleDatasets.length ? (
+              <div className="col gap-2">
+                {bundleDatasets.map((dataset) => (
+                  <button key={dataset.id} className={`plans-bundle-option ${selectedDatasetId === dataset.id ? "plans-bundle-option-active" : ""}`} type="button" onClick={() => setSelectedDatasetId(dataset.id)}>
+                    <span className="t-sm" style={{ fontWeight: 600 }}>{dataset.name || "Untitled dataset"}</span>
+                    <span className="cap mono">{dataset.record_count || 0} items · {(dataset.input_keys || []).slice(0, 3).join(", ") || "input"} {"->"} {(dataset.label_keys || []).slice(0, 3).join(", ") || "expected"}</span>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <EmptyState title="No datasets for this bundle" description="Create a dataset scoped to this bundle, then come back to attach it to the plan." />
+            )}
+          </section>
+
+          <section className="panel card-pad plans-form-block">
+            <div className="row between" style={{ marginBottom: 10 }}>
               <h2 className="t-h2">LM profile</h2>
               <Link className="lnk cap" to="/lm-profiles">Manage profiles</Link>
             </div>
@@ -736,57 +544,6 @@ function PlanBuilder({ onBack, planId }) {
               </select>
             </label>
           </section>
-
-          <section className="panel card-pad plans-form-block">
-            <div className="row between" style={{ marginBottom: 10 }}>
-              <div className="row gap-2"><h2 className="t-h2">Dataset</h2><span className="plans-count">{completeRows.length}</span></div>
-              <div className="row gap-2">
-                 <Button
-                   size="sm"
-                   onClick={() => {
-                     const inputKey = evaluationContract.inputFields[0]?.key || "question";
-                     const labelKey = evaluationContract.labelFields[0]?.key || "expected";
-                     setRows(SAMPLE_ROWS.map((row, idx) => createRowFromPayloads(`sample-${idx}`, { [inputKey]: row.input }, { [labelKey]: row.expected })));
-                   }}
-                   disabled={!canLoadSampleSet}
-                 >
-                   Load sample set
-                 </Button>
-                 <Button size="sm" variant="primary" onClick={() => setIsGeneratorOpen(true)}>Generate with LLM</Button>
-                 <Button size="sm" onClick={addRow}>Add item</Button>
-               </div>
-             </div>
-             <div className="col gap-2">
-               <div className="panel" style={{ padding: 12 }}>
-                 <div className="t-label" style={{ marginBottom: 6 }}>Bundle eval schema</div>
-                 {evaluationContract.inputFields.length || evaluationContract.labelFields.length ? (
-                   <div className="col gap-1">
-                     <div className="muted t-sm">Input fields: {evaluationContract.inputFields.map((field) => field.key).join(", ") || "any JSON object"}</div>
-                     <div className="muted t-sm">Expected response fields: {evaluationContract.labelFields.map((field) => field.key).join(", ") || "any JSON object"}</div>
-                   </div>
-                 ) : (
-                   <p className="muted t-sm">This bundle does not declare an eval schema yet. Enter raw JSON objects that match the bundle signature and metric contract.</p>
-                 )}
-               </div>
-               <div className="plans-row-head">
-                 <span className="t-label">#</span>
-                 <span className="t-label">Input JSON</span>
-                 <span className="t-label">Expected response JSON</span>
-                 <span />
-               </div>
-               {analyzedRows.map(({ row, errors }, index) => (
-                  <div key={row.id} className="col gap-1">
-                    <div className="plans-row-edit">
-                      <span className="cap mono">{index + 1}</span>
-                      <textarea className="plans-textarea mono" rows={6} value={row.inputText} onChange={(event) => updateRow(row.id, "inputText", event.target.value)} placeholder={inputPlaceholder} />
-                      <textarea className="plans-textarea mono" rows={6} value={row.labelText} onChange={(event) => updateRow(row.id, "labelText", event.target.value)} placeholder={labelPlaceholder} />
-                      <Button size="sm" variant="danger" onClick={() => deleteRow(row.id)}>Delete</Button>
-                    </div>
-                    {errors.length ? <div className="muted t-sm">{errors.join(" ")}</div> : null}
-                  </div>
-               ))}
-             </div>
-           </section>
         </div>
 
         <aside className="plans-rail">
@@ -795,103 +552,21 @@ function PlanBuilder({ onBack, planId }) {
             <StepControl label="Runs per input" value={runs} min={1} setValue={setRuns} />
             <StepControl label="Max workers" value={workers} min={1} max={24} setValue={setWorkers} />
             <hr className="hr" />
-             <div className="panel card-pad col gap-2">
-              <div className="row between"><span className="muted">Dataset</span><span className="mono">{completeRows.length}</span></div>
+            <div className="panel card-pad col gap-2">
+              <div className="row between"><span className="muted">Bundle</span><span className="mono">{selectedBundle ? getBundleDisplayName(selectedBundle) : "none"}</span></div>
+              <div className="row between"><span className="muted">Dataset</span><span className="mono">{selectedDataset?.record_count || 0} items</span></div>
               <div className="row between"><span className="muted">x Runs per input</span><span className="mono">{runs}</span></div>
               <hr className="hr" />
               <div className="row between"><span>Total tasks</span><span className="mono">{totalTasks}</span></div>
             </div>
             <div className="plans-note row gap-2">
-              <Icon name="search" size={14} />
-              <span className="cap">Each task opens a run item with score, rationale, and trace context.</span>
+              <span className="cap">Datasets are now authored separately and reused across plans. Choose one compatible with the selected bundle.</span>
             </div>
           </div>
         </aside>
       </div>
-
-      {isGeneratorOpen ? (
-        <div className="bundles-modal-backdrop" onClick={() => setIsGeneratorOpen(false)}>
-          <div className="panel card-pad bundles-modal plans-generate-modal" onClick={(event) => event.stopPropagation()}>
-            <div className="row between" style={{ marginBottom: 10, alignItems: "flex-start" }}>
-              <div>
-                <h2 className="t-h2">Generate eval rows</h2>
-                <p className="muted t-sm">Describe the data you need, provide examples, preview the generated JSON rows, then insert them into this plan.</p>
-              </div>
-              <Button size="sm" variant="ghost" onClick={() => setIsGeneratorOpen(false)}>Close</Button>
-            </div>
-
-            <label className="col gap-1" style={{ marginBottom: 12 }}>
-              <span className="t-label">LM profile for generation</span>
-              <select className="bundles-input" value={generatorLmProfileId} onChange={(event) => setGeneratorLmProfileId(event.target.value)}>
-                <option value="">Select an LM profile...</option>
-                {lmProfiles.map((profile) => (
-                  <option key={profile.id} value={profile.id}>{profile.name || profile.id}</option>
-                ))}
-              </select>
-            </label>
-
-            <label className="col gap-1" style={{ marginBottom: 12 }}>
-              <span className="t-label">What data do you need?</span>
-              <textarea className="plans-textarea" rows={5} value={generatorPrompt} onChange={(event) => setGeneratorPrompt(event.target.value)} placeholder="Explain the kinds of inputs and expected responses you want generated." />
-            </label>
-
-            <div className="row gap-2" style={{ marginBottom: 12 }}>
-              <Button variant="primary" onClick={generateRowsPreview} disabled={isGeneratingRows}>{isGeneratingRows ? "Generating..." : "Generate preview"}</Button>
-              {generatedRowsPreview.length ? <Button onClick={insertGeneratedRows}>Approve + insert rows</Button> : null}
-            </div>
-
-            {generationError ? <div className="plans-validation-alert" role="alert"><p className="plans-validation-copy">{generationError}</p></div> : null}
-
-            {generatedRowsPreview.length ? (
-              <div className="col gap-2 plans-generated-preview-wrap">
-                <div className="t-h2">Preview</div>
-                <div className="plans-row-head">
-                  <span className="t-label">#</span>
-                  <span className="t-label">Input JSON</span>
-                  <span className="t-label">Expected response JSON</span>
-                </div>
-                <div className="plans-generated-preview-scroll">
-                  {generatedRowsPreview.map((row, index) => (
-                    <div key={row.id} className="plans-row-edit">
-                      <span className="cap mono">{index + 1}</span>
-                      <textarea className="plans-textarea mono" rows={6} value={row.inputText} readOnly />
-                      <textarea className="plans-textarea mono" rows={6} value={row.labelText} readOnly />
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : null}
-          </div>
-        </div>
-      ) : null}
     </section>
   );
-}
-
-async function parseApiError(response, fallback) {
-  try {
-    const body = await response.json();
-    if (body?.error) {
-      return `${fallback}: ${body.error}`;
-    }
-  } catch {
-    return fallback;
-  }
-  return fallback;
-}
-
-function formatCreatedAt(value) {
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) {
-    return "unknown";
-  }
-  return parsed.toLocaleString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
 }
 
 function StepControl({ label, value, setValue, min, max }) {

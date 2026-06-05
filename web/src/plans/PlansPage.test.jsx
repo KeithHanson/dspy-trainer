@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { vi } from "vitest";
@@ -14,7 +14,8 @@ describe("PlansPage", () => {
             {
               id: "plan-1",
               name: "Refund regression",
-              eval_inputs: [{}, {}],
+              dataset_id: "dataset-1",
+              dataset_name: "Support dataset",
               runs_per_question: 3,
               max_workers: 4,
             },
@@ -35,7 +36,8 @@ describe("PlansPage", () => {
     );
 
     expect(await screen.findByText("Refund regression")).toBeInTheDocument();
-    expect(screen.getByText("2 items x 3 runs = 6 tasks · 4 workers")).toBeInTheDocument();
+    expect(screen.getByText("Dataset: Support dataset")).toBeInTheDocument();
+    expect(screen.getByText("3 runs per input · 4 workers")).toBeInTheDocument();
   });
 
   it("saves and runs a plan from builder", async () => {
@@ -44,19 +46,15 @@ describe("PlansPage", () => {
         return Promise.resolve({
           ok: true,
           json: vi.fn().mockResolvedValue([
-            {
-              id: "mod-1",
-              bundle_name: "policy-bot",
-              bundle_version: "1.0.0",
-              validation_status: "passed",
-              source_ref: "/tmp/checkouts/policy-bot",
-              evaluation_contract: {
-                input_fields: [{ key: "zebra", label: "Zebra", required: true, multiline: true }],
-                label_fields: [{ key: "expected", label: "Expected response", required: true, multiline: true }],
-                input_template: { zebra: "" },
-                label_template: { expected: "" },
-              },
-            },
+            { id: "mod-1", bundle_name: "policy-bot", bundle_version: "1.0.0", validation_status: "passed", source_ref: "/tmp/checkouts/policy-bot" },
+          ]),
+        });
+      }
+      if (String(url).endsWith("/evaluation-datasets") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([
+            { id: "dataset-1", name: "Support dataset", module_import_id: "mod-1", record_count: 2, input_keys: ["ticket"], label_keys: ["expected"] },
           ]),
         });
       }
@@ -72,9 +70,6 @@ describe("PlansPage", () => {
       if (String(url).endsWith("/agent-run-plans/run-plan-1/enqueue") && init?.method === "POST") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ status: "queued" }) });
       }
-      if (String(url).endsWith("/evaluation-plans") && init?.method === "GET") {
-        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
-      }
       return Promise.reject(new Error(`Unexpected URL ${url}`));
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -87,20 +82,18 @@ describe("PlansPage", () => {
 
     await userEvent.type(await screen.findByLabelText("Plan name"), "Triage v4");
     await userEvent.selectOptions(screen.getByLabelText("Runtime model profile"), "lm-1");
-    const zebraInput = screen.getByDisplayValue(/"zebra": ""/);
-    const expectedInput = screen.getByDisplayValue(/"expected": ""/);
-    fireEvent.change(zebraInput, { target: { value: '{"zebra":"What is the refund policy?"}' } });
-    fireEvent.change(expectedInput, { target: { value: '{"expected":"Provide refund window details"}' } });
     await userEvent.click(screen.getByRole("button", { name: "Save & run" }));
 
-    expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/evaluation-plans$/), expect.objectContaining({ method: "POST" }));
+    const evalPlanSave = fetchMock.mock.calls.find(([url, request]) => String(url).endsWith("/evaluation-plans") && request?.method === "POST");
+    expect(evalPlanSave).toBeTruthy();
+    expect(JSON.parse(evalPlanSave[1].body)).toMatchObject({
+      lm_profile_id: "lm-1",
+      module_import_id: "mod-1",
+      dataset_id: "dataset-1",
+    });
+
     expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/agent-run-plans$/), expect.objectContaining({ method: "POST" }));
     expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/agent-run-plans\/run-plan-1\/enqueue$/), expect.objectContaining({ method: "POST" }));
-
-    const evalPlanSave = fetchMock.mock.calls.find(([url, init]) => String(url).endsWith("/evaluation-plans") && init?.method === "POST");
-    expect(evalPlanSave).toBeTruthy();
-    expect(JSON.parse(evalPlanSave[1].body).lm_profile_id).toBe("lm-1");
-    expect(JSON.parse(evalPlanSave[1].body).eval_inputs).toEqual([{ input: { zebra: "What is the refund policy?" }, label: { expected: "Provide refund window details" } }]);
   });
 
   it("shows edit and delete actions and deletes a plan", async () => {
@@ -109,13 +102,7 @@ describe("PlansPage", () => {
         return Promise.resolve({
           ok: true,
           json: vi.fn().mockResolvedValue([
-            {
-              id: "plan-1",
-              name: "Refund regression",
-              eval_inputs: [{}, {}],
-              runs_per_question: 3,
-              max_workers: 4,
-            },
+            { id: "plan-1", name: "Refund regression", dataset_id: "dataset-1", dataset_name: "Support dataset", runs_per_question: 3, max_workers: 4 },
           ]),
         });
       }
@@ -136,9 +123,7 @@ describe("PlansPage", () => {
     );
 
     await screen.findByText("Refund regression");
-    expect(screen.getByRole("button", { name: "Edit" })).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Delete" }));
-
     expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/evaluation-plans\/plan-1$/), expect.objectContaining({ method: "DELETE" }));
   });
 
@@ -148,19 +133,15 @@ describe("PlansPage", () => {
         return Promise.resolve({
           ok: true,
           json: vi.fn().mockResolvedValue([
-            {
-              id: "mod-1",
-              bundle_name: "policy-bot",
-              bundle_version: "1.0.0",
-              validation_status: "passed",
-              source_ref: "/tmp/checkouts/policy-bot",
-              evaluation_contract: {
-                input_fields: [{ key: "question", label: "Question", required: true, multiline: true }],
-                label_fields: [{ key: "expected", label: "Expected response", required: true, multiline: true }],
-                input_template: { question: "" },
-                label_template: { expected: "" },
-              },
-            },
+            { id: "mod-1", bundle_name: "policy-bot", bundle_version: "1.0.0", validation_status: "passed", source_ref: "/tmp/checkouts/policy-bot" },
+          ]),
+        });
+      }
+      if (String(url).endsWith("/evaluation-datasets") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([
+            { id: "dataset-1", name: "Support dataset", module_import_id: "mod-1", record_count: 2, input_keys: ["ticket"], label_keys: ["expected"] },
           ]),
         });
       }
@@ -178,14 +159,9 @@ describe("PlansPage", () => {
     );
 
     await userEvent.type(await screen.findByLabelText("Plan name"), "No LM Profile");
-    const questionInput = screen.getByDisplayValue(/"question": ""/);
-    const expectedInput = screen.getByDisplayValue(/"expected": ""/);
-    fireEvent.change(questionInput, { target: { value: '{"question":"Question?"}' } });
-    fireEvent.change(expectedInput, { target: { value: '{"expected":"Answer"}' } });
     await userEvent.click(screen.getByRole("button", { name: "Save" }));
 
     expect(await screen.findByText("Select an LM profile.")).toBeInTheDocument();
-    expect(fetchMock).not.toHaveBeenCalledWith(expect.stringMatching(/\/evaluation-plans$/), expect.objectContaining({ method: "POST" }));
   });
 
   it("updates existing plan when editing", async () => {
@@ -194,19 +170,16 @@ describe("PlansPage", () => {
         return Promise.resolve({
           ok: true,
           json: vi.fn().mockResolvedValue([
-            {
-              id: "mod-1",
-              bundle_name: "policy-bot",
-              bundle_version: "1.0.0",
-              validation_status: "passed",
-              source_ref: "/tmp/checkouts/policy-bot",
-              evaluation_contract: {
-                input_fields: [{ key: "question", label: "Question", required: true, multiline: true }],
-                label_fields: [{ key: "expected", label: "Expected response", required: true, multiline: true }],
-                input_template: { question: "" },
-                label_template: { expected: "" },
-              },
-            },
+            { id: "mod-1", bundle_name: "policy-bot", bundle_version: "1.0.0", validation_status: "passed", source_ref: "/tmp/checkouts/policy-bot" },
+          ]),
+        });
+      }
+      if (String(url).endsWith("/evaluation-datasets") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([
+            { id: "dataset-1", name: "Support dataset", module_import_id: "mod-1", record_count: 2, input_keys: ["ticket"], label_keys: ["expected"] },
+            { id: "dataset-2", name: "Support dataset v2", module_import_id: "mod-1", record_count: 3, input_keys: ["ticket"], label_keys: ["expected"] },
           ]),
         });
       }
@@ -222,8 +195,8 @@ describe("PlansPage", () => {
             runs_per_question: 1,
             max_workers: 1,
             module_import_id: "mod-1",
+            dataset_id: "dataset-1",
             lm_profile_id: "lm-1",
-            eval_inputs: [{ input: { question: "q1" }, label: { expected: "a1" } }],
           }),
         });
       }
@@ -241,51 +214,37 @@ describe("PlansPage", () => {
     );
 
     await screen.findByDisplayValue("Existing");
-    expect(screen.getByDisplayValue(/"question": "q1"/)).toBeInTheDocument();
+    expect(screen.getByText("Support dataset")).toBeInTheDocument();
+    await userEvent.click(screen.getByText("Support dataset v2"));
     await userEvent.click(screen.getByRole("button", { name: "Save" }));
 
-    expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/evaluation-plans\/plan-1$/), expect.objectContaining({ method: "PATCH" }));
+    const patchCall = fetchMock.mock.calls.find(([url, request]) => String(url).endsWith("/evaluation-plans/plan-1") && request?.method === "PATCH");
+    expect(patchCall).toBeTruthy();
+    expect(JSON.parse(patchCall[1].body).dataset_id).toBe("dataset-2");
   });
 
-  it("generates eval rows via LLM preview and inserts them on approval", async () => {
+  it("filters datasets to the selected bundle", async () => {
     const fetchMock = vi.fn((url, init) => {
       if (String(url).endsWith("/modules") && init?.method === "GET") {
         return Promise.resolve({
           ok: true,
           json: vi.fn().mockResolvedValue([
-            {
-              id: "mod-1",
-              bundle_name: "policy-bot",
-              bundle_version: "1.0.0",
-              validation_status: "passed",
-              source_ref: "/tmp/checkouts/policy-bot",
-              evaluation_contract: {
-                input_fields: [{ key: "zebra", label: "Zebra", required: true, multiline: true }],
-                label_fields: [{ key: "expected", label: "Expected response", required: true, multiline: true }],
-                input_template: { zebra: "" },
-                label_template: { expected: "" },
-              },
-            },
+            { id: "mod-1", bundle_name: "policy-bot", bundle_version: "1.0.0", validation_status: "passed", source_ref: "/tmp/checkouts/policy-bot" },
+            { id: "mod-2", bundle_name: "other-bot", bundle_version: "1.2.0", validation_status: "passed", source_ref: "/tmp/checkouts/other-bot" },
+          ]),
+        });
+      }
+      if (String(url).endsWith("/evaluation-datasets") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([
+            { id: "dataset-1", name: "Support dataset", module_import_id: "mod-1", record_count: 2, input_keys: ["ticket"], label_keys: ["expected"] },
+            { id: "dataset-2", name: "Other dataset", module_import_id: "mod-2", record_count: 1, input_keys: ["prompt"], label_keys: ["expected"] },
           ]),
         });
       }
       if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "lm-1", name: "GPT-4o" }]) });
-      }
-      if (String(url).endsWith("/evaluation-plans/generate-rows") && init?.method === "POST") {
-        return Promise.resolve({
-          ok: true,
-          json: vi.fn().mockResolvedValue({
-            items: [
-              { input: { zebra: "How long do refunds take?" }, label: { expected: "Explain the standard refund timeline." } },
-              { input: { zebra: "What if an item arrives damaged?" }, label: { expected: "Explain the damaged-item refund flow." } },
-            ],
-            attempts: 1,
-          }),
-        });
-      }
-      if (String(url).endsWith("/evaluation-plans") && init?.method === "GET") {
-        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
       }
       return Promise.reject(new Error(`Unexpected URL ${url}`));
     });
@@ -297,22 +256,10 @@ describe("PlansPage", () => {
       </MemoryRouter>,
     );
 
-    await userEvent.selectOptions(await screen.findByLabelText("Runtime model profile"), "lm-1");
-    await userEvent.click(screen.getByRole("button", { name: "Generate with LLM" }));
-    await userEvent.selectOptions(screen.getByLabelText("LM profile for generation"), "lm-1");
-    await userEvent.type(screen.getByLabelText("What data do you need?"), "Generate refund cases");
-    await userEvent.click(screen.getByRole("button", { name: "Generate preview" }));
-
-    expect(await screen.findByDisplayValue(/"zebra": "How long do refunds take\?"/)).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Approve + insert rows" }));
-
-    expect(await screen.findByDisplayValue(/"zebra": "How long do refunds take\?"/)).toBeInTheDocument();
-    expect(await screen.findByDisplayValue(/"expected": "Explain the standard refund timeline\."/)).toBeInTheDocument();
-    expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/evaluation-plans\/generate-rows$/), expect.objectContaining({ method: "POST" }));
-
-    const generateCall = fetchMock.mock.calls.find(([url, init]) => String(url).endsWith("/evaluation-plans/generate-rows") && init?.method === "POST");
-    expect(JSON.parse(generateCall[1].body).module_import_id).toBe("mod-1");
-
-    vi.unstubAllGlobals();
+    expect(await screen.findByText("Support dataset")).toBeInTheDocument();
+    expect(screen.queryByText("Other dataset")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByText("other-bot"));
+    expect(await screen.findByText("Other dataset")).toBeInTheDocument();
+    expect(screen.queryByText("Support dataset")).not.toBeInTheDocument();
   });
 });
