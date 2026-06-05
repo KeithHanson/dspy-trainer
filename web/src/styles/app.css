@@ -147,14 +147,18 @@ button { font-family: inherit; }
 .datasets-row-icon { margin-top: 2px; }
 .datasets-row-meta { gap: 4px; }
 .datasets-row-top { width: 100%; align-items: flex-start; }
-.datasets-editor-body { background: var(--bg); }
+.datasets-editor-page { background: var(--bg); height: 100%; overflow-y: auto; }
+.datasets-editor-page-items { display: flex; flex-direction: column; gap: 14px; }
 .datasets-editor-main { max-width: 420px; }
-.datasets-editor-main-full { max-width: none; flex: 1; }
+.datasets-editor-main-full { max-width: 980px; width: 100%; }
 .datasets-tabs { margin-bottom: 14px; }
 .datasets-tab-panel { width: 100%; }
-.datasets-details-panel {
-  width: 100%;
-  max-width: 980px;
+.datasets-details-panel { width: 100%; }
+.datasets-items-layout {
+  display: grid;
+  grid-template-columns: 310px minmax(0, 1fr);
+  gap: 22px;
+  align-items: start;
 }
 .datasets-tab {
   height: 32px;
@@ -170,11 +174,11 @@ button { font-family: inherit; }
   color: var(--text);
 }
 .datasets-items-rail {
-  width: 310px;
-  flex: none;
-  border-left: 1px solid var(--border-soft);
+  width: 100%;
   background: var(--bg-deep);
-  padding: 22px 18px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-lg);
+  padding: 18px;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -207,7 +211,13 @@ button { font-family: inherit; }
   padding: 12px;
 }
 .datasets-add-card:hover { border-color: var(--accent-line); color: var(--text); background: var(--panel); }
-.datasets-editor-rail { width: min(520px, 100%); }
+.datasets-editor-panel {
+  width: 100%;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-lg);
+  background: var(--panel);
+  padding: 18px;
+}
 .datasets-editor-item-head { align-items: flex-start; }
 .datasets-schema-card { background: var(--panel-2); }
 .datasets-editor-textarea { min-height: 180px; }
@@ -893,9 +903,8 @@ button { font-family: inherit; }
   .dashboard-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .dashboard-two-up { grid-template-columns: 1fr; }
   .plans-builder-body { flex-direction: column; }
-  .datasets-items-rail { width: 100%; border-left: 0; border-top: 1px solid var(--border-soft); }
+  .datasets-items-layout { grid-template-columns: 1fr; }
   .datasets-editor-main { max-width: none; }
-  .datasets-editor-rail { width: 100%; }
   .plans-rail { width: 100%; border-left: 0; border-top: 1px solid var(--border-soft); }
   .plans-row-edit { grid-template-columns: 24px 1fr; }
   .plans-row-head { grid-template-columns: 24px 1fr; }

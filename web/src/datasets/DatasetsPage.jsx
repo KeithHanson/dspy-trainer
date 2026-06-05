@@ -509,20 +509,20 @@ export function DatasetEditorPage() {
         </div>
       </header>
 
-      <div className="plans-builder-body datasets-editor-body">
-        <div className={`page-body plans-builder-main datasets-editor-main ${activeTab === "details" ? "datasets-editor-main-full" : ""}`}>
-          {error ? <ErrorState title="Dataset error" description={error} /> : null}
-          {validationError ? <ErrorState title="Validation required" description={validationError} /> : null}
-          {isLoadingModules ? <LoadingState label="Loading bundles..." /> : null}
-          {isLoadingDataset ? <LoadingState label="Loading dataset..." /> : null}
+      <div className={`page-body datasets-editor-page ${activeTab === "items" ? "datasets-editor-page-items" : ""}`}>
+        {error ? <ErrorState title="Dataset error" description={error} /> : null}
+        {validationError ? <ErrorState title="Validation required" description={validationError} /> : null}
+        {isLoadingModules ? <LoadingState label="Loading bundles..." /> : null}
+        {isLoadingDataset ? <LoadingState label="Loading dataset..." /> : null}
 
-          <div className="row gap-2 datasets-tabs" role="tablist" aria-label="Dataset editor tabs">
-            <button type="button" role="tab" aria-selected={activeTab === "details"} className={`datasets-tab ${activeTab === "details" ? "datasets-tab-active" : ""}`} onClick={() => setActiveTab("details")}>Details</button>
-            <button type="button" role="tab" aria-selected={activeTab === "items"} className={`datasets-tab ${activeTab === "items" ? "datasets-tab-active" : ""}`} onClick={() => setActiveTab("items")}>Items</button>
-          </div>
+        <div className="row gap-2 datasets-tabs" role="tablist" aria-label="Dataset editor tabs">
+          <button type="button" role="tab" aria-selected={activeTab === "details"} className={`datasets-tab ${activeTab === "details" ? "datasets-tab-active" : ""}`} onClick={() => setActiveTab("details")}>Details</button>
+          <button type="button" role="tab" aria-selected={activeTab === "items"} className={`datasets-tab ${activeTab === "items" ? "datasets-tab-active" : ""}`} onClick={() => setActiveTab("items")}>Items</button>
+        </div>
 
-          {activeTab === "details" ? (
-            <div className="datasets-tab-panel datasets-details-panel">
+        {activeTab === "details" ? (
+          <div className="datasets-details-panel">
+            <div className="datasets-editor-main datasets-editor-main-full">
               <section className="panel card-pad plans-form-block">
                 <label className="t-label plans-input-label" htmlFor="dataset-name">Dataset name</label>
                 <input id="dataset-name" className="bundles-input" value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Support triage regression set" />
@@ -552,11 +552,11 @@ export function DatasetEditorPage() {
                 )}
               </section>
             </div>
-          ) : null}
-        </div>
+          </div>
+        ) : null}
 
         {activeTab === "items" ? (
-          <>
+          <div className="datasets-items-layout">
             <aside className="datasets-items-rail datasets-tab-panel">
               <div className="row between datasets-items-rail-head">
                 <div className="row gap-2"><span className="t-label">Items</span><span className="plans-count">{items.length}</span></div>
@@ -578,7 +578,7 @@ export function DatasetEditorPage() {
               <button type="button" className="datasets-add-card" onClick={addItem}>+ Add item</button>
             </aside>
 
-            <aside className="plans-rail datasets-editor-rail datasets-tab-panel">
+            <section className="datasets-editor-panel datasets-tab-panel">
               {selectedAnalysis ? (
                 <div className="col gap-3">
                   <div className="row between datasets-editor-item-head">
@@ -620,8 +620,8 @@ export function DatasetEditorPage() {
                   )}
                 </div>
               ) : null}
-            </aside>
-          </>
+            </section>
+          </div>
         ) : null}
       </div>
     </section>
