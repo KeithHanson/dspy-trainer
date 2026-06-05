@@ -39,6 +39,25 @@ describe("AppShell", () => {
     vi.unstubAllGlobals();
   });
 
+  it("renders datasets above evaluation plans in nav", () => {
+    stubActivityFetch([]);
+    render(
+      <MemoryRouter initialEntries={["/dashboard"]}>
+        <AppShell>
+          <div>content</div>
+        </AppShell>
+      </MemoryRouter>,
+    );
+
+    const links = screen.getAllByRole("link");
+    const datasetsIndex = links.findIndex((link) => link.textContent?.includes("Datasets"));
+    const plansIndex = links.findIndex((link) => link.textContent?.includes("Evaluation Plans"));
+    expect(datasetsIndex).toBeGreaterThan(-1);
+    expect(plansIndex).toBeGreaterThan(-1);
+    expect(datasetsIndex).toBeLessThan(plansIndex);
+    vi.unstubAllGlobals();
+  });
+
   it("highlights optimization nav item", () => {
     stubActivityFetch([]);
     render(

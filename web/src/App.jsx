@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { AppShell } from "./layout/AppShell";
 import { DashboardPage } from "./dashboard/DashboardPage";
 import { BundlesPage } from "./bundles/BundlesPage";
+import { DatasetEditorPage, DatasetsPage } from "./datasets/DatasetsPage";
 import { PlansPage } from "./plans/PlansPage";
 import { RunsPage } from "./runs/RunsPage";
 import { LmProfileEditorPage, LmProfilesPage } from "./lmProfiles/LmProfilesPage";
@@ -15,6 +16,9 @@ export function App() {
         <Route path="/" element={<Navigate to="/dashboard" replace />} />
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/bundles" element={<BundlesPage />} />
+        <Route path="/datasets" element={<DatasetsPage />} />
+        <Route path="/datasets/new" element={<DatasetEditorPage />} />
+        <Route path="/datasets/:datasetId/edit" element={<DatasetEditorPage />} />
         <Route path="/plans" element={<PlansPage />} />
         <Route path="/optimization/jobs" element={<OptimizationJobsPage />} />
         <Route path="/optimization" element={<OptimizationLaunchPage />} />

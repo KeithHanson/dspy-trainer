@@ -9,6 +9,9 @@ describe("App", () => {
       if (String(url).includes("/agent-run-plans?limit=50&offset=0")) {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
       }
+      if (String(url).includes("/optimization/jobs?limit=50&offset=0")) {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
+      }
       return Promise.reject(new Error(`Unexpected URL ${url}`));
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -20,6 +23,7 @@ describe("App", () => {
     );
 
     expect(await screen.findByRole("link", { name: "Overview" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Datasets" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "MLFlow" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "LiteLLM Proxy" })).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Settings" })).not.toBeInTheDocument();
