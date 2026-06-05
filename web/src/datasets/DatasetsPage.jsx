@@ -510,7 +510,7 @@ export function DatasetEditorPage() {
       </header>
 
       <div className="plans-builder-body datasets-editor-body">
-        <div className="page-body plans-builder-main datasets-editor-main">
+        <div className={`page-body plans-builder-main datasets-editor-main ${activeTab === "details" ? "datasets-editor-main-full" : ""}`}>
           {error ? <ErrorState title="Dataset error" description={error} /> : null}
           {validationError ? <ErrorState title="Validation required" description={validationError} /> : null}
           {isLoadingModules ? <LoadingState label="Loading bundles..." /> : null}
@@ -522,7 +522,7 @@ export function DatasetEditorPage() {
           </div>
 
           {activeTab === "details" ? (
-            <>
+            <div className="datasets-tab-panel datasets-details-panel">
               <section className="panel card-pad plans-form-block">
                 <label className="t-label plans-input-label" htmlFor="dataset-name">Dataset name</label>
                 <input id="dataset-name" className="bundles-input" value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Support triage regression set" />
@@ -551,13 +551,13 @@ export function DatasetEditorPage() {
                   </div>
                 )}
               </section>
-            </>
+            </div>
           ) : null}
         </div>
 
         {activeTab === "items" ? (
           <>
-            <aside className="datasets-items-rail">
+            <aside className="datasets-items-rail datasets-tab-panel">
               <div className="row between datasets-items-rail-head">
                 <div className="row gap-2"><span className="t-label">Items</span><span className="plans-count">{items.length}</span></div>
                 <Button size="sm" onClick={addItem}>Add item</Button>
@@ -578,7 +578,7 @@ export function DatasetEditorPage() {
               <button type="button" className="datasets-add-card" onClick={addItem}>+ Add item</button>
             </aside>
 
-            <aside className="plans-rail datasets-editor-rail">
+            <aside className="plans-rail datasets-editor-rail datasets-tab-panel">
               {selectedAnalysis ? (
                 <div className="col gap-3">
                   <div className="row between datasets-editor-item-head">

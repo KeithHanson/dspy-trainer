@@ -149,7 +149,13 @@ button { font-family: inherit; }
 .datasets-row-top { width: 100%; align-items: flex-start; }
 .datasets-editor-body { background: var(--bg); }
 .datasets-editor-main { max-width: 420px; }
+.datasets-editor-main-full { max-width: none; flex: 1; }
 .datasets-tabs { margin-bottom: 14px; }
+.datasets-tab-panel { width: 100%; }
+.datasets-details-panel {
+  width: 100%;
+  max-width: 980px;
+}
 .datasets-tab {
   height: 32px;
   padding: 0 12px;
