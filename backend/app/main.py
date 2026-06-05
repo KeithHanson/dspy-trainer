@@ -718,6 +718,25 @@ async def list_evaluation_datasets(request: Request):
     return await services.list_evaluation_datasets()
 
 
+@app.post("/evaluation-datasets/generate-rows")
+async def generate_evaluation_dataset_rows(request: Request, payload: EvaluationPlanGenerateRowsRequest):
+    services: AppServices = request.app.state.services
+    try:
+        return await services.generate_evaluation_rows(
+            lm_profile_id=payload.lm_profile_id,
+            module_import_id=payload.module_import_id,
+            operator_prompt=payload.operator_prompt,
+            existing_rows=payload.existing_rows,
+            max_rows=payload.max_rows,
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    except RuntimeError as exc:
+        return JSONResponse(status_code=502, content={"error": str(exc)})
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"error": f"unexpected generation failure: {exc}"})
+
+
 @app.get("/evaluation-datasets/{dataset_id}")
 async def get_evaluation_dataset(dataset_id: str, request: Request):
     services: AppServices = request.app.state.services
@@ -861,25 +880,6 @@ async def create_evaluation_plan(request: Request, payload: EvaluationPlanCreate
     except ValueError as exc:
         return JSONResponse(status_code=404, content={"error": str(exc)})
     return result
-
-
-@app.post("/evaluation-datasets/generate-rows")
-async def generate_evaluation_dataset_rows(request: Request, payload: EvaluationPlanGenerateRowsRequest):
-    services: AppServices = request.app.state.services
-    try:
-        return await services.generate_evaluation_rows(
-            lm_profile_id=payload.lm_profile_id,
-            module_import_id=payload.module_import_id,
-            operator_prompt=payload.operator_prompt,
-            existing_rows=payload.existing_rows,
-            max_rows=payload.max_rows,
-        )
-    except ValueError as exc:
-        return JSONResponse(status_code=400, content={"error": str(exc)})
-    except RuntimeError as exc:
-        return JSONResponse(status_code=502, content={"error": str(exc)})
-    except Exception as exc:
-        return JSONResponse(status_code=500, content={"error": f"unexpected generation failure: {exc}"})
 
 
 @app.post("/lm-profiles")
