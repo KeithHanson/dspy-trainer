@@ -1,9 +1,7 @@
-- Backend favors a single broad orchestration class: search `backend/app/services.py::AppServices` first before inventing new abstractions.
-- FastAPI handlers in `backend/app/main.py` are thin request/response wrappers around `AppServices` plus Pydantic request models.
-- Backend payloads lean on JSON-heavy dict/list structures for eval inputs, labels, predictions, diagnostics, and dataset records.
-- Bundle validation is AST + TOML metadata based, not import-execution based; keep validator changes aligned with UI guidance and sample bundles.
-- Frontend is page-centric: function components, page-local state, direct `fetch` calls, light `useMemo` for stable API base URLs; no central API client yet.
-- Route/page naming mirrors product nouns directly (`BundlesPage`, `PlansPage`, `RunsPage`, `OptimizationLaunchPage`, `LmProfilesPage`).
-- Shared frontend UX primitives cover loading/empty/error states; preserve those patterns instead of custom per-page variants.
-- Auth is mandatory in the web shell; unauthenticated users are routed through Auth0-backed flows.
-- Tests are expected for new functionality: backend route/service coverage, frontend page-flow coverage.
+- Backend change pattern: extend `backend/app/services.py::AppServices` first; keep FastAPI handlers in `backend/app/main.py` as thin request/response wrappers over service methods.
+- Backend payloads are intentionally JSON-heavy for eval rows, dataset records, task results, optimizer artifacts, and diagnostics; avoid over-abstracting them without a concrete need.
+- Bundle validation is static AST + TOML metadata based; execution happens in `backend/app/executor/module_runner.py`. Keep validator/runtime expectations aligned with sample bundle and UI copy.
+- Frontend is page-centric: route/page components fetch directly, own local state, and use shared loading/empty/error primitives instead of a central API client.
+- Product naming maps directly to domain nouns: bundles, datasets, evaluation plans, agent run plans/tasks, optimization jobs, LM profiles, LiteLLM keys.
+- Recent repo direction is dataset-first evaluation planning; when changing plan/run flows, expect coupled backend + frontend updates and review docs/README for stale workflow text.
+- Tests are expected for new functionality in the layer you touch.

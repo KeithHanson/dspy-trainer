@@ -10,7 +10,6 @@ This section MUST remain up to date after you complete a task.
 - `.beads/`: Local beads issue database, hooks, and interaction history.
 - `README.md`: Project overview and high-level goals.
 - `.env.sample`: Source of truth for required environment variables.
-- `docs/NAIVE_PLAN.md`: Product and architecture planning baseline.
 
 ## Using Serena tools and Exploring the code base
 

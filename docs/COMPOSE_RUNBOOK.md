@@ -4,7 +4,10 @@ This runbook documents developer bootstrap and day-2 operations for the current 
 
 References:
 - `AGENTS.md`
-- `docs/INFORMED_PLAN.md`
+
+Current shell note:
+- The local web shell is currently unauthenticated.
+- No Auth0, hosted login, or SSO bootstrap is required to access `http://localhost:3000`.
 
 ## Stack Services
 

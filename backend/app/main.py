@@ -863,8 +863,8 @@ async def create_evaluation_plan(request: Request, payload: EvaluationPlanCreate
     return result
 
 
-@app.post("/evaluation-plans/generate-rows")
-async def generate_evaluation_plan_rows(request: Request, payload: EvaluationPlanGenerateRowsRequest):
+@app.post("/evaluation-datasets/generate-rows")
+async def generate_evaluation_dataset_rows(request: Request, payload: EvaluationPlanGenerateRowsRequest):
     services: AppServices = request.app.state.services
     try:
         return await services.generate_evaluation_rows(

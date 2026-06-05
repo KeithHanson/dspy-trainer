@@ -7,4 +7,4 @@ dspy_version = ">=2.5,<3.0"
 fields = [{ key = "question", label = "Question", required = true, multiline = true }]
 
 [evaluation.label]
-fields = [{ key = "expected", label = "Expected response", required = true, multiline = true }]
+fields = [{ key = "judge_instructions", label = "Judge instructions", required = true, multiline = true }]

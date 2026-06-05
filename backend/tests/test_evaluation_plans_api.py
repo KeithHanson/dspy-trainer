@@ -222,12 +222,12 @@ def test_update_evaluation_plan(monkeypatch):
         assert updated.json()["dataset_id"] == "dataset-2"
 
 
-def test_generate_evaluation_plan_rows(monkeypatch):
+def test_generate_evaluation_dataset_rows(monkeypatch):
     _reset_state()
     _patch_services(monkeypatch)
     with TestClient(main_mod.app) as client:
         response = client.post(
-            "/evaluation-plans/generate-rows",
+            "/evaluation-datasets/generate-rows",
             json={
                 "lm_profile_id": "lm-1",
                 "module_import_id": "mod-1",
@@ -242,13 +242,13 @@ def test_generate_evaluation_plan_rows(monkeypatch):
         assert len(payload["items"]) == 2
 
 
-def test_generate_evaluation_plan_rows_handles_unexpected_error(monkeypatch):
+def test_generate_evaluation_dataset_rows_handles_unexpected_error(monkeypatch):
     _reset_state()
     _patch_services(monkeypatch)
     monkeypatch.setattr(main_mod.AppServices, "generate_evaluation_rows", fake_generate_evaluation_rows_crash)
     with TestClient(main_mod.app) as client:
         response = client.post(
-            "/evaluation-plans/generate-rows",
+            "/evaluation-datasets/generate-rows",
             json={
                 "lm_profile_id": "lm-1",
                 "module_import_id": "mod-1",

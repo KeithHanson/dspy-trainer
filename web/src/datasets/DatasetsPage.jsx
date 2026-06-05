@@ -44,6 +44,10 @@ function stringifyJson(value) {
   return JSON.stringify(value, null, 2);
 }
 
+function parseApiErrorMessage(body) {
+  return typeof body?.error === "string" && body.error ? body.error : "";
+}
+
 function buildTemplatePayload(fields, fallbackTemplate) {
   if (fallbackTemplate && typeof fallbackTemplate === "object" && !Array.isArray(fallbackTemplate) && Object.keys(fallbackTemplate).length) {
     return fallbackTemplate;
@@ -114,7 +118,7 @@ function validatePayloadAgainstContract(payload, fields, sideLabel) {
 
 function analyzeItem(item, contract) {
   const inputParsed = parseJsonObject(item.inputText, "Input JSON");
-  const labelParsed = parseJsonObject(item.labelText, "Expected response JSON");
+  const labelParsed = parseJsonObject(item.labelText, "Label JSON");
   const errors = [];
   if (inputParsed.error) {
     errors.push(inputParsed.error);
@@ -129,7 +133,7 @@ function analyzeItem(item, contract) {
     }
   }
   if (!labelParsed.error) {
-    const contractError = validatePayloadAgainstContract(labelParsed.value, contract.labelFields, "Expected response JSON");
+    const contractError = validatePayloadAgainstContract(labelParsed.value, contract.labelFields, "Label JSON");
     if (contractError) {
       errors.push(contractError);
     }
@@ -157,10 +161,10 @@ function summarizeItem(item, index) {
   if (title.length > 54) {
     title = `${title.slice(0, 51)}...`;
   }
-  const labelPayload = parseJsonObject(item.labelText, "Expected response JSON").value;
+  const labelPayload = parseJsonObject(item.labelText, "Label JSON").value;
   const labelKeys = Object.keys(labelPayload);
   const inputSummary = inputKeys.slice(0, 3).join(", ") || "input";
-  const labelSummary = labelKeys.slice(0, 3).join(", ") || "expected";
+  const labelSummary = labelKeys.slice(0, 3).join(", ") || "label";
   return { title, detail: `${inputSummary} -> ${labelSummary}` };
 }
 
@@ -181,13 +185,10 @@ function formatDate(value) {
 async function readApiError(response) {
   try {
     const body = await response.json();
-    if (typeof body?.error === "string" && body.error) {
-      return body.error;
-    }
+    return parseApiErrorMessage(body);
   } catch {
     return "";
   }
-  return "";
 }
 
 export function DatasetsPage() {
@@ -300,7 +301,7 @@ export function DatasetsPage() {
               ))}
             </div>
           ) : (
-            <EmptyState title="No datasets yet" description="Create a dataset to author reusable evaluation inputs and expected responses." />
+            <EmptyState title="No datasets yet" description="Create a dataset to author reusable evaluation inputs and labels." />
           )
         ) : null}
       </div>
@@ -314,6 +315,7 @@ export function DatasetEditorPage() {
   const { datasetId } = useParams();
   const isEditing = Boolean(datasetId);
   const [modules, setModules] = useState([]);
+  const [lmProfiles, setLmProfiles] = useState([]);
   const [isLoadingModules, setIsLoadingModules] = useState(false);
   const [isLoadingDataset, setIsLoadingDataset] = useState(false);
   const [error, setError] = useState("");
@@ -325,6 +327,13 @@ export function DatasetEditorPage() {
   const [activeTab, setActiveTab] = useState("details");
   const [items, setItems] = useState([createEmptyItem(null, `item-${Date.now()}`)]);
   const [selectedItemId, setSelectedItemId] = useState("");
+  const [isGeneratorOpen, setIsGeneratorOpen] = useState(false);
+  const [generationLmProfileId, setGenerationLmProfileId] = useState("");
+  const [generatorPrompt, setGeneratorPrompt] = useState("");
+  const [generatorExamples, setGeneratorExamples] = useState("");
+  const [isGeneratingRows, setIsGeneratingRows] = useState(false);
+  const [generatedRowsPreview, setGeneratedRowsPreview] = useState([]);
+  const [generationError, setGenerationError] = useState("");
 
   const validModules = useMemo(() => modules.filter((item) => item.validation_status === "passed"), [modules]);
   const selectedBundle = useMemo(() => validModules.find((item) => item.id === selectedBundleId) || null, [selectedBundleId, validModules]);
@@ -357,7 +366,20 @@ export function DatasetEditorPage() {
         setIsLoadingModules(false);
       }
     };
+    const loadLmProfiles = async () => {
+      try {
+        const response = await fetch(`${apiBase}/lm-profiles`, { method: "GET" });
+        if (!response.ok) {
+          throw new Error("Could not load LM profiles");
+        }
+        const payload = await response.json();
+        setLmProfiles(Array.isArray(payload) ? payload : []);
+      } catch {
+        setLmProfiles([]);
+      }
+    };
     loadModules();
+    loadLmProfiles();
   }, [apiBase]);
 
   useEffect(() => {
@@ -394,6 +416,12 @@ export function DatasetEditorPage() {
       setSelectedItemId(items[0].id);
     }
   }, [items, selectedItemId]);
+
+  useEffect(() => {
+    if (!generationLmProfileId && lmProfiles.length) {
+      setGenerationLmProfileId(lmProfiles[0].id || "");
+    }
+  }, [generationLmProfileId, lmProfiles]);
 
   useEffect(() => {
     setItems((prev) => {
@@ -445,6 +473,78 @@ export function DatasetEditorPage() {
       setSelectedItemId(fallback?.id || "");
       return next;
     });
+  };
+
+  const insertGeneratedRows = () => {
+    if (!generatedRowsPreview.length) {
+      return;
+    }
+    const insertedAt = Date.now();
+    const nextItems = generatedRowsPreview.map((row, index) => createItemFromPayloads(`generated-${insertedAt}-${index}`, row.input, row.label));
+    setItems((prev) => [...prev, ...nextItems]);
+    setSelectedItemId(nextItems[0]?.id || selectedItemId);
+    setIsGeneratorOpen(false);
+    setGeneratedRowsPreview([]);
+    setGenerationError("");
+  };
+
+  const generateRowsPreview = async () => {
+    setGenerationError("");
+    setGeneratedRowsPreview([]);
+    if (!selectedBundleId) {
+      setGenerationError("Select a validated bundle before generating items.");
+      return;
+    }
+    if (!generationLmProfileId) {
+      setGenerationError("Select an LM profile before generating items.");
+      return;
+    }
+    if (!generatorPrompt.trim()) {
+      setGenerationError("Describe the dataset items you want before generating.");
+      return;
+    }
+
+    const promptSections = [generatorPrompt.trim()];
+    if (generatorExamples.trim()) {
+      promptSections.push(`Reference examples and constraints:\n${generatorExamples.trim()}`);
+    }
+
+    setIsGeneratingRows(true);
+    try {
+      const response = await fetch(`${apiBase}/evaluation-datasets/generate-rows`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          lm_profile_id: generationLmProfileId,
+          module_import_id: selectedBundleId,
+          operator_prompt: promptSections.join("\n\n"),
+          existing_rows: analyzedItems.filter((entry) => entry.valid).map((entry) => ({ input: entry.input, label: entry.label })),
+          max_rows: 5,
+        }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => null);
+        throw new Error(parseApiErrorMessage(body) || `Could not generate items (${response.status})`);
+      }
+      const payload = await response.json();
+      const previewRows = Array.isArray(payload?.items)
+        ? payload.items.filter((item) => item && typeof item === "object" && !Array.isArray(item))
+            .map((item, index) => ({
+              id: `preview-${index}`,
+              input: item?.input && typeof item.input === "object" && !Array.isArray(item.input) ? item.input : {},
+              label: item?.label && typeof item.label === "object" && !Array.isArray(item.label) ? item.label : {},
+            }))
+            .filter((item) => Object.keys(item.input).length && Object.keys(item.label).length)
+        : [];
+      if (!previewRows.length) {
+        throw new Error("Generated items could not be previewed.");
+      }
+      setGeneratedRowsPreview(previewRows);
+    } catch (err) {
+      setGenerationError(err instanceof Error ? err.message : "Could not generate items");
+    } finally {
+      setIsGeneratingRows(false);
+    }
   };
 
   const saveDataset = async () => {
@@ -501,7 +601,7 @@ export function DatasetEditorPage() {
       <header className="page-head row between plans-builder-head">
         <div className="col gap-1">
           <h1 className="t-h1">{isEditing ? "Edit dataset" : "New dataset"}</h1>
-          <p className="cap">Author reusable input and expected response records for a selected bundle.</p>
+          <p className="cap">Author reusable input and label records for a selected bundle.</p>
         </div>
         <div className="row gap-2">
           <Link className="lnk" to="/datasets">Back to datasets</Link>
@@ -560,7 +660,10 @@ export function DatasetEditorPage() {
             <aside className="datasets-items-rail datasets-tab-panel">
               <div className="row between datasets-items-rail-head">
                 <div className="row gap-2"><span className="t-label">Items</span><span className="plans-count">{items.length}</span></div>
-                <Button size="sm" onClick={addItem}>Add item</Button>
+                <div className="row gap-2">
+                  <Button size="sm" onClick={() => setIsGeneratorOpen(true)}>Generate with LLM</Button>
+                  <Button size="sm" onClick={addItem}>Add item</Button>
+                </div>
               </div>
               <div className="datasets-items-scroll col gap-2">
                 {items.map((item, index) => {
@@ -595,7 +698,7 @@ export function DatasetEditorPage() {
                   <div className="panel card-pad col gap-2 datasets-schema-card">
                     <div className="t-label">Bundle eval schema</div>
                     <span className="muted t-sm">Input: {evaluationContract.inputFields.map((field) => field.key).join(", ") || "any JSON object"}</span>
-                    <span className="muted t-sm">Expected response: {evaluationContract.labelFields.map((field) => field.key).join(", ") || "any JSON object"}</span>
+                    <span className="muted t-sm">Label: {evaluationContract.labelFields.map((field) => field.key).join(", ") || "any JSON object"}</span>
                   </div>
 
                   <div className="col gap-1">
@@ -604,7 +707,7 @@ export function DatasetEditorPage() {
                   </div>
 
                   <div className="col gap-1">
-                    <span className="t-label">Expected response JSON</span>
+                    <span className="t-label">Label JSON</span>
                     <textarea className="plans-textarea datasets-editor-textarea" rows={10} value={selectedAnalysis.item.labelText} onChange={(event) => updateItemField(selectedAnalysis.item.id, "labelText", event.target.value)} placeholder={labelPlaceholder} />
                   </div>
 
@@ -624,6 +727,66 @@ export function DatasetEditorPage() {
           </div>
         ) : null}
       </div>
+
+      {isGeneratorOpen ? (
+        <div className="bundles-modal-backdrop" onClick={() => setIsGeneratorOpen(false)}>
+          <div className="panel card-pad bundles-modal plans-generate-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="row between" style={{ marginBottom: 10, alignItems: "flex-start" }}>
+              <div>
+                <h2 className="t-h2">Generate dataset items</h2>
+                <p className="muted t-sm">Use an LM profile to draft input and label JSON that already matches the selected bundle schema.</p>
+              </div>
+              <Button size="sm" variant="ghost" onClick={() => setIsGeneratorOpen(false)}>Close</Button>
+            </div>
+
+            <label className="col gap-1" style={{ marginBottom: 12 }} htmlFor="dataset-generator-lm-profile">
+              <span className="t-label">LM profile</span>
+              <select id="dataset-generator-lm-profile" className="bundles-input" value={generationLmProfileId} onChange={(event) => setGenerationLmProfileId(event.target.value)}>
+                <option value="">Select an LM profile...</option>
+                {lmProfiles.map((profile) => (
+                  <option key={profile.id} value={profile.id}>{profile.name || profile.id}</option>
+                ))}
+              </select>
+            </label>
+
+            <label className="col gap-1" style={{ marginBottom: 12 }}>
+              <span className="t-label">What items do you need?</span>
+              <textarea className="plans-textarea" rows={5} value={generatorPrompt} onChange={(event) => setGeneratorPrompt(event.target.value)} placeholder="Describe the kinds of inputs and labels you want generated." />
+            </label>
+
+            <label className="col gap-1" style={{ marginBottom: 12 }}>
+              <span className="t-label">Reference examples or constraints</span>
+              <textarea className="plans-textarea" rows={6} value={generatorExamples} onChange={(event) => setGeneratorExamples(event.target.value)} placeholder="Optional: paste style notes, sample labels, or rubric guidance for the judge." />
+            </label>
+
+            <div className="row gap-2" style={{ marginBottom: 12 }}>
+              <Button variant="primary" onClick={generateRowsPreview} disabled={isGeneratingRows}>{isGeneratingRows ? "Generating..." : "Generate preview"}</Button>
+              {generatedRowsPreview.length ? <Button onClick={insertGeneratedRows}>Approve + insert items</Button> : null}
+            </div>
+
+            {generationError ? <div className="plans-validation-alert" role="alert"><p className="plans-validation-copy">{generationError}</p></div> : null}
+
+            {generatedRowsPreview.length ? (
+              <div className="col gap-2">
+                <div className="t-h2">Preview</div>
+                {generatedRowsPreview.map((row, index) => (
+                  <div key={row.id} className="panel card-pad col gap-2">
+                    <div className="cap mono">Item {index + 1}</div>
+                    <div className="col gap-1">
+                      <span className="t-label">Input JSON</span>
+                      <textarea className="plans-textarea datasets-editor-textarea" rows={6} value={stringifyJson(row.input)} readOnly />
+                    </div>
+                    <div className="col gap-1">
+                      <span className="t-label">Label JSON</span>
+                      <textarea className="plans-textarea datasets-editor-textarea" rows={6} value={stringifyJson(row.label)} readOnly />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }

@@ -1,11 +1,8 @@
-- Entry points: `backend/app/main.py` defines the FastAPI app and nearly all HTTP endpoints; `backend/worker.py` is the Redis queue worker loop.
-- Central pattern: `backend/app/services.py` contains `AppServices`, which owns DB setup, Redis/HTTP clients, MLflow/LiteLLM integration, CRUD, queue orchestration, optimization execution, and worker registry.
-- Config is Pydantic Settings in `backend/app/config.py`, env prefix `DSPY_TRAINER_`, env file `.env`; `DSPY_TRAINER_POSTGRES_DSN` is required.
-- Readiness checks cover postgres query, redis ping, MLflow HTTP reachability, and LiteLLM health with bearer auth when configured.
-- Bundle validator requires directory bundles with `module.py`, `metric.py`, and `bundle.toml`; validator inspects Python AST and TOML metadata.
-- Execution runtime: `backend/app/executor/module_runner.py::run_bundle_eval` loads the bundle, builds the DSPy program, optionally builds LM from bundle or LM profile, disables LM cache, and evaluates against `judge_metric`.
-- Optimization runtime also lives in `module_runner.py`; surfaced strategy families are `bootstrap_fewshot`, `miprov2`, and `gepa`.
-- Worker behavior: `backend/worker.py` heartbeats worker status into Redis, BRPOPs the configured queue, and delegates payload handling to service methods.
-- App-visible entities include module imports, evaluation plans, agent run plans/tasks, optimization jobs/datasets, LM profiles, and LiteLLM keys.
-- MLflow correlation is implemented for agent run plans/optimization workflows; sample bundle to copy from is `backend/sample_bundles/example-bundle/`.
-- Read `mem:backend/bundles` for the bundle contract, optional hooks, and upload/execution path through validation, smoke tests, worker tasks, and optimization jobs.
+- Entry points: `backend/app/main.py` defines the FastAPI app and route handlers; `backend/worker.py` is the Redis queue worker loop.
+- Central orchestration lives in `backend/app/services.py::AppServices`, which owns DB setup, Redis/HTTP clients, GitHub bundle sync, MLflow/LiteLLM integration, dataset/plan/run/optimization CRUD, and worker/job orchestration.
+- Config is Pydantic Settings in `backend/app/config.py`, env prefix `DSPY_TRAINER_`, env file `.env`; Postgres DSN is required.
+- Readiness checks verify postgres, redis, MLflow reachability, and LiteLLM health/auth.
+- App-visible entities include module imports/revisions, evaluation datasets, evaluation plans, agent run plans/tasks, optimization datasets/jobs, LM profiles, and LiteLLM keys.
+- MLflow correlation exists for agent run plans and optimization workflows. Optimization writeback creates `optimization-<job-prefix>` branches for manual merge.
+- Current route surface is broad; rely on `backend/app/main.py` and `AppServices` rather than README endpoint summaries when adding or changing behavior.
+- Read `mem:backend/bundles` for bundle contract and runtime expectations.

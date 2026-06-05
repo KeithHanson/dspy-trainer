@@ -1,7 +1,6 @@
-- Top-level map: `backend/` FastAPI API + worker runtime, `web/` React/Vite UI, `docs/` product/ops plans, `ops/litellm-proxy/` LiteLLM config, `backend/sample_bundles/example-bundle/` canonical bundle example, `.beads/` issue DB.
-- Compose-first architecture: postgres + redis + mlflow + litellm-proxy + backend + worker + web. Read `mem:backend/core` for runtime/API details and `mem:web/core` for user workflow shape.
-- Implemented product flow: upload bundle -> validate bundle -> create evaluation plan -> create/enqueue agent run plan -> inspect tasks/results -> derive/launch optimization jobs.
-- Current backend surface is much broader than root `README.md`; the real route map lives in `backend/app/main.py`.
-- Planning docs: `docs/NAIVE_PLAN.md` = original baseline, `docs/INFORMED_PLAN.md` = higher-fidelity architecture/spec, `docs/COMPOSE_RUNBOOK.md` = operator bootstrap/ops.
-- Tests live in `backend/tests/` and `web/src/**/**.test.jsx`.
-- Read `mem:tech_stack` for runtime/deps, `mem:suggested_commands` for common commands, `mem:conventions` for implementation patterns, `mem:task_completion` for verification expectations.
+- Top-level map: `backend/` FastAPI API + orchestration services, `web/` React/Vite app, `docs/` product/ops plans and runbooks, `ops/` LiteLLM proxy config, `backend/sample_bundles/example-bundle/` canonical bundle, `dspy/` upstream reference submodule, `.beads/` issue DB.
+- Current product flow is dataset-first: import/create module bundle -> validate bundle contract -> create evaluation dataset -> create evaluation plan -> create/enqueue agent run plan -> inspect task results -> derive optimization datasets / launch optimization jobs.
+- Actual backend surface is defined in `backend/app/main.py`; root `README.md` is broadly directionally correct but some planning docs still describe older containerized-entrypoint/TUI concepts that are not the implemented runtime contract.
+- Runtime contract today is directory bundles with `module.py`, `metric.py`, and `bundle.toml`, executed by backend/worker code rather than user-supplied Dockerfiles.
+- Compose-first architecture: postgres + redis + mlflow + litellm-proxy + backend + worker + web. Postgres is source of truth, MLflow is tracking plane, Redis is queue/worker presence.
+- Read `mem:backend/core` for route/runtime details, `mem:backend/bundles` for bundle contract, `mem:web/core` for user workflow shape, and `mem:tech_stack` for dependency/runtime specifics.

@@ -2,10 +2,10 @@ import dspy
 
 
 class JudgeSignature(dspy.Signature):
-    """Evaluate agent output against label expectations."""
+    """Evaluate agent output against label-provided judge instructions."""
 
     question = dspy.InputField()
-    expected_answer = dspy.InputField()
+    judge_instructions = dspy.InputField()
     predicted_category = dspy.InputField()
     predicted_priority = dspy.InputField()
     predicted_reply = dspy.InputField()
@@ -16,45 +16,31 @@ class JudgeSignature(dspy.Signature):
 
 
 def judge_metric(example, prediction, trace=None):
-    expected = getattr(example, "label", {}) if hasattr(example, "label") else {}
-    if not isinstance(expected, dict):
-        expected = {}
+    judge_instructions = example.label["judge_instructions"].strip()
+    question = example.question
+    category = prediction.category.strip().lower()
+    priority = prediction.priority.strip().lower()
+    reply = prediction.reply.strip()
 
-    expected_answer = str(expected.get("expected", "")).strip()
-
-    category = str(getattr(prediction, "category", "")).strip().lower()
-    priority = str(getattr(prediction, "priority", "")).strip().lower()
-    reply = str(getattr(prediction, "reply", "")).strip()
-
-    question = str(getattr(example, "question", ""))
     judge = dspy.Predict(JudgeSignature)
     verdict = judge(
         question=question,
-        expected_answer=expected_answer,
+        judge_instructions=judge_instructions,
         predicted_category=category,
         predicted_priority=priority,
         predicted_reply=reply,
     )
 
-    try:
-        score = float(str(getattr(verdict, "score", "0")).strip())
-    except ValueError:
-        score = 0.0
-    score = min(1.0, max(0.0, score))
-
-    flags_raw = str(getattr(verdict, "flags_csv", "")).strip()
-    failed_flags = []
-    if flags_raw and flags_raw.lower() not in {"none", "n/a", "na"}:
-        failed_flags = [item.strip() for item in flags_raw.split(",") if item.strip()]
-
-    rationale = str(getattr(verdict, "rationale", "")).strip() or "No rationale provided"
+    score = max(0.0, min(1.0, float(verdict.score)))
+    flags_raw = verdict.flags_csv.strip()
+    failed_flags = [] if flags_raw.lower() in {"", "none", "n/a", "na"} else [item.strip() for item in flags_raw.split(",") if item.strip()]
 
     return {
         "score": score,
-        "rationale": rationale,
+        "rationale": verdict.rationale.strip(),
         "flags": failed_flags,
         "raw_response": {
-            "expected_answer": expected_answer,
+            "judge_instructions": judge_instructions,
             "predicted_category": category,
             "predicted_priority": priority,
             "predicted_reply": reply,

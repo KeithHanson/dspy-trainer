@@ -3,8 +3,10 @@
 ## Overview
 `dspy-trainer` is a single-organization web app for evaluating DSPy agents. A developer uploads a **Module Bundle** (`module.py` + `metric.py`), authors a bundle-scoped **Dataset** (`input` + `label` records), creates an **Evaluation Plan** that selects that dataset, and the app runs the agent against the plan many times in parallel, judging each attempt pass/fail with a rationale. MLflow instruments every run at the trace level.
 
+This handoff describes an older design prototype. The current web shell in `web/src` is unauthenticated and routes directly into the app shell without an Auth0 or hosted login step.
+
 This bundle covers five connected flows:
-1. **Auth** — Auth0-style hosted sign-in (GitHub / Google / Microsoft / SSO + email).
+1. **Historical auth concept** — an older Auth0-style hosted sign-in mock that is not part of the current shell.
 2. **Team** — member list + a link-based invite modal.
 3. **Module Bundles** — list, drag/drop upload with sandbox validation, and a diagnostics detail view.
 4. **Datasets** — bundle-scoped dataset list + dedicated item editor for input/label JSON records.
@@ -14,7 +16,7 @@ This bundle covers five connected flows:
 ## About the Design Files
 The files in this bundle are **design references authored in HTML/React (via in-browser Babel)** — a working prototype demonstrating the intended look, layout, and behavior. **They are not production code to copy directly.** The task is to **recreate these designs inside the target codebase's environment**, using its established framework, component library, routing, and data layer. If no front-end environment exists yet, choose an appropriate stack (React + a router + a data-fetching layer is the natural fit) and implement the designs there.
 
-All application data in the prototype is **mocked** (`app/mockdata.js`) and the live run is a **client-side simulation** (`app/app.jsx`). In production these are replaced by the real eval API + a streaming/polling transport (SSE or WebSocket recommended for the live monitor).
+All application data in the prototype is **mocked** (`app/mockdata.js`) and the live run is a **client-side simulation** (`app/app.jsx`). In production these are replaced by the real eval API + a streaming/polling transport (SSE or WebSocket recommended for the live monitor). The auth-specific prototype screens are historical reference material only and should not be treated as current product behavior.
 
 ## Fidelity
 **High-fidelity (hifi).** Final colors, typography, spacing, and interactions are specified below and in `styles.css` as design tokens. Recreate the UI pixel-faithfully using the codebase's libraries. Exact values are given as design tokens; the prototype expresses most colors in `oklch()` — convert to your system's format as needed (approximate hex equivalents are provided).
@@ -38,12 +40,12 @@ All application data in the prototype is **mocked** (`app/mockdata.js`) and the 
 
 ## Screens / Views
 
-### 1. Auth (`screen_auth.jsx`)
-- **Purpose:** sign in / request access via OAuth or email.
+### 1. Historical Auth (`screen_auth.jsx`)
+- **Purpose:** archived sign-in / request-access concept from an earlier prototype.
 - **Layout:** two columns. Left (`flex:1`, centered, bg `--bg-deep`): a 360px form. Right (46%, max 720px, bg `--bg`, left border, radial accent glow top-right): brand panel.
 - **Left form, top→bottom:** logo+wordmark; heading (23px/600) "Sign in to your workspace" (or "Create your account" in signup); subtitle (`--text-muted`); OAuth buttons (full-width, 40px tall, left-aligned, provider glyph + label): **GitHub**, **Google**, then a 2-up row **Microsoft** / **SSO / SAML**; "or" divider; email input (40px) + primary "Continue with email" button; toggle link between sign-in/request-access; footer lockup "Secured by Auth0 · SOC 2 Type II" with shield icon.
 - **Right panel:** "LIVE EVAL MONITOR" mono label; a self-animating preview card (running plan, pass/fail counts ticking every ~1.4s); a 19px headline; three feature bullets (icon + text).
-- **Behavior:** clicking any provider sets a pending spinner on that button for ~1.1s, then authenticates and routes to the dashboard. Real impl: hand off to Auth0 Universal Login; providers map to Auth0 connections.
+- **Behavior:** this was a prototype-only interaction. The current shell does not hand off to Auth0 Universal Login and does not gate access on a sign-in step.
 
 ### 2. Dashboard / Overview (`screen_dashboard.jsx`)
 - **Purpose:** at-a-glance status + entry points.
@@ -93,7 +95,7 @@ Three sub-views routed by params (`upload`, `id`, else list).
 ## Interactions & Behavior
 
 - **Routing:** client-side. Route = `{ name, params }`. Names: `dashboard`, `bundles`, `bundle` (`{upload}` or `{id}`), `plans`, `plan-new` (`{id?}`, `{bundleId?}`), `runs`, `run` (`{jobId}`), `team`, `settings`. Map sub-routes to parent nav highlight. In production use the app's router; breadcrumbs derive from the route.
-- **Auth gating:** unauthenticated → Auth screen; the live-run simulation only starts after auth.
+- **Current shell behavior:** there is no auth gating in the live app shell. This prototype previously showed an unauthenticated entry screen before routing into the dashboard.
 - **Live run simulation (replace with real transport):** a seeded job starts running on sign-in. A timer (~1.1s tick) resolves ~30% of in-flight tasks per tick and refills up to `maxWorkers`; each resolution computes a deterministic pass/fail, score, latency, prediction, rationale, and flags. Completion sets job → `succeeded` and fires a toast. **Pause/Resume/Stop** gate the timer. **Re-run** rebuilds all tasks as pending and restarts.
   - *Production:* open the job, then stream `Eval Run Item` updates (SSE/WS). Update counts/progress on each event; flash rows on state change; keep the worker panel bound to currently-running items.
 - **Copy link:** `navigator.clipboard.writeText`; button label swaps to "Copied" for 1.8s + toast.
@@ -110,7 +112,7 @@ Three sub-views routed by params (`upload`, `id`, else list).
 - `spin` 0.7s linear for spinners.
 
 ## State Management
-- **Global:** `authed`, `route`, `live` (the running job: `{ jobId, planId, bundleId, name, status, startedAt, maxWorkers, runsPerQuestion, mlflowParent, items[] }`), toast queue.
+- **Global:** the prototype tracked `authed`, `route`, `live` (the running job: `{ jobId, planId, bundleId, name, status, startedAt, maxWorkers, runsPerQuestion, mlflowParent, items[] }`), and a toast queue. The current app shell no longer uses auth-gating state.
 - **Per-screen:** bundle upload `phase`/`step`; plan builder `name/bundleId/runs/workers/rows[]`; run monitor `filter`/selected item/`elapsed`; team `members`/`showInvite`; invite modal `role`/`token`/`copied`.
 - **Data fetching (production):** list endpoints for bundles/plans/jobs/team; bundle validation (async, returns diagnostics); plan create/run; job detail + a stream of run-item events; MLflow links.
 
@@ -189,13 +191,13 @@ Three sub-views routed by params (`upload`, `id`, else list).
 - `app/mockdata.js` — mock data model + helpers (`window.DB`): `ORG`, `USER`, `team`, `bundles`, `plans`, `jobs`, `QUESTIONS`, and `counts/passRate/avgScore/samplePrediction` helpers. **Defines the domain entities** (Module Bundle, Evaluation Plan, Eval Job, Eval Run Item, diagnostics, judge result shape).
 - `app/ui.jsx` — primitives + icon set: `Icon, Button, Badge, Dot, Progress, SegProgress, Avatar, Modal, Drawer, Empty, ToastHost/useToast, ago, dur`.
 - `app/shell.jsx` — `Sidebar, Topbar, AppShell`, nav definitions.
-- `app/screen_auth.jsx` — Auth screen + animated preview.
+- `app/screen_auth.jsx` — historical auth screen + animated preview from the earlier prototype.
 - `app/screen_dashboard.jsx` — Overview (KPI cards, live strip, recent jobs).
 - `app/screen_bundles.jsx` — bundle list / upload+validation / detail (+ sample `module.py`/`metric.py`).
 - `app/screen_plans.jsx` — plan list + builder.
 - `app/screen_runs.jsx` — job list + live monitor + run-item drawer.
 - `app/screen_team.jsx` — team + link invite modal.
-- `app/app.jsx` — root: routing, auth, the live-run simulation engine, Settings screen.
+- `app/app.jsx` — prototype root: routing, historical auth state, the live-run simulation engine, Settings screen.
 
 ## Domain model (recreate as real types)
 - **Module Bundle:** `{ id, name, version, status: valid|invalid|validating, uploadedAt, size, author, signature, lmTarget, dspyVersion, diagnostics: [{ level: ok|warn|err, code, msg }] }`.

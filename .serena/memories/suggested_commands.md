@@ -1,10 +1,9 @@
-- Preferred repo inspection in this environment: `rtk ls <path>`, `rtk read <file>`, `rtk smart <file>`, `rtk git status`, `rtk git diff`, `rtk pytest`.
+- Preferred repo inspection in this environment: `rtk ls <path>`, `rtk read <file>`, `rtk smart <file>`, `rtk git status`, `rtk git diff`, `rtk git log -n 20`.
+- Beads workflow: `bd ready --json`, `bd show <id> --json`, `bd update <id> --claim --json`, `bd close <id> --reason "..." --json`.
 - Compose bootstrap: `docker compose pull --ignore-pull-failures`, `docker compose build --pull`, `docker compose up -d --remove-orphans`.
 - Compose status/logs: `docker compose ps`, `docker compose logs -f --timestamps backend worker litellm-proxy`.
-- Backend local setup: `python -m venv .venv && source .venv/bin/activate && pip install -r backend/requirements.txt`.
 - Backend local run: `uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8000`.
 - Worker local run: `python backend/worker.py`.
 - Backend tests: `rtk pytest` from repo root.
-- Frontend install/test/build in `web/`: `npm install`, `npm test`, `npm run build`.
-- Health checks: `curl -fsS http://localhost:8000/health`, `curl -fsS http://localhost:8000/ready`, `curl -fsS http://localhost:3000/health`.
-- Beads basics: `bd ready --json`, `bd show <id> --json`, `bd update <id> --status in_progress --json`, `bd close <id> --reason "..." --json`.
+- Frontend commands in `web/`: `npm install`, `npm test`, `npm run build`.
+- Health checks: `curl -fsS http://localhost:8000/health`, `curl -fsS http://localhost:8000/ready`, `curl -fsS http://localhost:3000/health`, `curl -fsS -H "Authorization: Bearer ${LITELLM_MASTER_KEY:-sk-local-dev-master-key}" http://localhost:4000/health`.

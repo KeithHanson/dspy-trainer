@@ -87,7 +87,7 @@ A **dataset** is a reusable collection of test cases for a bundle:
 ```json
 {
   "input": {"question": "How do I reset my password?"},
-  "label": {"expected": "Direct them to /reset-password"}
+  "label": {"judge_instructions": "Use these instructions to judge whether the reply routes the user to /reset-password and explains the next step clearly."}
 }
 ```
 
@@ -182,7 +182,7 @@ DSPy handles execution, optimization, and prompt engineering for you.
 - **MLflow**: Experiment tracking
 - **LiteLLM**: Unified LLM gateway
 
-See [`docs/INFORMED_PLAN.md`](docs/INFORMED_PLAN.md) for detailed architecture.
+For current stack operations and service expectations, see [`docs/COMPOSE_RUNBOOK.md`](docs/COMPOSE_RUNBOOK.md).
 
 ---
 
@@ -212,8 +212,9 @@ def build_program():
 **`metric.py`**
 ```python
 def judge_metric(example, prediction, trace=None):
-    # Your scoring logic here
-    score = 1.0 if prediction.answer == example.expected else 0.0
+    # Your scoring logic here. Labels can contain judge-side guidance for an LLM judge.
+    instructions = example.label["judge_instructions"]
+    score = 1.0 if instructions and prediction.answer else 0.0
     
     return {
         "score": score,
@@ -355,6 +356,7 @@ Each dataset record uses:
 ```
 
 The bundle's `evaluation.input.fields` and `evaluation.label.fields` in `bundle.toml` define the expected keys.
+For LLM-as-judge bundles, the label side can be rubric-style guidance such as `judge_instructions`, not only a single gold answer.
 
 ### MLflow Correlation
 
@@ -553,7 +555,7 @@ A: Yes! LiteLLM supports 100+ providers. Just create an LM Profile with your pro
 A: Yes, for now. GitHub-first design enables commit provenance and collaborative workflows.
 
 **Q: Can I run this on a remote server?**  
-A: Yes, it's Docker Compose. Adjust ports/auth as needed. Auth0 is currently required for Web UI.
+A: Yes. It's a Docker Compose stack, so adjust ports, DNS, and reverse proxying as needed. The current web shell is unauthenticated, so no Auth0 or hosted login setup is required.
 
 **Q: How do I scale worker capacity?**  
 A: Increase worker replicas in `docker-compose.yml`:
@@ -589,7 +591,6 @@ See [`AGENTS.md`](AGENTS.md) for detailed contribution guidelines.
 - **LiteLLM Docs**: https://docs.litellm.ai
 - **MLflow Docs**: https://mlflow.org/docs/latest/index.html
 - **Compose Runbook**: [`docs/COMPOSE_RUNBOOK.md`](docs/COMPOSE_RUNBOOK.md)
-- **Architecture Plan**: [`docs/INFORMED_PLAN.md`](docs/INFORMED_PLAN.md)
 
 ---
 

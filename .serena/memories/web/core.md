@@ -1,9 +1,7 @@
-- Entry point/router: `web/src/App.jsx` gates the app behind Auth0 and routes to dashboard, bundles, plans, runs, optimization, and LM profile screens.
-- UI architecture is page-centric. Most data fetching is inside page components with `fetch`, `useEffect`, `useState`, and light `useMemo`; there is no central API client abstraction yet.
-- Primary workflows are implemented in pages: `bundles/BundlesPage.jsx`, `plans/PlansPage.jsx`, `runs/RunsPage.jsx`, `optimization/OptimizationLaunchPage.jsx`, `optimization/OptimizationJobsPage.jsx`, `lmProfiles/LmProfilesPage.jsx`.
-- Bundles UX teaches the contract inline: upload zip -> create module import -> validate upload -> show diagnostics/checklist -> CTA into plan creation.
-- Plans UX persists reusable evaluation plans, requires a validated module bundle + LM profile, and can immediately create/enqueue an agent run plan.
-- Runs UX supports list and live monitor modes with polling for plan/task updates and worker presence; links to MLflow parent run when available.
-- Optimization UX is functional: choose validated module, optional source run plan, strategy family, execution/helper LM profiles, optional datasets, then POST optimization job.
-- Auth config comes from `web/.env.local.sample` (`VITE_AUTH0_*`, `VITE_API_BASE_URL`); backend API defaults to `http://localhost:8000` when env is missing.
-- Tests are colocated with major pages and cover auth/routing plus bundles/plans/runs/dashboard/optimization/LM profile flows.
+- Entry point/router is `web/src/App.jsx`; current shell routes directly between dashboard, bundles, datasets, plans, runs, optimization, LM profiles, and LiteLLM key management.
+- The current app no longer depends on Auth0 for shell access; older docs or memories mentioning mandatory Auth0 are stale and should be revalidated before use.
+- UI is page-centric. Most fetching lives inside page components with `fetch`, `useEffect`, and `useState`; there is no central API client abstraction yet.
+- Primary user workflows live in `web/src/bundles/BundlesPage.jsx`, `web/src/datasets/DatasetsPage.jsx`, `web/src/plans/PlansPage.jsx`, `web/src/runs/RunsPage.jsx`, `web/src/optimization/OptimizationLaunchPage.jsx`, `web/src/optimization/OptimizationJobsPage.jsx`, and `web/src/lmProfiles/LmProfilesPage.jsx`.
+- Recent product shift is dataset-first planning: datasets are first-class reusable records feeding evaluation plan creation and row generation.
+- Pages post near-raw backend payloads, so backend request-shape changes often require direct page updates and regression checks.
+- Shared UX patterns exist for loading/empty/error states; preserve those rather than inventing one-off page variants.

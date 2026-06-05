@@ -65,6 +65,9 @@ describe("DatasetsPage", () => {
           ]),
         });
       }
+      if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "lm-1", name: "Judge LM" }]) });
+      }
       if (String(url).endsWith("/evaluation-datasets") && init?.method === "POST") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ id: "dataset-1" }) });
       }
@@ -118,6 +121,9 @@ describe("DatasetsPage", () => {
           ]),
         });
       }
+      if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "lm-1", name: "Judge LM" }]) });
+      }
       if (String(url).endsWith("/evaluation-datasets/dataset-1") && init?.method === "GET") {
         return Promise.resolve({
           ok: true,
@@ -146,6 +152,78 @@ describe("DatasetsPage", () => {
     await userEvent.click(screen.getByRole("button", { name: "Duplicate" }));
 
     expect(screen.getByText("Input 2")).toBeInTheDocument();
+    vi.unstubAllGlobals();
+  });
+
+  it("generates dataset items from an LM prompt and inserts them", async () => {
+    const fetchMock = vi.fn((url, init) => {
+      if (String(url).endsWith("/modules") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([
+            {
+              id: "mod-1",
+              bundle_name: "policy-bot",
+              bundle_version: "1.0.0",
+              validation_status: "passed",
+              evaluation_contract: {
+                input_fields: [{ key: "ticket", label: "Ticket", required: true }],
+                label_fields: [{ key: "judge_instructions", label: "Judge instructions", required: true }],
+                input_template: { ticket: "" },
+                label_template: { judge_instructions: "" },
+              },
+            },
+          ]),
+        });
+      }
+      if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "lm-1", name: "Judge LM" }]) });
+      }
+      if (String(url).endsWith("/evaluation-datasets/generate-rows") && init?.method === "POST") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue({
+            items: [
+              {
+                input: { ticket: "Customer needs a refund after a duplicate charge." },
+                label: { judge_instructions: "Confirm the reply explains the refund path and requests charge evidence." },
+              },
+            ],
+            attempts: 1,
+          }),
+        });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter initialEntries={["/datasets/new"]}>
+        <Routes>
+          <Route path="/datasets/new" element={<DatasetEditorPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(await screen.findByRole("tab", { name: "Items" }));
+    await userEvent.click(screen.getByRole("button", { name: "Generate with LLM" }));
+    await userEvent.selectOptions(screen.getByLabelText("LM profile"), "lm-1");
+    await userEvent.type(screen.getByLabelText("What items do you need?"), "Generate refund-support items.");
+    await userEvent.click(screen.getByRole("button", { name: "Generate preview" }));
+
+    expect(await screen.findByDisplayValue(/Customer needs a refund after a duplicate charge/)).toBeInTheDocument();
+    expect(screen.getByDisplayValue(/Confirm the reply explains the refund path/)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Approve + insert items" }));
+
+    expect(await screen.findByDisplayValue(/"judge_instructions": "Confirm the reply explains the refund path and requests charge evidence."/)).toBeInTheDocument();
+
+    const generateCall = fetchMock.mock.calls.find(([url, request]) => String(url).endsWith("/evaluation-datasets/generate-rows") && request?.method === "POST");
+    expect(generateCall).toBeTruthy();
+    expect(JSON.parse(generateCall[1].body)).toMatchObject({
+      lm_profile_id: "lm-1",
+      module_import_id: "mod-1",
+    });
     vi.unstubAllGlobals();
   });
 });
