@@ -322,6 +322,7 @@ export function DatasetEditorPage() {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [selectedBundleId, setSelectedBundleId] = useState("");
+  const [activeTab, setActiveTab] = useState("details");
   const [items, setItems] = useState([createEmptyItem(null, `item-${Date.now()}`)]);
   const [selectedItemId, setSelectedItemId] = useState("");
 
@@ -411,6 +412,7 @@ export function DatasetEditorPage() {
     const nextItem = createEmptyItem(evaluationContract, `item-${Date.now()}`);
     setItems((prev) => [...prev, nextItem]);
     setSelectedItemId(nextItem.id);
+    setActiveTab("items");
   };
 
   const duplicateSelectedItem = () => {
@@ -429,6 +431,7 @@ export function DatasetEditorPage() {
       return [...prev.slice(0, index + 1), duplicate, ...prev.slice(index + 1)];
     });
     setSelectedItemId(duplicate.id);
+    setActiveTab("items");
   };
 
   const deleteSelectedItem = () => {
@@ -513,100 +516,113 @@ export function DatasetEditorPage() {
           {isLoadingModules ? <LoadingState label="Loading bundles..." /> : null}
           {isLoadingDataset ? <LoadingState label="Loading dataset..." /> : null}
 
-          <section className="panel card-pad plans-form-block">
-            <label className="t-label plans-input-label" htmlFor="dataset-name">Dataset name</label>
-            <input id="dataset-name" className="bundles-input" value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Support triage regression set" />
-          </section>
+          <div className="row gap-2 datasets-tabs" role="tablist" aria-label="Dataset editor tabs">
+            <button type="button" role="tab" aria-selected={activeTab === "details"} className={`datasets-tab ${activeTab === "details" ? "datasets-tab-active" : ""}`} onClick={() => setActiveTab("details")}>Details</button>
+            <button type="button" role="tab" aria-selected={activeTab === "items"} className={`datasets-tab ${activeTab === "items" ? "datasets-tab-active" : ""}`} onClick={() => setActiveTab("items")}>Items</button>
+          </div>
 
-          <section className="panel card-pad plans-form-block">
-            <label className="t-label plans-input-label" htmlFor="dataset-description">Description</label>
-            <textarea id="dataset-description" className="plans-textarea" rows={3} value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Optional notes about what this dataset covers." />
-          </section>
+          {activeTab === "details" ? (
+            <>
+              <section className="panel card-pad plans-form-block">
+                <label className="t-label plans-input-label" htmlFor="dataset-name">Dataset name</label>
+                <input id="dataset-name" className="bundles-input" value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Support triage regression set" />
+              </section>
 
-          <section className="panel card-pad plans-form-block">
-            <div className="row between" style={{ marginBottom: 10 }}>
-              <h2 className="t-h2">Bundle scope</h2>
-              <span className="t-label">Validated only</span>
-            </div>
-            {!validModules.length ? (
-              <EmptyState title="No validated bundles" description="Validate a bundle before creating a dataset." />
-            ) : (
-              <div className="col gap-2">
-                {validModules.map((bundle) => (
-                  <button key={bundle.id} className={`plans-bundle-option ${selectedBundleId === bundle.id ? "plans-bundle-option-active" : ""}`} type="button" onClick={() => setSelectedBundleId(bundle.id)}>
-                    <span className="t-sm" style={{ fontWeight: 600 }}>{getBundleDisplayName(bundle)}</span>
-                    <span className="cap mono">{bundle.bundle_version ? `v${bundle.bundle_version}` : "version n/a"}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-          </section>
+              <section className="panel card-pad plans-form-block">
+                <label className="t-label plans-input-label" htmlFor="dataset-description">Description</label>
+                <textarea id="dataset-description" className="plans-textarea" rows={3} value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Optional notes about what this dataset covers." />
+              </section>
+
+              <section className="panel card-pad plans-form-block">
+                <div className="row between" style={{ marginBottom: 10 }}>
+                  <h2 className="t-h2">Bundle scope</h2>
+                  <span className="t-label">Validated only</span>
+                </div>
+                {!validModules.length ? (
+                  <EmptyState title="No validated bundles" description="Validate a bundle before creating a dataset." />
+                ) : (
+                  <div className="col gap-2">
+                    {validModules.map((bundle) => (
+                      <button key={bundle.id} className={`plans-bundle-option ${selectedBundleId === bundle.id ? "plans-bundle-option-active" : ""}`} type="button" onClick={() => setSelectedBundleId(bundle.id)}>
+                        <span className="t-sm" style={{ fontWeight: 600 }}>{getBundleDisplayName(bundle)}</span>
+                        <span className="cap mono">{bundle.bundle_version ? `v${bundle.bundle_version}` : "version n/a"}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </section>
+            </>
+          ) : null}
         </div>
 
-        <aside className="datasets-items-rail">
-          <div className="row between datasets-items-rail-head">
-            <div className="row gap-2"><span className="t-label">Items</span><span className="plans-count">{items.length}</span></div>
-            <Button size="sm" onClick={addItem}>Add item</Button>
-          </div>
-          <div className="datasets-items-scroll col gap-2">
-            {items.map((item, index) => {
-              const summary = summarizeItem(item, index);
-              const isActive = item.id === selectedItemId;
-              return (
-                <button key={item.id} type="button" className={`datasets-item-card ${isActive ? "datasets-item-card-active" : ""}`} onClick={() => setSelectedItemId(item.id)}>
-                  <span className="datasets-item-index mono">Input {index + 1}</span>
-                  <strong className="datasets-item-title">{summary.title}</strong>
-                  <span className="cap mono datasets-item-detail">{summary.detail}</span>
-                </button>
-              );
-            })}
-          </div>
-          <button type="button" className="datasets-add-card" onClick={addItem}>+ Add item</button>
-        </aside>
-
-        <aside className="plans-rail datasets-editor-rail">
-          {selectedAnalysis ? (
-            <div className="col gap-3">
-              <div className="row between datasets-editor-item-head">
-                <div className="col gap-1">
-                  <div className="t-h2">{summarizeItem(selectedAnalysis.item, items.findIndex((item) => item.id === selectedAnalysis.item.id)).title}</div>
-                  <span className="cap mono">{selectedBundle ? getBundleDisplayName(selectedBundle) : "No bundle selected"}</span>
-                </div>
-                <div className="row gap-2">
-                  <Button size="sm" onClick={duplicateSelectedItem}>Duplicate</Button>
-                  <Button size="sm" variant="danger" onClick={deleteSelectedItem} disabled={items.length <= 1}>Delete</Button>
-                </div>
+        {activeTab === "items" ? (
+          <>
+            <aside className="datasets-items-rail">
+              <div className="row between datasets-items-rail-head">
+                <div className="row gap-2"><span className="t-label">Items</span><span className="plans-count">{items.length}</span></div>
+                <Button size="sm" onClick={addItem}>Add item</Button>
               </div>
-
-              <div className="panel card-pad col gap-2 datasets-schema-card">
-                <div className="t-label">Bundle eval schema</div>
-                <span className="muted t-sm">Input: {evaluationContract.inputFields.map((field) => field.key).join(", ") || "any JSON object"}</span>
-                <span className="muted t-sm">Expected response: {evaluationContract.labelFields.map((field) => field.key).join(", ") || "any JSON object"}</span>
+              <div className="datasets-items-scroll col gap-2">
+                {items.map((item, index) => {
+                  const summary = summarizeItem(item, index);
+                  const isActive = item.id === selectedItemId;
+                  return (
+                    <button key={item.id} type="button" className={`datasets-item-card ${isActive ? "datasets-item-card-active" : ""}`} onClick={() => setSelectedItemId(item.id)}>
+                      <span className="datasets-item-index mono">Input {index + 1}</span>
+                      <strong className="datasets-item-title">{summary.title}</strong>
+                      <span className="cap mono datasets-item-detail">{summary.detail}</span>
+                    </button>
+                  );
+                })}
               </div>
+              <button type="button" className="datasets-add-card" onClick={addItem}>+ Add item</button>
+            </aside>
 
-              <div className="col gap-1">
-                <span className="t-label">Input JSON</span>
-                <textarea className="plans-textarea datasets-editor-textarea" rows={10} value={selectedAnalysis.item.inputText} onChange={(event) => updateItemField(selectedAnalysis.item.id, "inputText", event.target.value)} placeholder={inputPlaceholder} />
-              </div>
-
-              <div className="col gap-1">
-                <span className="t-label">Expected response JSON</span>
-                <textarea className="plans-textarea datasets-editor-textarea" rows={10} value={selectedAnalysis.item.labelText} onChange={(event) => updateItemField(selectedAnalysis.item.id, "labelText", event.target.value)} placeholder={labelPlaceholder} />
-              </div>
-
-              {selectedAnalysis.errors.length ? (
-                <div className="panel card-pad datasets-errors-panel">
-                  <div className="t-label" style={{ marginBottom: 6 }}>Validation</div>
-                  <div className="col gap-1">
-                    {selectedAnalysis.errors.map((item) => <span key={item} className="muted t-sm">{item}</span>)}
+            <aside className="plans-rail datasets-editor-rail">
+              {selectedAnalysis ? (
+                <div className="col gap-3">
+                  <div className="row between datasets-editor-item-head">
+                    <div className="col gap-1">
+                      <div className="t-h2">{summarizeItem(selectedAnalysis.item, items.findIndex((item) => item.id === selectedAnalysis.item.id)).title}</div>
+                      <span className="cap mono">{selectedBundle ? getBundleDisplayName(selectedBundle) : "No bundle selected"}</span>
+                    </div>
+                    <div className="row gap-2">
+                      <Button size="sm" onClick={duplicateSelectedItem}>Duplicate</Button>
+                      <Button size="sm" variant="danger" onClick={deleteSelectedItem} disabled={items.length <= 1}>Delete</Button>
+                    </div>
                   </div>
+
+                  <div className="panel card-pad col gap-2 datasets-schema-card">
+                    <div className="t-label">Bundle eval schema</div>
+                    <span className="muted t-sm">Input: {evaluationContract.inputFields.map((field) => field.key).join(", ") || "any JSON object"}</span>
+                    <span className="muted t-sm">Expected response: {evaluationContract.labelFields.map((field) => field.key).join(", ") || "any JSON object"}</span>
+                  </div>
+
+                  <div className="col gap-1">
+                    <span className="t-label">Input JSON</span>
+                    <textarea className="plans-textarea datasets-editor-textarea" rows={10} value={selectedAnalysis.item.inputText} onChange={(event) => updateItemField(selectedAnalysis.item.id, "inputText", event.target.value)} placeholder={inputPlaceholder} />
+                  </div>
+
+                  <div className="col gap-1">
+                    <span className="t-label">Expected response JSON</span>
+                    <textarea className="plans-textarea datasets-editor-textarea" rows={10} value={selectedAnalysis.item.labelText} onChange={(event) => updateItemField(selectedAnalysis.item.id, "labelText", event.target.value)} placeholder={labelPlaceholder} />
+                  </div>
+
+                  {selectedAnalysis.errors.length ? (
+                    <div className="panel card-pad datasets-errors-panel">
+                      <div className="t-label" style={{ marginBottom: 6 }}>Validation</div>
+                      <div className="col gap-1">
+                        {selectedAnalysis.errors.map((item) => <span key={item} className="muted t-sm">{item}</span>)}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="cap mono datasets-valid-copy">Valid JSON and required keys present.</div>
+                  )}
                 </div>
-              ) : (
-                <div className="cap mono datasets-valid-copy">Valid JSON and required keys present.</div>
-              )}
-            </div>
-          ) : null}
-        </aside>
+              ) : null}
+            </aside>
+          </>
+        ) : null}
       </div>
     </section>
   );

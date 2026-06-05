@@ -149,6 +149,20 @@ button { font-family: inherit; }
 .datasets-row-top { width: 100%; align-items: flex-start; }
 .datasets-editor-body { background: var(--bg); }
 .datasets-editor-main { max-width: 420px; }
+.datasets-tabs { margin-bottom: 14px; }
+.datasets-tab {
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text-muted);
+}
+.datasets-tab-active {
+  border-color: var(--accent-line);
+  background: var(--accent-dim);
+  color: var(--text);
+}
 .datasets-items-rail {
   width: 310px;
   flex: none;

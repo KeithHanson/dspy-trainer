@@ -82,6 +82,7 @@ describe("DatasetsPage", () => {
     );
 
     await userEvent.type(await screen.findByLabelText("Dataset name"), "Support dataset");
+    await userEvent.click(screen.getByRole("tab", { name: "Items" }));
     fireEvent.change(screen.getByPlaceholderText(/"ticket": ""/), { target: { value: '{"ticket":"I was charged twice."}' } });
     fireEvent.change(screen.getByPlaceholderText(/"expected": ""/), { target: { value: '{"expected":"Acknowledge and request receipt."}' } });
     await userEvent.click(screen.getByRole("button", { name: "Save dataset" }));
@@ -140,6 +141,7 @@ describe("DatasetsPage", () => {
       </MemoryRouter>,
     );
 
+    await userEvent.click(await screen.findByRole("tab", { name: "Items" }));
     expect(await screen.findByDisplayValue(/"ticket": "I was charged twice\."/)).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Duplicate" }));
 
