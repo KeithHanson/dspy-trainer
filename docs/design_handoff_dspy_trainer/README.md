@@ -1,14 +1,15 @@
 # Handoff: dspy-trainer — DSPy Agent Evaluation Platform
 
 ## Overview
-`dspy-trainer` is a single-organization web app for evaluating DSPy agents. A developer uploads a **Module Bundle** (`module.py` + `metric.py`), writes an **Evaluation Plan** (input prompts + expected answers), and the app runs the agent against the plan many times in parallel, judging each attempt pass/fail with a rationale. MLflow instruments every run at the trace level.
+`dspy-trainer` is a single-organization web app for evaluating DSPy agents. A developer uploads a **Module Bundle** (`module.py` + `metric.py`), authors a bundle-scoped **Dataset** (`input` + `label` records), creates an **Evaluation Plan** that selects that dataset, and the app runs the agent against the plan many times in parallel, judging each attempt pass/fail with a rationale. MLflow instruments every run at the trace level.
 
 This bundle covers five connected flows:
 1. **Auth** — Auth0-style hosted sign-in (GitHub / Google / Microsoft / SSO + email).
 2. **Team** — member list + a link-based invite modal.
 3. **Module Bundles** — list, drag/drop upload with sandbox validation, and a diagnostics detail view.
-4. **Evaluation Plan builder** — question/expected editor + stress config (runs-per-question, max workers).
-5. **Live run monitor (the hero)** — real-time job dashboard with per-item pass/fail, judge results, workers, and an MLflow card.
+4. **Datasets** — bundle-scoped dataset list + dedicated item editor for input/label JSON records.
+5. **Evaluation Plans** — dataset selector + stress config (runs-per-question, max workers).
+6. **Live run monitor (the hero)** — real-time job dashboard with per-item pass/fail, judge results, workers, and an MLflow card.
 
 ## About the Design Files
 The files in this bundle are **design references authored in HTML/React (via in-browser Babel)** — a working prototype demonstrating the intended look, layout, and behavior. **They are not production code to copy directly.** The task is to **recreate these designs inside the target codebase's environment**, using its established framework, component library, routing, and data layer. If no front-end environment exists yet, choose an appropriate stack (React + a router + a data-fetching layer is the natural fit) and implement the designs there.
@@ -26,7 +27,7 @@ All application data in the prototype is **mocked** (`app/mockdata.js`) and the 
 - **Structure:** `Sidebar (232px, fixed)` + `main column (flex:1)`. Main column = `Topbar (52px)` over a routed screen area.
 - **Sidebar (232px wide, bg `--bg-deep`):**
   - Org switcher header (52px tall, matches topbar): 26px rounded-square accent logo (`bolt` icon) + org name (13px/600) + "dspy-trainer" mono label (10px) + chevron.
-  - Primary nav: Overview, Module Bundles, Evaluation Plans, Eval Jobs. Each row: 16px icon (accent when active) + label (13.5px). Active row bg `--surface`, text `--text`; idle text `--text-muted`, hover bg `--panel-2`.
+  - Primary nav: Overview, Module Bundles, Datasets, Evaluation Plans, Eval Jobs. Each row: 16px icon (accent when active) + label (13.5px). Active row bg `--surface`, text `--text`; idle text `--text-muted`, hover bg `--panel-2`.
   - Eval Jobs shows a pulsing accent dot when a job is live.
   - Divider, then secondary nav: Team, Settings.
   - Footer: user avatar (28px) + name + email (ellipsised) + sign-out icon button.
@@ -59,11 +60,17 @@ Three sub-views routed by params (`upload`, `id`, else list).
 - **Upload:** dropzone (`1.5px dashed`, turns accent on drag-over) → on drop/click runs a stepped **validation** animation: each step shows spinner→check with mono detail (`Unpacking`, `Sandbox`, `Importing module.py`, `Importing metric.py`, `Resolving signature`, `Smoke-running 1 sample`). On completion: pass banner (with any warnings) + "Create eval plan" CTA. Also shows an "Expected structure" code block and a "Download example bundle" card.
 - **Detail (max 940px):** header (icon, name, version, status, mono meta) + actions (download; **Use in plan** if valid, **Re-validate** if invalid). Signature card (code block + LM target / module / metric meta). Segmented tabs: **Diagnostics** (rows with ok/warn/err icon + message + mono code), **module.py**, **metric.py** (syntax-tinted code blocks).
 
-### 4. Evaluation Plan builder (`screen_plans.jsx`)
-- **List (max 1000px):** each plan row = `layers` icon + name + status badge + mono meta (`N questions × M runs = T tasks · W workers`); pass % + age if a job exists; **Run** button on drafts; click → run monitor (if run) or edit.
-- **Builder:** `.page-head` with Cancel / Save draft / **Save & run**. Body is a two-pane split:
-  - **Main (scrolls):** Plan name input; Module bundle picker (selectable cards of *valid* bundles, accent ring when selected); Questions section with "Load sample set" + "Add question"; a 2-column grid of rows — each row = index + **Input prompt** textarea + **Expected answer** textarea + delete button.
-  - **Config rail (312px, bg `--bg-deep`, left border):** "AGENT RUN PLAN" label; two **steppers** (Runs per question, Max workers) with −/value/+ controls; an "Estimated workload" card computing `questions × runs = total tasks` + estimated wall-clock (`ceil(tasks / workers * 2.8 / 60)` min); an info note about MLflow traces.
+### 4. Datasets (`screen_datasets.jsx`)
+- **List (max 1000px):** each dataset row = `layers` icon + name + mono meta (bundle, item count, compact key preview, updated time) + actions (`Edit`, `Duplicate`, `Delete`).
+- **Editor:** tabbed editor with `Details` and `Items`.
+  - **Details tab:** dataset name, optional description, and bundle picker restricted to validated bundles.
+  - **Items tab:** left-side stacked item list (`Input 1`, `Input 2`, etc.) with add/select affordances; right-side item editor with duplicate/delete actions, bundle-schema summary, and full-width JSON editors for `input` and `label`.
+
+### 5. Evaluation Plan builder (`screen_plans.jsx`)
+- **List (max 1000px):** each plan row = `layers` icon + name + mono meta (dataset, runs per input, workers, LM profile); **Run** button on drafts; click → run monitor (if run) or edit.
+- **Builder:** `.page-head` with Cancel / Save / **Save & run**. Body is a two-pane split:
+  - **Main (scrolls):** Plan name input; Module bundle picker (selectable cards of *valid* bundles, accent ring when selected); Dataset picker filtered to the selected bundle; LM profile selector.
+  - **Config rail (312px, bg `--bg-deep`, left border):** "AGENT RUN PLAN" label; two **steppers** (Runs per input, Max workers) with −/value/+ controls; a workload card computing `dataset items × runs = total tasks`.
 
 ### 5. Live Run Monitor — HERO (`screen_runs.jsx`)
 - **Purpose:** watch a job execute in real time, then review results.

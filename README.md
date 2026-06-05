@@ -91,12 +91,33 @@ An Evaluation Plan is a saved dataset plus execution recipe.
 It stores:
 
 - the target bundle
+- the selected evaluation dataset
 - the LM profile to run with
-- the list of eval rows
 - `runs_per_question`
 - `max_workers`
 
 When you click Run, DSPy Trainer creates an `AgentRunPlan` from the saved Evaluation Plan and enqueues worker tasks.
+
+### What is a Dataset?
+
+An Evaluation Dataset is a first-class, bundle-scoped collection of reusable records.
+
+It stores:
+
+- the target bundle association
+- a name and optional description
+- one or more runtime-shaped records
+
+Each record uses the same payload structure that the evaluator runs:
+
+```json
+{
+  "input": {"<bundle input key>": "..."},
+  "label": {"<metric label key>": "..."}
+}
+```
+
+Datasets are authored on the dedicated `Datasets` screen. Plans no longer embed or edit eval rows directly.
 
 ### What is an Optimization Job?
 
@@ -199,9 +220,10 @@ Generic backend eval shape:
 
 Current UI workflow:
 
-- each row is authored as raw JSON for `input` and `label`
-- when the bundle declares `evaluation.input.fields` / `evaluation.label.fields`, the builder validates those required keys
-- row generation uses the same declared keys, so a bundle can use `question`, `zebra`, or any other key name
+- create a dataset from the `Datasets` screen
+- author each dataset item as raw JSON for `input` and `label`
+- when the bundle declares `evaluation.input.fields` / `evaluation.label.fields`, the dataset editor validates those required keys
+- the plan builder then selects that dataset instead of embedding row data
 
 Your `judge_metric(...)` can interpret the `label` payload however you want, but it must return:
 

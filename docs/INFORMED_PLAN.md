@@ -174,7 +174,12 @@ Required cross-system fields:
 
 ### Datasets + Scenarios
 
-- `POST /datasets`
+- `POST /evaluation-datasets`
+- `GET /evaluation-datasets`
+- `GET /evaluation-datasets/:id`
+- `PATCH /evaluation-datasets/:id`
+- `POST /evaluation-datasets/:id/duplicate`
+- `DELETE /evaluation-datasets/:id`
 - `POST /scenarios`
 
 ### LLM Configuration
