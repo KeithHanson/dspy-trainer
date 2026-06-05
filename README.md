@@ -1,15 +1,36 @@
-# dspy-trainer
+# WARNING
 
-DSPy Trainer is a local evaluation and optimization workbench for DSPy programs. It gives you a GitHub-backed bundle workflow, repeatable eval runs, optimization jobs, worker orchestration, and MLflow-linked provenance without requiring you to build all of that plumbing yourself.
+This is still very much a WIP. Move along unless you like the bleeding edge!
 
-Developer bootstrap and day-2 operations are documented in `docs/COMPOSE_RUNBOOK.md`.
 
-## QuickStart
+# DSPy Trainer
+> **A local evaluation and optimization workbench for DSPy programs**  
+> Build, test, and optimize your DSPy agents with repeatable evals, automated optimization, and full GitHub-backed provenance.
 
-1. Copy `.env.sample` to `.env` and fill in at least:
-   - `GITHUB_PAT`
-   - any infra/auth values you want to override locally
-2. Start the stack from repo root:
+---
+
+## Why DSPy Trainer?
+
+Building production LLM programs requires iteration—lots of it. DSPy Trainer gives you:
+
+- **GitHub-first workflow**: Track your DSPy programs as repositories, not opaque files
+- **Repeatable evaluations**: Run the same tests against different models, prompts, or optimized versions
+- **Automated optimization**: Let DSPy's optimizers (MIPROv2, BootstrapFewShot, GEPA) improve your program automatically
+- **Full provenance**: Every eval and optimization links to MLflow tracking with commit SHA, metrics, and artifacts
+- **No vendor lock-in**: Uses LiteLLM for model routing—swap providers without code changes
+
+---
+
+## Quick Start
+
+### 1. Configure Environment
+
+```bash
+cp .env.sample .env
+# Edit .env - at minimum, add your GITHUB_PAT
+```
+
+### 2. Start the Stack
 
 ```bash
 docker compose pull --ignore-pull-failures
@@ -17,398 +38,565 @@ docker compose build --pull
 docker compose up -d --remove-orphans
 ```
 
-3. Open the app:
-   - Web UI: `http://localhost:3000`
-   - Backend: `http://localhost:8000`
-   - MLflow: `http://localhost:5001`
-   - LiteLLM proxy: `http://localhost:4000`
-4. Download the sample bundle from the Bundles page.
-5. Push that bundle to a GitHub repository.
-6. Import the repository from the Bundles page.
-7. Create an LM Profile in the app.
-8. Validate the bundle, create an Evaluation Plan, run evals, then launch an Optimization Job from a successful run.
+### 3. Access the Platform
 
-## What is this?
+| Service | URL |
+|---------|-----|
+| **Web UI** | http://localhost:3000 |
+| **Backend API** | http://localhost:8000 |
+| **MLflow** | http://localhost:5001 |
+| **LiteLLM Proxy** | http://localhost:4000 |
 
-DSPy Trainer is the control plane around a DSPy program lifecycle:
+### 4. Your First Eval
 
-- bundle authoring
-- bundle validation
-- repeated evaluation runs
-- optimization dataset derivation
-- optimization execution
-- follow-up baseline vs optimized comparison
-- Git-backed writeback with provenance
+1. **Download** the sample bundle from the Bundles page
+2. **Push** it to a GitHub repository
+3. **Import** the repository into DSPy Trainer
+4. **Create** an LM Profile for your model
+5. **Create** a Dataset with test cases
+6. **Run** an evaluation plan
+7. **Launch** an optimization job from successful runs
 
-It is intentionally GitHub-first. The tracked artifact is a repository checkout plus commit SHA, not an opaque uploaded zip.
+📖 **Detailed setup guide**: See [`docs/COMPOSE_RUNBOOK.md`](docs/COMPOSE_RUNBOOK.md)
 
-### What is DSPy?
+---
 
-DSPy is a framework for building LLM programs in Python using typed signatures, modules, predictors, optimizers, and evaluation utilities. Instead of treating prompts as raw strings everywhere, you define structured program components and let DSPy handle execution and optimization patterns.
+## Core Concepts
 
-In this project, a bundle is a small DSPy program package that exposes:
+### 🎁 Bundle
 
-- a runnable program via `build_program()`
-- a judge function via `judge_metric(...)`
-- metadata in `bundle.toml`
+A **bundle** is a GitHub repository (or subfolder) containing your DSPy program:
 
-### What is an eval?
+```
+my-bundle/
+├── module.py          # DSPy program with build_program()
+├── metric.py          # Judge function with judge_metric(example, prediction)
+├── bundle.toml        # Metadata and configuration
+└── requirements.txt   # Optional: Python dependencies
+```
 
-An eval is a repeatable test run of a bundle against prepared input/label examples.
+**Key points:**
+- GitHub-backed with commit provenance
+- Validated before first run
+- Can declare optimized program state for loading
 
-At runtime, DSPy Trainer:
+### 📊 Dataset
 
-1. loads the bundle program
-2. executes the program on each input
-3. calls the bundle's `judge_metric(example, prediction, trace=None)`
-4. records score, rationale, pass/fail, raw outputs, and worker logs
-5. aggregates results into a run summary and MLflow-linked provenance
-
-## DSPy Trainer Specific Terminology
-
-### What is a bundle?
-
-A bundle is the unit of code that DSPy Trainer tracks and runs.
-
-For the current architecture, a compatible bundle is a GitHub repository root or GitHub subfolder containing:
-
-- `module.py`
-- `metric.py`
-- `bundle.toml`
-
-Optional bundle files include:
-
-- `requirements.txt`
-- an optimized program state file referenced by `bundle.toml`
-- helper scripts such as `run_agent.py`
-
-The validator enforces the core contract before the bundle becomes runnable.
-
-### What is an Evaluation Plan?
-
-An Evaluation Plan is a saved dataset plus execution recipe.
-
-It stores:
-
-- the target bundle
-- the selected evaluation dataset
-- the LM profile to run with
-- `runs_per_question`
-- `max_workers`
-
-When you click Run, DSPy Trainer creates an `AgentRunPlan` from the saved Evaluation Plan and enqueues worker tasks.
-
-### What is a Dataset?
-
-An Evaluation Dataset is a first-class, bundle-scoped collection of reusable records.
-
-It stores:
-
-- the target bundle association
-- a name and optional description
-- one or more runtime-shaped records
-
-Each record uses the same payload structure that the evaluator runs:
+A **dataset** is a reusable collection of test cases for a bundle:
 
 ```json
 {
-  "input": {"<bundle input key>": "..."},
-  "label": {"<metric label key>": "..."}
+  "input": {"question": "How do I reset my password?"},
+  "label": {"expected": "Direct them to /reset-password"}
 }
 ```
 
-Datasets are authored on the dedicated `Datasets` screen. Plans no longer embed or edit eval rows directly.
+- Scoped to a specific bundle
+- Reusable across evaluation plans
+- Validates against bundle's declared input/label schema
 
-### What is an Optimization Job?
+### 📋 Evaluation Plan
 
-An Optimization Job is a background optimization run against a tracked bundle.
+An **evaluation plan** runs your bundle against a dataset:
 
-It includes:
+- Select dataset, LM profile, bundle version
+- Configure `runs_per_question` and `max_workers`
+- Creates a run plan with detailed per-task results
+- Links to MLflow parent run for tracking
 
-- source bundle revision and commit provenance
-- source run plan reference
-- optimization strategy (`BootstrapFewShot`, `MIPROv2`, or `GEPA`)
-- execution and helper LM profile routing
-- comparison of baseline vs optimized performance
-- resulting optimization branch metadata
+### 🚀 Optimization Job
 
-Successful jobs create:
+An **optimization job** uses DSPy optimizers to improve your program:
 
-- an optimization artifact (`program.json` or equivalent state)
-- a follow-up evaluation plan and eval run
-- a Git branch named `optimization-<job-prefix>` for manual merge
+1. **Derive training data** from eval results
+2. **Run optimizer** (MIPROv2, BootstrapFewShot, or GEPA)
+3. **Generate optimized artifact** (e.g., `program.json`)
+4. **Push to optimization branch** for review
+5. **Run comparison eval** (baseline vs optimized)
 
-### How do I create my own compatible bundle?
+**Result**: A Git branch you can review and merge manually.
 
-Start from the sample bundle and keep the contract minimal.
+### 🤖 LM Profile
 
-Required files:
+An **LM profile** configures model routing through LiteLLM:
 
-1. `module.py`
-2. `metric.py`
-3. `bundle.toml`
+- Model name (e.g., `openai/gpt-4o-mini`)
+- Temperature, max tokens, timeouts
+- API keys and virtual key aliases
+- Swap providers without changing bundle code
 
-Required code behavior:
+---
 
-- `module.py` must define at least one DSPy `Signature`
-- `module.py` must define at least one `dspy.Module` subclass
-- `module.py` must expose `build_program()` with no required arguments
-- `metric.py` must expose `judge_metric(example, prediction)` or `judge_metric(example, prediction, trace=None)`
-- `bundle.toml` must include non-empty `name` and `version`
-- `bundle.toml` must include numeric `score_pass_threshold` between `0.0` and `1.0`
+## What is DSPy?
 
-Optional but useful additions:
+[**DSPy**](https://dspy.ai) is a framework for **programming** (not prompting) LLM applications:
 
-- `requirements.txt` for Python dependencies
-- `run_agent.py` for local manual testing
-- `optimized_program_state` in `bundle.toml` when you want to load saved program state
-- an `evaluation` section in `bundle.toml` so the UI knows which input and label keys to author
+- Define typed **signatures** (input/output contracts)
+- Compose **modules** (predictors, chains, pipelines)
+- Use **optimizers** to improve prompts and weights automatically
+- Evaluate with **metrics** instead of manual prompt tweaking
 
-Example `bundle.toml` eval contract:
+Instead of:
+```python
+prompt = "You are a helpful assistant. Answer this question: {question}"
+```
 
+You write:
+```python
+class Answer(dspy.Signature):
+    question: str = dspy.InputField()
+    answer: str = dspy.OutputField()
+
+program = dspy.ChainOfThought(Answer)
+```
+
+DSPy handles execution, optimization, and prompt engineering for you.
+
+---
+
+## Architecture Overview
+
+```
+┌─────────────┐
+│   Web UI    │  React app - create bundles, plans, view results
+└──────┬──────┘
+       │
+┌──────▼──────┐
+│  Backend    │  FastAPI - validation, orchestration, APIs
+└──────┬──────┘
+       │
+┌──────▼──────┐
+│   Worker    │  Eval execution, optimization jobs (scales)
+└──────┬──────┘
+       │
+┌──────┴──────────────────────────────┐
+│  Postgres  │  Redis  │  MLflow  │  LiteLLM │
+└─────────────────────────────────────┘
+```
+
+**Services:**
+- **Backend**: Control plane (FastAPI)
+- **Worker**: Execution engine (async job processing)
+- **Postgres**: Primary app store
+- **Redis**: Queue + worker coordination
+- **MLflow**: Experiment tracking
+- **LiteLLM**: Unified LLM gateway
+
+See [`docs/INFORMED_PLAN.md`](docs/INFORMED_PLAN.md) for detailed architecture.
+
+---
+
+## Creating Your Own Bundle
+
+### Minimum Required Files
+
+**`module.py`**
+```python
+import dspy
+
+class YourSignature(dspy.Signature):
+    question: str = dspy.InputField()
+    answer: str = dspy.OutputField()
+
+class YourProgram(dspy.Module):
+    def __init__(self):
+        self.predictor = dspy.ChainOfThought(YourSignature)
+    
+    def forward(self, question):
+        return self.predictor(question=question)
+
+def build_program():
+    return YourProgram()
+```
+
+**`metric.py`**
+```python
+def judge_metric(example, prediction, trace=None):
+    # Your scoring logic here
+    score = 1.0 if prediction.answer == example.expected else 0.0
+    
+    return {
+        "score": score,
+        "rationale": "Match" if score > 0 else "Mismatch",
+        "flags": [],
+        "raw_response": {}
+    }
+```
+
+**`bundle.toml`**
 ```toml
+name = "your-bundle-name"
+version = "0.1.0"
+score_pass_threshold = 0.8
+dspy_version = ">=2.5,<3.0"
+
 [evaluation.input]
 fields = [{ key = "question", label = "Question", required = true, multiline = true }]
 
 [evaluation.label]
-fields = [{ key = "expected", label = "Expected response", required = true, multiline = true }]
+fields = [{ key = "expected", label = "Expected", required = true, multiline = true }]
 ```
 
-If your bundle signature uses `zebra` instead of `question`, declare `key = "zebra"` and the plan builder will author `input.zebra` instead of hardcoding `input.question`.
-
-### How do I test my bundle on the cli before running evals?
-
-The sample bundle includes `run_agent.py` specifically for the local make-it-work loop.
-
-Typical flow:
-
-1. set model credentials in `.env`
-2. run the bundle locally
-3. inspect the raw prediction result
-4. repeat until the basic behavior is good enough for evals
-
-Example:
+### Testing Locally
 
 ```bash
-python run_agent.py --question "Ticket: I was charged twice for order #8842.
-History: Customer already contacted support yesterday and shared the order receipt."
+cd your-bundle/
+python run_agent.py --question "Your test question here"
 ```
 
-The sample runner auto-loads `.env` with `python-dotenv` and reads:
+The sample bundle includes `run_agent.py` for local development. Copy it to your bundle and customize as needed.
 
-- `DSPY_MODEL` or `OPENAI_MODEL`
-- `DSPY_API_BASE` or `OPENAI_API_BASE`
-- `DSPY_API_KEY` or `OPENAI_API_KEY`
+**Example**: See [`backend/sample_bundles/example-bundle/`](backend/sample_bundles/example-bundle/)
 
-If you are using an LM Profile virtual key through LiteLLM, point the script at the proxy and use the profile alias model name.
+---
 
-### How do I prepare Input/Output data for evals?
+## Workflow Deep Dive
 
-There are two layers to think about:
+### 1. Bundle Validation
 
-1. the generic backend eval shape
-2. the bundle-declared authoring contract
+When you import a bundle, DSPy Trainer:
 
-Generic backend eval shape:
+- ✅ Verifies `module.py` has `build_program()`
+- ✅ Verifies `metric.py` has `judge_metric(example, prediction)`
+- ✅ Checks `bundle.toml` structure
+- ✅ Validates required fields
+- ✅ Tracks Git commit SHA for provenance
+
+### 2. Evaluation Execution
+
+When you run an eval plan:
+
+1. Worker loads bundle from checkout
+2. Installs `requirements.txt` if present (cached)
+3. Builds program via `build_program()`
+4. Runs program on each dataset item
+5. Calls `judge_metric()` with prediction
+6. Records score, rationale, flags, and raw outputs
+7. Updates MLflow with correlated telemetry
+
+### 3. Optimization Flow
+
+When you launch an optimization job:
+
+1. Derives training data from eval results
+   - **BootstrapFewShot/MIPROv2**: Use high-scoring examples as demos
+   - **GEPA**: Use judge rationale as feedback
+2. Runs DSPy optimizer (`compile()`)
+3. Generates optimized artifact (e.g., `program.json`)
+4. Creates temporary Git worktree
+5. Writes artifact + updates `bundle.toml`
+6. Commits and pushes to `optimization-<job-prefix>` branch
+7. Runs follow-up eval (baseline vs optimized comparison)
+
+**Result**: Review the branch in GitHub, then merge manually.
+
+### 4. Git Integration
+
+DSPy Trainer tracks bundle state:
+
+- `github_repo_url`, `github_branch`, `github_subpath`
+- `current_commit_sha` (what's checked out)
+- `upstream_commit_sha` (what's on GitHub)
+- `sync_status`: `synced`, `behind`, `ahead`, `diverged`, `sync_error`
+
+Optimization writeback:
+- Does **not** modify your tracked branch directly
+- Pushes to a separate `optimization-*` branch
+- You review and merge manually
+
+---
+
+## Advanced Topics
+
+### Bundle Hooks
+
+**Optional in `module.py`:**
+
+```python
+def build_lm():
+    """Override LM construction if bundle needs custom LM setup"""
+    return dspy.LM(model="...", api_key="...")
+```
+
+**Optional on program instance:**
+
+```python
+class YourProgram(dspy.Module):
+    def dump_state(self):
+        """Export optimized state for persistence"""
+        return {"demos": self.predictor.demos}
+    
+    def load_state(self, state):
+        """Load optimized state from bundle.toml"""
+        self.predictor.demos = state["demos"]
+```
+
+### Optimization Strategies
+
+| Strategy | Best For | Training Data Source |
+|----------|----------|---------------------|
+| **BootstrapFewShot** | Few-shot learning | High-scoring eval examples |
+| **MIPROv2** | Instruction + demo optimization | High-scoring eval examples |
+| **GEPA** | Reflection-based optimization | Judge rationale as feedback |
+
+### Dataset Schema
+
+Each dataset record uses:
 
 ```json
 {
-  "input": {"<bundle input key>": "..."},
-  "label": {"<metric label key>": "..."}
+  "input": {
+    "<bundle_input_key>": "value"
+  },
+  "label": {
+    "<metric_label_key>": "value"
+  }
 }
 ```
 
-Current UI workflow:
+The bundle's `evaluation.input.fields` and `evaluation.label.fields` in `bundle.toml` define the expected keys.
 
-- create a dataset from the `Datasets` screen
-- author each dataset item as raw JSON for `input` and `label`
-- when the bundle declares `evaluation.input.fields` / `evaluation.label.fields`, the dataset editor validates those required keys
-- the plan builder then selects that dataset instead of embedding row data
+### MLflow Correlation
 
-Your `judge_metric(...)` can interpret the `label` payload however you want, but it must return:
+- One MLflow **experiment** per project
+- One parent **run** per evaluation plan
+- Task-level telemetry correlated to parent run
+- Backend remains source of truth; MLflow is tracking plane
 
-```json
-{
-  "score": 1.0,
-  "rationale": "why",
-  "flags": [],
-  "raw_response": {}
-}
+---
+
+## Troubleshooting
+
+### Bundle Validation Fails
+
+**Check:**
+- Does `module.py` define `build_program()`?
+- Does `metric.py` define `judge_metric(example, prediction)`?
+- Is `bundle.toml` valid TOML with `name`, `version`, `score_pass_threshold`?
+
+**Debug:**
+```bash
+docker compose logs --tail=200 backend
 ```
 
-### How do I convert an eval to an optimization run?
+### Eval Tasks Fail
 
-Current flow:
+**Common causes:**
+- Missing/invalid LM Profile
+- Bundle `requirements.txt` dependencies failed to install
+- Judge metric crashed or returned invalid shape
 
-1. run an Evaluation Plan
-2. open the resulting run in Runs
-3. launch an Optimization Job
-4. choose the source run plan
-5. choose the optimization strategy
-6. choose execution/helper LM profiles
-7. set the target bundle version
+**Debug:**
+```bash
+docker compose logs --tail=200 worker
+```
 
-The optimization launcher derives training data from the source run plan:
+**View task logs:** Check the Runs page in Web UI for per-task worker logs.
 
-- `BootstrapFewShot` and `MIPROv2` derive demo-style records from eval passes
-- `GEPA` derives feedback-style records from eval outputs and judge rationale
+### GitHub Access Not Configured
 
-### How do I merge my optimizations in?
+**Symptoms:**
+- Bundles page says "GitHub access not configured"
 
-Optimization writeback does not update your tracked main branch directly anymore.
+**Fix:**
+1. Add `GITHUB_PAT` to `.env`
+2. Restart services:
+   ```bash
+   docker compose up -d --force-recreate backend worker
+   ```
 
-Instead, DSPy Trainer:
+### Optimization Writeback Fails
 
-1. creates a temporary worktree from the tracked bundle checkout
-2. writes optimization output into that worktree
-3. commits the result
-4. pushes to a branch named `optimization-<job-prefix>`
+**Symptoms:**
+- Job reaches writeback and fails with "Author identity unknown"
 
-Your merge flow is:
+**Fix:**
+1. Add `GIT_COMMIT_NAME` and `GIT_COMMIT_EMAIL` to `.env`
+2. Restart services:
+   ```bash
+   docker compose up -d --force-recreate backend worker
+   ```
 
-1. review the optimization branch in GitHub
-2. merge it manually into your normal branch
-3. return to DSPy Trainer
-4. refresh sync status on the bundle
-5. sync the tracked branch forward
+---
 
-## Deep Dive: How it all works
+## Configuration
 
-### How dspy trainer handles bundles and git
+### Environment Variables
 
-Bundle import path:
+Key variables in `.env`:
 
-1. `POST /modules/import` receives GitHub repo URL, branch, and optional subpath.
-2. Backend clones the repo into a persistent checkout root.
-3. If `github_subpath` is set, validation runs against that subfolder.
-4. Validator checks `module.py`, `metric.py`, and `bundle.toml`.
-5. Bundle metadata, checkout path, sync state, revision history, commit SHA, and diagnostics are persisted in Postgres.
+| Variable | Purpose | Required |
+|----------|---------|----------|
+| `GITHUB_PAT` | GitHub API access for bundle import/sync | ✅ |
+| `GIT_COMMIT_NAME` | Git author name for optimization commits | Recommended |
+| `GIT_COMMIT_EMAIL` | Git author email for optimization commits | Recommended |
+| `DSPY_TRAINER_POSTGRES_DSN` | Postgres connection | ✅ (auto in Compose) |
+| `DSPY_TRAINER_REDIS_URL` | Redis connection | ✅ (auto in Compose) |
+| `LITELLM_MASTER_KEY` | LiteLLM proxy auth | ✅ (auto in Compose) |
 
-Git-specific concepts tracked per module:
+See [`.env.sample`](.env.sample) for full reference.
 
-- `github_repo_url`
-- `github_branch`
-- `github_subpath`
-- `checkout_path`
-- `current_commit_sha`
-- `upstream_commit_sha`
-- `sync_status`
-- `current_revision_id`
+### LiteLLM Configuration
 
-Sync model:
+LiteLLM runs as an internal proxy. Model routing is configured via **LM Profiles** in the Web UI:
 
-- `refresh sync status` fetches upstream and compares `HEAD`, `FETCH_HEAD`, and merge-base
-- sync states include `synced`, `behind`, `ahead`, `diverged`, and `sync_error`
-- mutating operations fail fast if the bundle is `behind`, `diverged`, or `sync_error`
+1. Go to LM Profiles page
+2. Click "Create Profile"
+3. Enter model name (e.g., `openai/gpt-4o-mini`)
+4. Add API key or select existing key
+5. Configure temperature, max tokens, etc.
 
-Runtime dependency model:
+LM Profiles provision virtual keys in LiteLLM dynamically.
 
-- if a bundle has `requirements.txt`, backend/worker install dependencies before execution
-- installs are cached per process by the hash of `requirements.txt`
+---
 
-### How dspy trainer handles evals
+## API Documentation
 
-Eval flow:
+The backend exposes a comprehensive REST API. Key endpoints:
 
-1. Evaluation Plan is created from authored rows.
-2. Running that plan creates an `AgentRunPlan`.
-3. `enqueue` expands the run into `AgentRunTask` rows.
-4. Redis queues the tasks.
-5. Worker processes pull tasks and execute bundle code.
-6. Each task loads the bundle program and runs one item.
-7. `judge_metric(...)` produces score/rationale/flags/raw response.
-8. Task rows are updated with:
-   - prediction payload
-   - numeric score
-   - pass/fail
-   - rationale
-   - worker log
-9. Plan reconciliation updates rollup status and aggregate counts.
+**Bundles:**
+- `POST /modules/import` - Import GitHub bundle
+- `POST /modules/{id}/validate` - Validate bundle contract
+- `GET /modules/{id}/sync-status` - Check Git sync state
+- `POST /modules/{id}/sync` - Pull latest from GitHub
 
-MLflow correlation:
+**Datasets:**
+- `POST /evaluation-datasets` - Create dataset
+- `GET /evaluation-datasets` - List datasets
+- `PATCH /evaluation-datasets/{id}/items` - Update dataset items
 
-- one parent MLflow run is created per `AgentRunPlan`
-- task-level execution is correlated back to that parent
-- run metadata includes bundle revision / commit provenance
+**Evaluation:**
+- `POST /evaluation-plans` - Create reusable eval plan
+- `POST /evaluation-plans/{id}/run` - Launch eval from plan
+- `GET /agent-run-plans/{id}` - Get run status/results
 
-Current status model for eval runs:
+**Optimization:**
+- `POST /optimization/jobs` - Launch optimization job
+- `GET /optimization/jobs/{id}` - Get job status
+- `POST /optimization/jobs/{id}/cancel` - Cancel running job
 
-- `draft`
-- `queued`
-- `running`
-- `succeeded`
-- `failed`
-- `canceled`
+**LM Profiles:**
+- `POST /lm-profiles` - Create LM profile
+- `GET /lm-profiles` - List profiles
+- `PATCH /lm-profiles/{id}` - Update profile
 
-### How dspy trainer handles optimizations
+**Interactive API docs:** http://localhost:8000/docs (when running)
 
-Optimization flow:
+---
 
-1. User launches an Optimization Job from a validated bundle and source run plan.
-2. Backend records source bundle provenance on the job.
-3. Worker derives a training dataset from eval results if needed.
-4. Worker executes DSPy optimization.
-5. The optimized program state is written to an artifact directory.
-6. Backend prepares a writeback bundle and creates a follow-up eval run.
-7. Follow-up eval produces the optimized score.
-8. Backend commits the optimized output to `optimization-<job-prefix>`.
-9. Optimization job stores:
-   - resulting bundle branch
-   - resulting bundle commit SHA
-   - resulting bundle revision ID
-   - resulting bundle version
+## Development Guide
 
-Important behavior:
+### Running Tests
 
-- the tracked bundle stays pinned to its configured branch until you merge and sync
-- optimization writeback updates `bundle.toml` with `optimized_program_state` and `source_optimization_job_id`
-- successful optimization jobs create a follow-up Evaluation Plan and eval run automatically
+**Backend:**
+```bash
+cd backend/
+pytest
+```
 
-### List of overrideable methods in the bundle
+**Frontend:**
+```bash
+cd web/
+npm test
+```
 
-Required in `module.py`:
+### Project Structure
 
-- `build_program()`
-  - must exist
-  - must not require positional arguments
-  - should return a `dspy.Module`
+```
+dspy-trainer/
+├── backend/           # FastAPI backend + worker
+│   ├── app/
+│   │   ├── main.py           # API routes
+│   │   ├── services.py       # Orchestration layer
+│   │   ├── config.py         # Pydantic settings
+│   │   ├── executor/         # Bundle execution
+│   │   ├── validator/        # Bundle validation
+│   │   └── lm/               # LiteLLM integration
+│   ├── worker.py             # Redis queue worker
+│   ├── tests/
+│   └── sample_bundles/       # Example bundle
+├── web/               # React frontend
+│   ├── src/
+│   │   ├── bundles/
+│   │   ├── plans/
+│   │   ├── runs/
+│   │   ├── datasets/
+│   │   ├── optimization/
+│   │   └── lmProfiles/
+│   └── package.json
+├── docs/              # Architecture & ops docs
+├── ops/               # LiteLLM proxy config
+├── dspy/              # DSPy reference submodule
+└── docker-compose.yml
+```
 
-Optional in `module.py`:
+### Adding New Features
 
-- `build_lm()`
-  - if defined, it must not require positional arguments
-  - used when the bundle wants to provide its own LM construction path
-  - execution can still be overridden by DSPy Trainer LM profiles
+**Conventions:**
+- Backend: Extend `AppServices` in `services.py`
+- Frontend: Page-centric components with colocated state
+- Tests: Required for new functionality
 
-Required in `metric.py`:
+See [`.serena/memories/conventions.md`](.serena/memories/conventions.md) for detailed patterns.
 
-- `judge_metric(example, prediction)`
-- or `judge_metric(example, prediction, trace=None)`
+---
 
-Optional program-state hooks on the program instance returned by `build_program()`:
+## FAQ
 
-- `dump_state()`
-- `load_state(state)`
+**Q: What's the difference between a bundle and a DSPy program?**  
+A: A bundle is the packaging format DSPy Trainer uses. Your DSPy program lives in `module.py` inside the bundle.
 
-These matter when using `optimized_program_state` in `bundle.toml`.
+**Q: Can I use my own LLM provider?**  
+A: Yes! LiteLLM supports 100+ providers. Just create an LM Profile with your provider's model name.
 
-Required `bundle.toml` fields:
+**Q: Do I need to use GitHub?**  
+A: Yes, for now. GitHub-first design enables commit provenance and collaborative workflows.
 
-- `name`
-- `version`
-- `score_pass_threshold`
+**Q: Can I run this on a remote server?**  
+A: Yes, it's Docker Compose. Adjust ports/auth as needed. Auth0 is currently required for Web UI.
 
-Optional `bundle.toml` fields currently used by DSPy Trainer:
+**Q: How do I scale worker capacity?**  
+A: Increase worker replicas in `docker-compose.yml`:
+```yaml
+worker:
+  deploy:
+    replicas: 4
+```
 
-- `optimized_program_state`
-- `dspy_version`
-- `evaluation.input.fields`
-- `evaluation.label.fields`
-- `source_optimization_job_id` (written during optimization writeback)
+**Q: Can I use this for production LLM apps?**  
+A: DSPy Trainer is designed for **development and optimization**. Once you've optimized your bundle, deploy the DSPy program itself (not DSPy Trainer) in production.
 
-## Notes
+---
 
-- GitHub access is configured server-side through `GITHUB_PAT` / `DSPY_TRAINER_GITHUB_PAT`.
-- The web UI never collects or stores the PAT.
-- Sample bundle bootstrap and local runner examples live under `backend/sample_bundles/example-bundle/`.
-- LiteLLM runs as an internal proxy and model routing is expected to be configured through LM Profiles created in the app, not through repo-level upstream model env vars.
+## Contributing
+
+This project uses `bd` (beads) for issue tracking:
+
+```bash
+bd ready              # Find available work
+bd show <id>          # View issue details
+bd update <id> --claim  # Claim work
+bd close <id>         # Complete work
+```
+
+See [`AGENTS.md`](AGENTS.md) for detailed contribution guidelines.
+
+---
+
+## Resources
+
+- **DSPy Framework**: https://dspy.ai
+- **LiteLLM Docs**: https://docs.litellm.ai
+- **MLflow Docs**: https://mlflow.org/docs/latest/index.html
+- **Compose Runbook**: [`docs/COMPOSE_RUNBOOK.md`](docs/COMPOSE_RUNBOOK.md)
+- **Architecture Plan**: [`docs/INFORMED_PLAN.md`](docs/INFORMED_PLAN.md)
+
+---
+
+## License
+
+[Add your license here]
+
+---
+
+**Built for DSPy developers who want to iterate fast without building infrastructure from scratch.**
