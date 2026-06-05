@@ -332,7 +332,6 @@ export function DatasetEditorPage() {
   const [generatorPrompt, setGeneratorPrompt] = useState("");
   const [generatorExamples, setGeneratorExamples] = useState("");
   const [isGeneratingRows, setIsGeneratingRows] = useState(false);
-  const [generatedRowsPreview, setGeneratedRowsPreview] = useState([]);
   const [generationError, setGenerationError] = useState("");
 
   const validModules = useMemo(() => modules.filter((item) => item.validation_status === "passed"), [modules]);
@@ -475,22 +474,20 @@ export function DatasetEditorPage() {
     });
   };
 
-  const insertGeneratedRows = () => {
-    if (!generatedRowsPreview.length) {
+  const insertGeneratedRows = (rows) => {
+    if (!rows.length) {
       return;
     }
     const insertedAt = Date.now();
-    const nextItems = generatedRowsPreview.map((row, index) => createItemFromPayloads(`generated-${insertedAt}-${index}`, row.input, row.label));
+    const nextItems = rows.map((row, index) => createItemFromPayloads(`generated-${insertedAt}-${index}`, row.input, row.label));
     setItems((prev) => [...prev, ...nextItems]);
     setSelectedItemId(nextItems[0]?.id || selectedItemId);
     setIsGeneratorOpen(false);
-    setGeneratedRowsPreview([]);
     setGenerationError("");
   };
 
   const generateRowsPreview = async () => {
     setGenerationError("");
-    setGeneratedRowsPreview([]);
     if (!selectedBundleId) {
       setGenerationError("Select a validated bundle before generating items.");
       return;
@@ -539,7 +536,7 @@ export function DatasetEditorPage() {
       if (!previewRows.length) {
         throw new Error("Generated items could not be previewed.");
       }
-      setGeneratedRowsPreview(previewRows);
+      insertGeneratedRows(previewRows);
     } catch (err) {
       setGenerationError(err instanceof Error ? err.message : "Could not generate items");
     } finally {
@@ -659,7 +656,7 @@ export function DatasetEditorPage() {
           <div className="datasets-items-layout">
             <aside className="datasets-items-rail datasets-tab-panel">
               <div className="row between datasets-items-rail-head">
-                <div className="row gap-2"><span className="t-label">Items</span><span className="plans-count">{items.length}</span></div>
+                <div className="row gap-2"><span className="t-label">Items</span></div>
                 <div className="row gap-2">
                   <Button size="sm" onClick={() => setIsGeneratorOpen(true)}>Generate with LLM</Button>
                   <Button size="sm" onClick={addItem}>Add item</Button>
@@ -760,30 +757,14 @@ export function DatasetEditorPage() {
             </label>
 
             <div className="row gap-2" style={{ marginBottom: 12 }}>
-              <Button variant="primary" onClick={generateRowsPreview} disabled={isGeneratingRows}>{isGeneratingRows ? "Generating..." : "Generate preview"}</Button>
-              {generatedRowsPreview.length ? <Button onClick={insertGeneratedRows}>Approve + insert items</Button> : null}
+              <Button variant="primary" onClick={generateRowsPreview} disabled={isGeneratingRows}>{isGeneratingRows ? "Generating..." : "Generate items"}</Button>
             </div>
 
             {generationError ? <div className="plans-validation-alert" role="alert"><p className="plans-validation-copy">{generationError}</p></div> : null}
 
-            {generatedRowsPreview.length ? (
-              <div className="col gap-2">
-                <div className="t-h2">Preview</div>
-                {generatedRowsPreview.map((row, index) => (
-                  <div key={row.id} className="panel card-pad col gap-2">
-                    <div className="cap mono">Item {index + 1}</div>
-                    <div className="col gap-1">
-                      <span className="t-label">Input JSON</span>
-                      <textarea className="plans-textarea datasets-editor-textarea" rows={6} value={stringifyJson(row.input)} readOnly />
-                    </div>
-                    <div className="col gap-1">
-                      <span className="t-label">Label JSON</span>
-                      <textarea className="plans-textarea datasets-editor-textarea" rows={6} value={stringifyJson(row.label)} readOnly />
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : null}
+            <p className="muted t-sm">
+              Generated items insert immediately and close this dialog. You can review or delete any row from the dataset editor afterward.
+            </p>
           </div>
         </div>
       ) : null}

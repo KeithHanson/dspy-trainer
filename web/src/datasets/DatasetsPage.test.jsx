@@ -209,14 +209,10 @@ describe("DatasetsPage", () => {
     await userEvent.click(screen.getByRole("button", { name: "Generate with LLM" }));
     await userEvent.selectOptions(screen.getByLabelText("LM profile"), "lm-1");
     await userEvent.type(screen.getByLabelText("What items do you need?"), "Generate refund-support items.");
-    await userEvent.click(screen.getByRole("button", { name: "Generate preview" }));
-
-    expect(await screen.findByDisplayValue(/Customer needs a refund after a duplicate charge/)).toBeInTheDocument();
-    expect(screen.getByDisplayValue(/Confirm the reply explains the refund path/)).toBeInTheDocument();
-
-    await userEvent.click(screen.getByRole("button", { name: "Approve + insert items" }));
+    await userEvent.click(screen.getByRole("button", { name: "Generate items" }));
 
     expect(await screen.findByDisplayValue(/"judge_instructions": "Confirm the reply explains the refund path and requests charge evidence."/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Generate items" })).not.toBeInTheDocument();
 
     const generateCall = fetchMock.mock.calls.find(([url, request]) => String(url).endsWith("/evaluation-datasets/generate-rows") && request?.method === "POST");
     expect(generateCall).toBeTruthy();

@@ -343,6 +343,10 @@ button { font-family: inherit; }
   width: min(560px, 100%);
   background: var(--panel);
 }
+.plans-generate-modal {
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+}
 .bundles-snippet-wrap { margin-top: 12px; }
 .bundles-snippet {
   margin: 0;
