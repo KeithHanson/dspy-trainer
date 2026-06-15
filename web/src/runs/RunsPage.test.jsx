@@ -179,9 +179,62 @@ describe("RunsPage", () => {
 
     expect(await screen.findByText("Run summary")).toBeInTheDocument();
     expect(await screen.findByText(/LM profile: GPT-4o/)).toBeInTheDocument();
+    const averageScoreLabel = await screen.findByText("Average Score");
+    expect(averageScoreLabel).toBeInTheDocument();
+    expect(averageScoreLabel.closest(".runs-kpi")?.textContent).toContain("-");
     expect(await screen.findByText("Workers")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Cancel run" })).toBeInTheDocument();
     expect((await screen.findAllByText("running")).length).toBeGreaterThan(0);
+    vi.unstubAllGlobals();
+  });
+
+  it("shows average score in the run summary", async () => {
+    const fetchMock = vi.fn((url, init) => {
+      if (String(url).endsWith("/agent-run-plans/plan-1") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue({
+            id: "plan-1",
+            status: "succeeded",
+            lm_profile_id: "lm-1",
+            completed_tasks: 2,
+            total_tasks: 2,
+            failed_tasks: 0,
+            max_workers: 1,
+            score_pass_threshold: 0.8,
+          }),
+        });
+      }
+      if (String(url).includes("/agent-run-plans/plan-1/tasks") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue({
+            items: [
+              { id: "t1", question_index: 0, attempt_index: 0, status: "succeeded", eval_pass: true, score: 1, worker_id: "worker-1", input_payload: {}, label_payload: {}, prediction_payload: {} },
+              { id: "t2", question_index: 1, attempt_index: 0, status: "succeeded", eval_pass: false, score: 0.5, worker_id: "worker-2", input_payload: {}, label_payload: {}, prediction_payload: {} },
+            ],
+          }),
+        });
+      }
+      if (String(url).endsWith("/workers") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ items: [], total_workers: 8, reported_workers: 0, available_workers: 0, busy_workers: 0 }) });
+      }
+      if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "lm-1", name: "GPT-4o" }]) });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter initialEntries={["/runs?plan=plan-1"]}>
+        <RunsPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("Average Score")).toBeInTheDocument();
+    expect(await screen.findByText("0.750")).toBeInTheDocument();
+
     vi.unstubAllGlobals();
   });
 

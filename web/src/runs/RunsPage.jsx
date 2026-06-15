@@ -264,6 +264,7 @@ export function RunsPage() {
   const counts = taskCounts(tasks);
   const totalRuns = Number(runPlan?.total_tasks ?? tasks.length ?? 0);
   const filteredTasks = tasks.filter((task) => (filter === "all" ? true : task.status === filter));
+  const averageScore = summarizeAverageScore(tasks, runPlan?.average_score);
 
   return (
     <section className="page">
@@ -310,6 +311,11 @@ export function RunsPage() {
                 <Kpi label="Successful Runs" value={`${counts.succeeded}/${totalRuns}`} tone="pass" />
                 <Kpi label="Errors" value={`${counts.failed}/${totalRuns}`} tone="fail" />
                 <Kpi label="Running" value={counts.running} tone="run" />
+                <Kpi
+                  label="Average Score"
+                  value={formatAverageScore(averageScore)}
+                  tone={toneForAverageScore(averageScore, runPlan?.score_pass_threshold)}
+                />
               </div>
               <p className="cap mono" style={{ marginTop: 10 }}>Run ID: {runPlan.id}</p>
               {runPlan.mlflow_parent_run_id ? (
@@ -587,6 +593,26 @@ function Kpi({ label, value, tone }) {
       <div className={`runs-kpi-value ${tone ? `runs-kpi-${tone}` : ""}`}>{value}</div>
     </div>
   );
+}
+
+function summarizeAverageScore(tasks, planAverageScore) {
+  if (isFiniteScore(planAverageScore)) {
+    return Number(planAverageScore);
+  }
+  const scoredTasks = tasks.filter((task) => isFiniteScore(task?.score));
+  if (!scoredTasks.length) {
+    return null;
+  }
+  const total = scoredTasks.reduce((sum, task) => sum + Number(task.score), 0);
+  return total / scoredTasks.length;
+}
+
+function formatAverageScore(value) {
+  return isFiniteScore(value) ? Number(value).toFixed(3) : "-";
+}
+
+function isFiniteScore(value) {
+  return typeof value === "number" && Number.isFinite(value);
 }
 
 function toneForAverageScore(value, threshold) {
