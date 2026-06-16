@@ -3,8 +3,14 @@ version = "0.1.0"
 score_pass_threshold = 0.8
 dspy_version = ">=2.5,<3.0"
 
+[runtime]
+system_dependency_commands = []
+
 [evaluation.input]
 fields = [{ key = "question", label = "Question", required = true, multiline = true }]
 
 [evaluation.label]
 fields = [{ key = "judge_instructions", label = "Judge instructions", required = true, multiline = true }]
+
+[optimization]
+target_output_fields = ["answer"]

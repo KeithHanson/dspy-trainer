@@ -315,7 +315,7 @@ describe("OptimizationJobsPage", () => {
               telemetry_summary: {},
               request_config: {},
               normalized_config: {},
-              execution_log: "job=opt-job-live\nstatus=running\nphase=optimized_eval:start",
+              execution_log: "job=opt-job-live\nstatus=running\nGEPA Optimization:   9%|▉         | 192/2031 [1:14:29<12:03:31, 23.61s/rollouts]\n2026/06/16 21:13:37 INFO dspy.teleprompt.gepa.gepa: Iteration 44: Selected program 0 score: 0.7777777777777778",
               failure_reason: null,
             };
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue(payload) });
@@ -341,7 +341,10 @@ describe("OptimizationJobsPage", () => {
     expect(await screen.findByText("Live run output refreshes automatically.")).toBeInTheDocument();
 
     await waitFor(() => {
-      expect(screen.getByText(/phase=optimized_eval:start/i)).toBeInTheDocument();
+      expect(screen.getByText(/9% complete/i)).toBeInTheDocument();
+      expect(screen.getAllByText(/192\/2031/i).length).toBeGreaterThan(0);
+      expect(screen.getAllByText(/Iteration 44/i).length).toBeGreaterThan(0);
+      expect(screen.getAllByText(/Score 0.778/i).length).toBeGreaterThan(0);
     }, { timeout: 4000 });
 
     vi.unstubAllGlobals();

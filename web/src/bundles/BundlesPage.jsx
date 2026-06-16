@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Button } from "../components/primitives/Button";
 import { Icon } from "../components/Icon";
 import { EmptyState } from "../components/states/EmptyState";
@@ -170,15 +170,68 @@ const BUNDLE_FILE_TEMPLATES = {
   "bundle.toml": VALIDATION_CHECKS.find((check) => check.id === "bundle_toml_file")?.snippet || "# bundle.toml not available",
 };
 
+function parseEnvironmentPaste(text) {
+  const entries = [];
+  const lines = String(text || "").split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+    const match = trimmed.match(/^([A-Z_][A-Z0-9_]*)\s*=\s*(.*)$/);
+    if (!match) {
+      continue;
+    }
+    let [, key, value] = match;
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    entries.push({ key, value, is_secret: false });
+  }
+  return entries;
+}
+
+function mergeEnvironmentEntries(current, additions) {
+  const next = [];
+  const byKey = new Map();
+  current.forEach((entry) => {
+    if (!entry?.key) {
+      return;
+    }
+    const normalized = { ...entry };
+    byKey.set(entry.key, normalized);
+    next.push(normalized);
+  });
+  additions.forEach((entry) => {
+    if (!entry?.key) {
+      return;
+    }
+    const existing = byKey.get(entry.key);
+    if (existing) {
+      existing.value = entry.value;
+      return;
+    }
+    const normalized = { ...entry };
+    byKey.set(entry.key, normalized);
+    next.push(normalized);
+  });
+  return next;
+}
+
 export function BundlesPage() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
+  const { moduleId } = useParams();
   const [isDownloading, setIsDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState("");
   const showImportIntent = searchParams.get("import") === "1";
 
   const sampleUrl = useMemo(() => buildApiUrl("/samples/module-bundle"), []);
   const validateUrl = useMemo(() => buildApiUrl("/modules"), []);
+
+  if (moduleId) {
+    return <BundleDetailPage moduleId={moduleId} modulesUrl={validateUrl} onBack={() => navigate("/bundles")} />;
+  }
 
   const handleDownload = async () => {
     setIsDownloading(true);
@@ -257,87 +310,9 @@ export function BundlesPage() {
 }
 
 function SavedBundlesPanel({ modulesUrl }) {
+  const navigate = useNavigate();
   const [savedBundles, setSavedBundles] = useState([]);
   const [isLoadingBundles, setIsLoadingBundles] = useState(false);
-  const [selectedBundle, setSelectedBundle] = useState(null);
-  const [selectedBundleSync, setSelectedBundleSync] = useState(null);
-  const [bundleRevisions, setBundleRevisions] = useState([]);
-  const [isLoadingRevisions, setIsLoadingRevisions] = useState(false);
-  const [syncActionError, setSyncActionError] = useState("");
-  const [isRefreshingSync, setIsRefreshingSync] = useState(false);
-  const [isSyncingBundle, setIsSyncingBundle] = useState(false);
-  const [activeFileName, setActiveFileName] = useState("module.py");
-  const [bundleFiles, setBundleFiles] = useState({});
-  const [editingName, setEditingName] = useState("");
-  const [editingVersion, setEditingVersion] = useState("");
-  const [isSavingMetadata, setIsSavingMetadata] = useState(false);
-  const [metadataError, setMetadataError] = useState("");
-  const [metadataModalBundle, setMetadataModalBundle] = useState(null);
-
-  const loadBundleFiles = async (bundleId) => {
-    if (!bundleId) {
-      setBundleFiles({});
-      return {};
-    }
-    try {
-      const response = await fetch(`${modulesUrl}/${bundleId}/files`, { method: "GET" });
-      if (!response.ok) {
-        setBundleFiles({});
-        return {};
-      }
-      const payload = await response.json();
-      const files = payload && typeof payload === "object" ? payload : {};
-      setBundleFiles(files);
-      return files;
-    } catch {
-      setBundleFiles({});
-      return {};
-    }
-  };
-
-  const loadBundleSyncStatus = async (bundleId) => {
-    if (!bundleId) {
-      setSelectedBundleSync(null);
-      return null;
-    }
-    try {
-      const response = await fetch(`${modulesUrl}/${bundleId}/sync-status`, { method: "GET" });
-      if (!response.ok) {
-        setSelectedBundleSync(null);
-        return null;
-      }
-      const payload = await response.json();
-      setSelectedBundleSync(payload);
-      return payload;
-    } catch {
-      setSelectedBundleSync(null);
-      return null;
-    }
-  };
-
-  const loadBundleRevisions = async (bundleId) => {
-    if (!bundleId) {
-      setBundleRevisions([]);
-      return [];
-    }
-    setIsLoadingRevisions(true);
-    try {
-      const response = await fetch(`${modulesUrl}/${bundleId}/revisions`, { method: "GET" });
-      if (!response.ok) {
-        setBundleRevisions([]);
-        return [];
-      }
-      const payload = await response.json();
-      const revisions = Array.isArray(payload) ? payload : [];
-      setBundleRevisions(revisions);
-      return revisions;
-    } catch {
-      setBundleRevisions([]);
-      return [];
-    } finally {
-      setIsLoadingRevisions(false);
-    }
-  };
 
   const loadBundles = async () => {
     setIsLoadingBundles(true);
@@ -349,10 +324,6 @@ function SavedBundlesPanel({ modulesUrl }) {
       const payload = await response.json();
       const bundles = Array.isArray(payload) ? payload : [];
       setSavedBundles(bundles);
-      if (selectedBundle) {
-        const refreshed = bundles.find((item) => item.id === selectedBundle.id);
-        setSelectedBundle(refreshed || null);
-      }
     } catch {
       setSavedBundles([]);
     } finally {
@@ -365,143 +336,12 @@ function SavedBundlesPanel({ modulesUrl }) {
     if (!response.ok) {
       return;
     }
-    if (selectedBundle?.id === bundleId) {
-      setSelectedBundle(null);
-    }
     await loadBundles();
   };
 
   useEffect(() => {
     loadBundles();
   }, []);
-
-  useEffect(() => {
-    const source = metadataModalBundle || selectedBundle;
-    setEditingName(source?.bundle_name || "");
-    setEditingVersion(source?.bundle_version || "");
-    setMetadataError("");
-  }, [selectedBundle?.id, selectedBundle?.bundle_name, selectedBundle?.bundle_version, metadataModalBundle?.id, metadataModalBundle?.bundle_name, metadataModalBundle?.bundle_version]);
-
-  useEffect(() => {
-    const loadFiles = async () => {
-      if (!selectedBundle?.id) {
-        setBundleFiles({});
-        setSelectedBundleSync(null);
-        setBundleRevisions([]);
-        return;
-      }
-      setSyncActionError("");
-      await Promise.all([
-        loadBundleFiles(selectedBundle.id),
-        loadBundleSyncStatus(selectedBundle.id),
-        loadBundleRevisions(selectedBundle.id),
-      ]);
-    };
-    loadFiles();
-  }, [modulesUrl, selectedBundle?.id]);
-
-  useEffect(() => {
-    const fileNames = Object.keys(bundleFiles);
-    if (!fileNames.length) {
-      return;
-    }
-    if (!fileNames.includes(activeFileName)) {
-      setActiveFileName(fileNames[0]);
-    }
-  }, [bundleFiles, activeFileName]);
-
-  const saveBundleMetadata = async () => {
-    const targetBundle = metadataModalBundle || selectedBundle;
-    if (!targetBundle?.id) {
-      return;
-    }
-    setIsSavingMetadata(true);
-    setMetadataError("");
-    try {
-      const response = await fetch(`${modulesUrl}/${targetBundle.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          bundle_name: editingName,
-          bundle_version: editingVersion,
-        }),
-      });
-      if (!response.ok) {
-        throw new Error(await parseError(response, `Could not update bundle (${response.status})`));
-      }
-      const updated = await response.json();
-      setSavedBundles((current) => current.map((bundle) => (bundle.id === updated.id ? updated : bundle)));
-      if (selectedBundle?.id === updated.id) {
-        setSelectedBundle(updated);
-      }
-      setMetadataModalBundle(null);
-    } catch (error) {
-      setMetadataError(error instanceof Error ? error.message : "Could not update bundle");
-    } finally {
-      setIsSavingMetadata(false);
-    }
-  };
-
-  const openBundleFile = async (fileName) => {
-    if (!selectedBundle?.id) {
-      setActiveFileName(fileName);
-      return;
-    }
-    const files = await loadBundleFiles(selectedBundle.id);
-    setActiveFileName(Object.prototype.hasOwnProperty.call(files, fileName) ? fileName : fileName);
-  };
-
-  const refreshSelectedBundleGitState = async () => {
-    if (!selectedBundle?.id) {
-      return;
-    }
-    setIsRefreshingSync(true);
-    setSyncActionError("");
-    try {
-      const response = await fetch(`${modulesUrl}/${selectedBundle.id}/sync-status`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
-      });
-      const payload = await response.json();
-      if (!response.ok) {
-        throw new Error(payload?.error || `Could not refresh sync status (${response.status})`);
-      }
-      setSelectedBundleSync(payload);
-      await loadBundles();
-      await loadBundleRevisions(selectedBundle.id);
-    } catch (error) {
-      setSyncActionError(error instanceof Error ? error.message : "Could not refresh sync status");
-    } finally {
-      setIsRefreshingSync(false);
-    }
-  };
-
-  const syncSelectedBundle = async () => {
-    if (!selectedBundle?.id) {
-      return;
-    }
-    setIsSyncingBundle(true);
-    setSyncActionError("");
-    try {
-      const response = await fetch(`${modulesUrl}/${selectedBundle.id}/sync`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
-      });
-      const payload = await response.json();
-      if (!response.ok) {
-        throw new Error(payload?.error || `Could not sync bundle (${response.status})`);
-      }
-      setSelectedBundleSync(payload);
-      await loadBundles();
-      await loadBundleRevisions(selectedBundle.id);
-    } catch (error) {
-      setSyncActionError(error instanceof Error ? error.message : "Could not sync bundle");
-    } finally {
-      setIsSyncingBundle(false);
-    }
-  };
 
   return (
     <div className="panel card-pad bundles-validation-result">
@@ -528,128 +368,369 @@ function SavedBundlesPanel({ modulesUrl }) {
                 {bundle.created_at ? <span className="cap mono">Imported {formatDateTime(bundle.created_at)}</span> : null}
               </div>
               <Button size="sm" onClick={() => {
-                setActiveFileName("module.py");
-                setSelectedBundle(bundle);
-              }}>View files</Button>
+                navigate(`/bundles/${bundle.id}`);
+              }}>Open</Button>
               <Button size="sm" className="bundles-delete-btn" onClick={() => deleteBundle(bundle.id)}>Delete</Button>
             </div>
           ))}
         </div>
       )}
 
-      {metadataModalBundle ? (
-        <div className="bundles-modal-backdrop" onClick={() => setMetadataModalBundle(null)}>
-          <div className="panel card-pad bundles-modal" onClick={(event) => event.stopPropagation()}>
-            <div className="row between" style={{ marginBottom: 8 }}>
-              <h4 className="t-h2">Edit bundle metadata</h4>
-              <Button size="sm" variant="ghost" onClick={() => setMetadataModalBundle(null)}>Close</Button>
-            </div>
-            <p className="cap" style={{ marginBottom: 8 }}>ID: <span className="faint">{metadataModalBundle.id}</span></p>
-            <div className="bundles-metadata-form" style={{ marginBottom: 12 }}>
-              <div className="bundles-metadata-grid">
-                <label className="bundles-label" htmlFor="bundle-name-input">Bundle name</label>
-                <input id="bundle-name-input" className="bundles-file-input" type="text" value={editingName} onChange={(event) => setEditingName(event.target.value)} />
-                <label className="bundles-label" htmlFor="bundle-version-input">Bundle version</label>
-                <input id="bundle-version-input" className="bundles-file-input" type="text" value={editingVersion} onChange={(event) => setEditingVersion(event.target.value)} />
-              </div>
-              <div className="row gap-2" style={{ marginTop: 10 }}>
-                <Button size="sm" variant="primary" onClick={saveBundleMetadata} disabled={isSavingMetadata}>{isSavingMetadata ? "Saving..." : "Save metadata"}</Button>
-              </div>
-              {metadataError ? <p className="cap" style={{ marginTop: 8 }}>{metadataError}</p> : null}
-            </div>
+    </div>
+  );
+}
+
+function BundleDetailPage({ moduleId, modulesUrl, onBack }) {
+  const navigate = useNavigate();
+  const [bundle, setBundle] = useState(null);
+  const [bundleSync, setBundleSync] = useState(null);
+  const [bundleRevisions, setBundleRevisions] = useState([]);
+  const [bundleFiles, setBundleFiles] = useState({});
+  const [isLoading, setIsLoading] = useState(true);
+  const [isLoadingRevisions, setIsLoadingRevisions] = useState(false);
+  const [detailTab, setDetailTab] = useState("details");
+  const [activeFileName, setActiveFileName] = useState("module.py");
+  const [editingName, setEditingName] = useState("");
+  const [editingVersion, setEditingVersion] = useState("");
+  const [environmentEntries, setEnvironmentEntries] = useState([]);
+  const [metadataError, setMetadataError] = useState("");
+  const [environmentError, setEnvironmentError] = useState("");
+  const [syncActionError, setSyncActionError] = useState("");
+  const [isSavingMetadata, setIsSavingMetadata] = useState(false);
+  const [isSavingEnvironment, setIsSavingEnvironment] = useState(false);
+  const [isRefreshingSync, setIsRefreshingSync] = useState(false);
+  const [isSyncingBundle, setIsSyncingBundle] = useState(false);
+
+  const loadBundleFiles = async (bundleId) => {
+    const response = await fetch(`${modulesUrl}/${bundleId}/files`, { method: "GET" });
+    if (!response.ok) {
+      return {};
+    }
+    const payload = await response.json();
+    return payload && typeof payload === "object" ? payload : {};
+  };
+
+  const loadBundleSyncStatus = async (bundleId) => {
+    const response = await fetch(`${modulesUrl}/${bundleId}/sync-status`, { method: "GET" });
+    if (!response.ok) {
+      return null;
+    }
+    return response.json();
+  };
+
+  const loadBundleRevisions = async (bundleId) => {
+    setIsLoadingRevisions(true);
+    try {
+      const response = await fetch(`${modulesUrl}/${bundleId}/revisions`, { method: "GET" });
+      if (!response.ok) {
+        return [];
+      }
+      const payload = await response.json();
+      return Array.isArray(payload) ? payload : [];
+    } finally {
+      setIsLoadingRevisions(false);
+    }
+  };
+
+  useEffect(() => {
+    const load = async () => {
+      setIsLoading(true);
+      try {
+        const detailResp = await fetch(`${modulesUrl}/${moduleId}`, { method: "GET" });
+        if (!detailResp.ok) {
+          throw new Error(await parseError(detailResp, `Could not load bundle (${detailResp.status})`));
+        }
+        const detail = await detailResp.json();
+        const [files, sync, revisions] = await Promise.all([
+          loadBundleFiles(moduleId),
+          loadBundleSyncStatus(moduleId),
+          loadBundleRevisions(moduleId),
+        ]);
+        setBundle(detail);
+        setBundleFiles(files);
+        setBundleSync(sync);
+        setBundleRevisions(revisions);
+      } catch (error) {
+        setMetadataError(error instanceof Error ? error.message : "Could not load bundle");
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    load();
+  }, [moduleId, modulesUrl]);
+
+  useEffect(() => {
+    setEditingName(bundle?.bundle_name || "");
+    setEditingVersion(bundle?.bundle_version || "");
+    setEnvironmentEntries(Array.isArray(bundle?.environment_entries) ? bundle.environment_entries.map((entry) => ({
+      key: entry?.key || "",
+      value: entry?.value || "",
+      is_secret: Boolean(entry?.is_secret),
+    })) : []);
+    setEnvironmentError(bundle?.environment_error || "");
+  }, [bundle]);
+
+  useEffect(() => {
+    const fileNames = Object.keys(bundleFiles);
+    if (fileNames.length && !fileNames.includes(activeFileName)) {
+      setActiveFileName(fileNames[0]);
+    }
+  }, [bundleFiles, activeFileName]);
+
+  const saveMetadata = async () => {
+    if (!bundle?.id) return;
+    setIsSavingMetadata(true);
+    setMetadataError("");
+    try {
+      const response = await fetch(`${modulesUrl}/${bundle.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bundle_name: editingName, bundle_version: editingVersion }),
+      });
+      if (!response.ok) throw new Error(await parseError(response, `Could not update bundle (${response.status})`));
+      setBundle(await response.json());
+    } catch (error) {
+      setMetadataError(error instanceof Error ? error.message : "Could not update bundle");
+    } finally {
+      setIsSavingMetadata(false);
+    }
+  };
+
+  const saveEnvironment = async () => {
+    if (!bundle?.id) return;
+    setIsSavingEnvironment(true);
+    setEnvironmentError("");
+    try {
+      const response = await fetch(`${modulesUrl}/${bundle.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          environment_entries: environmentEntries,
+        }),
+      });
+      if (!response.ok) throw new Error(await parseError(response, `Could not save environment (${response.status})`));
+      setBundle(await response.json());
+    } catch (error) {
+      setEnvironmentError(error instanceof Error ? error.message : "Could not save environment");
+    } finally {
+      setIsSavingEnvironment(false);
+    }
+  };
+
+  const refreshSyncStatus = async () => {
+    if (!bundle?.id) return;
+    setIsRefreshingSync(true);
+    setSyncActionError("");
+    try {
+      const response = await fetch(`${modulesUrl}/${bundle.id}/sync-status`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload?.error || `Could not refresh sync status (${response.status})`);
+      setBundleSync(payload);
+    } catch (error) {
+      setSyncActionError(error instanceof Error ? error.message : "Could not refresh sync status");
+    } finally {
+      setIsRefreshingSync(false);
+    }
+  };
+
+  const syncBundle = async () => {
+    if (!bundle?.id) return;
+    setIsSyncingBundle(true);
+    setSyncActionError("");
+    try {
+      const response = await fetch(`${modulesUrl}/${bundle.id}/sync`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload?.error || `Could not sync bundle (${response.status})`);
+      setBundleSync(payload);
+      const detailResp = await fetch(`${modulesUrl}/${bundle.id}`, { method: "GET" });
+      if (detailResp.ok) {
+        setBundle(await detailResp.json());
+      }
+      setBundleRevisions(await loadBundleRevisions(bundle.id));
+    } catch (error) {
+      setSyncActionError(error instanceof Error ? error.message : "Could not sync bundle");
+    } finally {
+      setIsSyncingBundle(false);
+    }
+  };
+
+  const updateEnvironmentEntry = (index, patch) => {
+    setEnvironmentEntries((current) => current.map((entry, entryIndex) => (entryIndex === index ? { ...entry, ...patch } : entry)));
+  };
+
+  const addEnvironmentEntry = () => setEnvironmentEntries((current) => [...current, { key: "", value: "", is_secret: false }]);
+  const removeEnvironmentEntry = (index) => setEnvironmentEntries((current) => current.filter((_, entryIndex) => entryIndex !== index));
+  const handleEnvironmentPaste = (event) => {
+    if (detailTab !== "environment") {
+      return;
+    }
+    const pastedText = event.clipboardData?.getData("text") || "";
+    const parsedEntries = parseEnvironmentPaste(pastedText);
+    if (!parsedEntries.length) {
+      return;
+    }
+    event.preventDefault();
+    setEnvironmentEntries((current) => mergeEnvironmentEntries(current, parsedEntries));
+  };
+
+  if (isLoading) {
+    return <section className="page"><div className="page-body bundles-wrap"><LoadingState label="Loading bundle..." /></div></section>;
+  }
+
+  if (!bundle) {
+    return <section className="page"><div className="page-body bundles-wrap"><ErrorState title="Could not load bundle" description={metadataError || "Bundle not found"} /></div></section>;
+  }
+
+  return (
+    <section className="page">
+      <div className="page-body bundles-wrap">
+        <header className="row between bundles-head">
+          <div className="col gap-1">
+            <h1 className="t-display" style={{ fontSize: 22 }}>{bundle.bundle_name || bundle.github_repo_url || bundle.id}</h1>
+            <p className="muted t-sm">Module detail and runtime configuration.</p>
           </div>
+          <div className="row gap-2">
+            <Button variant="ghost" onClick={onBack}>Back</Button>
+            <Button variant="danger" onClick={async () => {
+              const response = await fetch(`${modulesUrl}/${bundle.id}`, { method: "DELETE" });
+              if (response.ok) navigate("/bundles");
+            }}>Delete</Button>
+          </div>
+        </header>
+
+        <div className="row gap-2" style={{ marginBottom: 14 }}>
+          {["details", "sync", "validation", "files", "environment"].map((tab) => (
+            <Button key={tab} size="sm" variant={detailTab === tab ? "primary" : "ghost"} onClick={() => setDetailTab(tab)}>
+              {tab.charAt(0).toUpperCase() + tab.slice(1)}
+            </Button>
+          ))}
         </div>
-      ) : null}
 
-      {selectedBundle ? (
-        <div className="panel card-pad bundles-validation-result">
-          <div className="row between" style={{ marginBottom: 8 }}>
-            <h4 className="t-h2">Bundle detail</h4>
-          </div>
-          <p className="cap" style={{ marginBottom: 8 }}>ID: <span className="faint">{selectedBundle.id}</span></p>
-          {selectedBundle.github_repo_url ? (
-            <div className="col gap-1" style={{ marginBottom: 12 }}>
-              <p className="cap">Repository: <span className="faint">{selectedBundle.github_repo_url}</span></p>
-              <p className="cap">Branch: <span className="faint">{selectedBundle.github_branch || "unknown"}</span></p>
-              <p className="cap">Subfolder: <span className="faint mono">{selectedBundle.github_subpath || "."}</span></p>
-              <p className="cap">Sync status: <span className="faint">{selectedBundleSync?.sync_status || selectedBundle.sync_status || "unknown"}</span></p>
-              {selectedBundle.current_commit_sha ? <p className="cap">Current commit: <span className="faint mono">{selectedBundle.current_commit_sha}</span></p> : null}
-              {selectedBundleSync?.upstream_commit_sha ? <p className="cap">Upstream commit: <span className="faint mono">{selectedBundleSync.upstream_commit_sha}</span></p> : null}
-              {selectedBundle.last_synced_at ? <p className="cap">Last synced: <span className="faint">{formatDateTime(selectedBundle.last_synced_at)}</span></p> : null}
-              <div className="row gap-2" style={{ marginTop: 8 }}>
-                <Button size="sm" onClick={refreshSelectedBundleGitState} disabled={isRefreshingSync || isSyncingBundle}>
-                  {isRefreshingSync ? "Refreshing..." : "Refresh sync status"}
-                </Button>
-                <Button size="sm" variant="primary" onClick={syncSelectedBundle} disabled={isRefreshingSync || isSyncingBundle}>
-                  {isSyncingBundle ? "Syncing..." : "Sync bundle"}
-                </Button>
-              </div>
+        {detailTab === "details" ? (
+          <section className="panel card-pad bundles-section">
+            <h2 className="t-h2" style={{ marginBottom: 10 }}>Details</h2>
+            <p className="cap" style={{ marginBottom: 8 }}>ID: <span className="faint">{bundle.id}</span></p>
+            {bundle.github_repo_url ? <p className="cap" style={{ marginBottom: 6 }}>Repository: <span className="faint">{bundle.github_repo_url}</span></p> : null}
+            {bundle.github_branch ? <p className="cap" style={{ marginBottom: 6 }}>Branch: <span className="faint">{bundle.github_branch}</span></p> : null}
+            {bundle.github_subpath ? <p className="cap" style={{ marginBottom: 6 }}>Subfolder: <span className="faint mono">{bundle.github_subpath}</span></p> : null}
+            <div className="bundles-metadata-grid" style={{ marginTop: 12 }}>
+              <label className="bundles-label" htmlFor="bundle-detail-name">Bundle name</label>
+              <input id="bundle-detail-name" className="bundles-file-input" type="text" value={editingName} onChange={(event) => setEditingName(event.target.value)} />
+              <label className="bundles-label" htmlFor="bundle-detail-version">Bundle version</label>
+              <input id="bundle-detail-version" className="bundles-file-input" type="text" value={editingVersion} onChange={(event) => setEditingVersion(event.target.value)} />
             </div>
-          ) : null}
-          {syncActionError ? <ErrorState title="Bundle sync action failed" description={syncActionError} /> : null}
-          {selectedBundle.github_repo_url ? (
-            <div className="bundles-check-detail-list" style={{ marginBottom: 12 }}>
-              <div className="t-h2" style={{ marginBottom: 8 }}>Revision history</div>
-              {isLoadingRevisions ? (
-                <LoadingState label="Loading revisions..." />
-              ) : bundleRevisions.length ? (
-                <ul className="bundles-diags">
-                  {bundleRevisions.slice(0, 8).map((revision) => (
-                    <li key={revision.id}>
-                      <span className="mono">{(revision.commit_sha || "unknown").slice(0, 8)}</span>
-                      {" · "}
-                      {revision.bundle_version ? `v${revision.bundle_version}` : "version unknown"}
-                      {" · "}
-                      {revision.source_event || "event unknown"}
-                      {revision.created_at ? ` · ${formatDateTime(revision.created_at)}` : ""}
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="cap">No revisions recorded yet.</p>
-              )}
+            <div className="row gap-2" style={{ marginTop: 10 }}>
+              <Button size="sm" variant="primary" onClick={saveMetadata} disabled={isSavingMetadata}>{isSavingMetadata ? "Saving..." : "Save details"}</Button>
             </div>
-          ) : null}
-          <div className="bundles-check-report" style={{ marginBottom: 12 }}>
-            <div className="t-h2" style={{ marginBottom: 8 }}>Validation checklist</div>
-            <ul className="bundles-check-results">
-              {buildValidationChecks(selectedBundle).map((check) => (
-                <li key={`${selectedBundle.id}-${check.id}`} className="bundles-check-item">
-                  <span aria-hidden="true">{check.passed ? "✅" : "❌"}</span>
-                  <span>{check.label}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
+            {metadataError ? <p className="cap" style={{ marginTop: 8 }}>{metadataError}</p> : null}
+          </section>
+        ) : null}
 
-          <div className="bundles-check-detail-list" style={{ marginBottom: 12 }}>
-            <div className="t-h2" style={{ marginBottom: 8 }}>Bundle files</div>
-            <p className="cap" style={{ marginBottom: 8 }}>Source file preview from the validation view.</p>
-            <hr className="hr" style={{ marginBottom: 10 }} />
+        {detailTab === "sync" ? (
+          <section className="panel card-pad bundles-section">
+            <h2 className="t-h2" style={{ marginBottom: 10 }}>Sync</h2>
+            <p className="cap" style={{ marginBottom: 6 }}>Sync status: <span className="faint">{bundleSync?.sync_status || bundle.sync_status || "unknown"}</span></p>
+            {bundle.current_commit_sha ? <p className="cap" style={{ marginBottom: 6 }}>Current commit: <span className="faint mono">{bundle.current_commit_sha}</span></p> : null}
+            {bundleSync?.upstream_commit_sha ? <p className="cap" style={{ marginBottom: 6 }}>Upstream commit: <span className="faint mono">{bundleSync.upstream_commit_sha}</span></p> : null}
+            <div className="row gap-2" style={{ margin: "10px 0" }}>
+              <Button size="sm" onClick={refreshSyncStatus} disabled={isRefreshingSync || isSyncingBundle}>{isRefreshingSync ? "Refreshing..." : "Refresh sync status"}</Button>
+              <Button size="sm" variant="primary" onClick={syncBundle} disabled={isRefreshingSync || isSyncingBundle}>{isSyncingBundle ? "Syncing..." : "Sync bundle"}</Button>
+            </div>
+            {syncActionError ? <ErrorState title="Bundle sync action failed" description={syncActionError} /> : null}
+            <div className="t-h2" style={{ marginBottom: 8 }}>Revision history</div>
+            {isLoadingRevisions ? <LoadingState label="Loading revisions..." /> : bundleRevisions.length ? (
+              <ul className="bundles-diags">
+                {bundleRevisions.slice(0, 8).map((revision) => (
+                  <li key={revision.id}>
+                    <span className="mono">{(revision.commit_sha || "unknown").slice(0, 8)}</span>
+                    {" · "}
+                    {revision.bundle_version ? `v${revision.bundle_version}` : "version unknown"}
+                    {" · "}
+                    {revision.source_event || "event unknown"}
+                    {revision.created_at ? ` · ${formatDateTime(revision.created_at)}` : ""}
+                  </li>
+                ))}
+              </ul>
+            ) : <p className="cap">No revisions recorded yet.</p>}
+          </section>
+        ) : null}
+
+        {detailTab === "validation" ? (
+          <section className="panel card-pad bundles-section">
+            <h2 className="t-h2" style={{ marginBottom: 10 }}>Validation</h2>
+            <p className="cap" style={{ marginBottom: 6 }}>Validation status: <span className="faint">{bundle.validation_status}</span></p>
+            <div className="bundles-check-report" style={{ marginBottom: 12 }}>
+              <div className="t-h2" style={{ marginBottom: 8 }}>Validation checklist</div>
+              <ul className="bundles-check-results">
+                {buildValidationChecks(bundle).map((check) => (
+                  <li key={`${bundle.id}-${check.id}`} className="bundles-check-item">
+                    <span aria-hidden="true">{check.passed ? "✅" : "❌"}</span>
+                    <span>{check.label}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+            {normalizeDiagnostics(bundle.diagnostics).length ? (
+              <ul className="bundles-diags" style={{ marginTop: 12 }}>
+                {normalizeDiagnostics(bundle.diagnostics).map((diag, idx) => (
+                  <li key={`${bundle.id}-${diag.code}-${idx}`}>{diag.code}: {diag.message}</li>
+                ))}
+              </ul>
+            ) : null}
+          </section>
+        ) : null}
+
+        {detailTab === "files" ? (
+          <section className="panel card-pad bundles-section">
+            <h2 className="t-h2" style={{ marginBottom: 10 }}>Files</h2>
             <div className="row gap-2" style={{ marginBottom: 10 }}>
               {Object.keys(bundleFiles).length ? Object.keys(bundleFiles).map((fileName) => (
-                <Button key={`${selectedBundle.id}-${fileName}`} size="sm" variant={activeFileName === fileName ? "primary" : "ghost"} onClick={() => openBundleFile(fileName)}>
-                  {fileName}
-                </Button>
+                <Button key={`${bundle.id}-${fileName}`} size="sm" variant={activeFileName === fileName ? "primary" : "ghost"} onClick={() => setActiveFileName(fileName)}>{fileName}</Button>
               )) : Object.keys(BUNDLE_FILE_TEMPLATES).map((fileName) => (
-                <Button key={`${selectedBundle.id}-${fileName}`} size="sm" variant={activeFileName === fileName ? "primary" : "ghost"} onClick={() => openBundleFile(fileName)}>
-                  {fileName}
-                </Button>
+                <Button key={`${bundle.id}-${fileName}`} size="sm" variant={activeFileName === fileName ? "primary" : "ghost"} onClick={() => setActiveFileName(fileName)}>{fileName}</Button>
               ))}
             </div>
             <pre className="bundles-snippet"><code>{renderHighlightedPython(bundleFiles[activeFileName] || BUNDLE_FILE_TEMPLATES[activeFileName] || "# file not available")}</code></pre>
-          </div>
+          </section>
+        ) : null}
 
-          {normalizeDiagnostics(selectedBundle.diagnostics).length ? (
-            <ul className="bundles-diags">
-              {normalizeDiagnostics(selectedBundle.diagnostics).map((diag, idx) => (
-                <li key={`${selectedBundle.id}-${diag.code}-${idx}`}>{diag.code}: {diag.message}</li>
+        {detailTab === "environment" ? (
+          <section className="panel card-pad bundles-section" onPaste={handleEnvironmentPaste}>
+            <h2 className="t-h2" style={{ marginBottom: 10 }}>Environment</h2>
+            <div className="bundles-warning" style={{ marginBottom: 12 }}>
+              Sensitive information stored here is dangerous even with encryption at rest. Lock this server down with strict network rules and other host-level protections before using secret values.
+            </div>
+            <p className="cap" style={{ marginBottom: 12 }}>Paste dotenv-style lines anywhere in this tab to populate the editor automatically.</p>
+            <div className="bundles-environment-list">
+              {environmentEntries.map((entry, index) => (
+                <div key={`${bundle.id}-env-${index}`} className="bundles-environment-row">
+                  <input aria-label={`Environment key ${index + 1}`} className="bundles-file-input" type="text" placeholder="ENV_KEY" value={entry.key} onChange={(event) => updateEnvironmentEntry(index, { key: event.target.value.toUpperCase() })} />
+                  <input aria-label={`Environment value ${index + 1}`} className="bundles-file-input" type={entry.is_secret ? "password" : "text"} placeholder="value" value={entry.value} onChange={(event) => updateEnvironmentEntry(index, { value: event.target.value })} />
+                  <label className="bundles-environment-secret-toggle">
+                    <input type="checkbox" checked={entry.is_secret} onChange={(event) => updateEnvironmentEntry(index, { is_secret: event.target.checked })} />
+                    Secret
+                  </label>
+                  <Button size="sm" variant="danger" onClick={() => removeEnvironmentEntry(index)}>Remove</Button>
+                </div>
               ))}
-            </ul>
-          ) : null}
-        </div>
-      ) : null}
-    </div>
+            </div>
+            <div className="row gap-2" style={{ marginTop: 10 }}>
+              <Button size="sm" onClick={addEnvironmentEntry}>Add variable</Button>
+              <Button size="sm" variant="primary" onClick={saveEnvironment} disabled={isSavingEnvironment}>{isSavingEnvironment ? "Saving..." : "Save environment"}</Button>
+            </div>
+            {environmentError ? <p className="cap" style={{ marginTop: 8 }}>{environmentError}</p> : null}
+          </section>
+        ) : null}
+      </div>
+    </section>
   );
 }
 

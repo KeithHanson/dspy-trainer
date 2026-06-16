@@ -217,6 +217,8 @@ def _extract_bundle_metadata(
                 )
 
     evaluation_contract = _extract_evaluation_contract(payload.get("evaluation"), diagnostics)
+    system_dependency_commands = _extract_system_dependency_commands(payload.get("runtime"), diagnostics)
+    optimization_config = _extract_optimization_config(payload.get("optimization"), diagnostics)
 
     return {
         "name": payload.get("name"),
@@ -224,7 +226,79 @@ def _extract_bundle_metadata(
         "score_pass_threshold": float(score_pass_threshold) if isinstance(score_pass_threshold, (int, float)) and not isinstance(score_pass_threshold, bool) else None,
         "optimized_program_state": optimized_program_state.strip() if isinstance(optimized_program_state, str) and optimized_program_state.strip() else None,
         "evaluation_contract": evaluation_contract,
+        "system_dependency_commands": system_dependency_commands,
+        "optimization": optimization_config,
     }
+
+
+def _extract_system_dependency_commands(
+    runtime_payload: Any,
+    diagnostics: list[dict[str, Any]] | None,
+) -> list[str]:
+    if runtime_payload is None:
+        return []
+    if not isinstance(runtime_payload, dict):
+        _append_diag(
+            diagnostics,
+            "error",
+            "bundle_toml_runtime_invalid",
+            "bundle.toml optional 'runtime' section must be a table when provided",
+            TOML_FILE,
+        )
+        return []
+
+    raw_commands = runtime_payload.get("system_dependency_commands")
+    if raw_commands is None:
+        return []
+    if not isinstance(raw_commands, list) or any(not isinstance(item, str) or not item.strip() for item in raw_commands):
+        _append_diag(
+            diagnostics,
+            "error",
+            "bundle_toml_runtime_system_dependency_commands_invalid",
+            "bundle.toml runtime.system_dependency_commands must be an array of non-empty strings when provided",
+            TOML_FILE,
+        )
+        return []
+    return [item.strip() for item in raw_commands]
+
+
+def _extract_optimization_config(
+    optimization_payload: Any,
+    diagnostics: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    if optimization_payload is None:
+        return {"target_output_fields": None}
+    if not isinstance(optimization_payload, dict):
+        _append_diag(
+            diagnostics,
+            "error",
+            "bundle_toml_optimization_invalid",
+            "bundle.toml optional 'optimization' section must be a table when provided",
+            TOML_FILE,
+        )
+        return {"target_output_fields": None}
+
+    raw_target_output_fields = optimization_payload.get("target_output_fields")
+    if raw_target_output_fields is None:
+        return {"target_output_fields": None}
+    if not isinstance(raw_target_output_fields, list) or any(
+        not isinstance(item, str) or not item.strip() for item in raw_target_output_fields
+    ):
+        _append_diag(
+            diagnostics,
+            "error",
+            "bundle_toml_optimization_target_output_fields_invalid",
+            "bundle.toml optimization.target_output_fields must be an array of non-empty strings when provided",
+            TOML_FILE,
+        )
+        return {"target_output_fields": None}
+
+    target_output_fields: list[str] = []
+    for item in raw_target_output_fields:
+        normalized = item.strip()
+        if normalized not in target_output_fields:
+            target_output_fields.append(normalized)
+    return {"target_output_fields": target_output_fields}
 
 
 def _extract_evaluation_contract(

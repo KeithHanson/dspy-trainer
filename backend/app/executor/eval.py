@@ -34,11 +34,12 @@ def _run_bundle_eval_with_mlflow_parent(
     num_threads: int,
     parent_run_id: str | None,
     lm_profile: dict[str, Any] | None = None,
+    runtime_env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     def _run() -> dict[str, Any]:
         if lm_profile is None:
-            return run_bundle_eval(bundle_path=bundle_path, eval_inputs=eval_inputs, num_threads=num_threads)
-        return run_bundle_eval(bundle_path=bundle_path, eval_inputs=eval_inputs, num_threads=num_threads, lm_profile=lm_profile)
+            return run_bundle_eval(bundle_path=bundle_path, eval_inputs=eval_inputs, num_threads=num_threads, runtime_env=runtime_env)
+        return run_bundle_eval(bundle_path=bundle_path, eval_inputs=eval_inputs, num_threads=num_threads, lm_profile=lm_profile, runtime_env=runtime_env)
 
     if not parent_run_id:
         return _run()

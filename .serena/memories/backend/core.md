@@ -4,5 +4,6 @@
 - Readiness checks verify postgres, redis, MLflow reachability, and LiteLLM health/auth.
 - App-visible entities include module imports/revisions, evaluation datasets, evaluation plans, agent run plans/tasks, optimization datasets/jobs, LM profiles, and LiteLLM keys.
 - MLflow correlation exists for agent run plans and optimization workflows. Optimization writeback creates `optimization-<job-prefix>` branches for manual merge.
+- Read `mem:backend/optimization` for the strategy-specific optimization pipeline, derived dataset contracts, and the current train/val handling (notably: no implicit split; val falls back to train rows unless a separate validation dataset is supplied).
 - Current route surface is broad; rely on `backend/app/main.py` and `AppServices` rather than README endpoint summaries when adding or changing behavior.
 - Read `mem:backend/bundles` for bundle contract and runtime expectations.

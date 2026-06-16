@@ -22,6 +22,7 @@ from urllib.parse import urlparse, urlunparse
 from uuid import uuid4
 
 import asyncpg
+from cryptography.fernet import Fernet, InvalidToken
 import httpx
 import redis.asyncio as redis
 
@@ -47,6 +48,40 @@ def _clean_optional_text(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _normalize_module_environment_entries(entries: Any) -> list[dict[str, Any]]:
+    if entries in (None, ""):
+        return []
+    if not isinstance(entries, list):
+        raise ValueError("environment_entries must be a list")
+
+    normalized: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    for item in entries:
+        if not isinstance(item, dict):
+            raise ValueError("environment_entries items must be objects")
+        key = str(item.get("key") or "").strip()
+        if not key:
+            raise ValueError("environment entry keys are required")
+        if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", key):
+            raise ValueError(f"environment entry key '{key}' must be uppercase letters, digits, and underscores only")
+        if key in seen_keys:
+            raise ValueError(f"duplicate environment entry key: {key}")
+        seen_keys.add(key)
+        value = item.get("value")
+        normalized.append(
+            {
+                "key": key,
+                "value": "" if value is None else str(value),
+                "is_secret": bool(item.get("is_secret", False)),
+            }
+        )
+    return normalized
+
+
+def _json_ready(value: Any) -> Any:
+    return json.loads(json.dumps(value, default=str))
 
 
 def _default_sync_status(
@@ -149,6 +184,7 @@ def _run_bundle_optimization_subprocess(
             helper_lm_profile=payload.get("helper_lm_profile"),
             dspy_config=dict(payload.get("dspy_config") or {}),
             baseline_summary=dict(payload.get("baseline_summary") or {}) or None,
+            runtime_env=dict(payload.get("runtime_env") or {}),
             log_event=emit,
         )
         result_queue.put({"ok": True, "result": result})
@@ -262,14 +298,65 @@ class AppServices:
         self._installed_bundle_requirements: dict[str, str] = {}
         self._bundle_requirements_lock = asyncio.Lock()
 
+    def _get_module_env_fernet(self) -> Fernet:
+        key = str(self.settings.module_env_encryption_key or "").strip()
+        if not key:
+            raise RuntimeError(
+                "DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY is required to store module environment entries"
+            )
+        try:
+            return Fernet(key.encode("utf-8"))
+        except Exception as exc:
+            raise RuntimeError(
+                "DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY must be a valid Fernet key"
+            ) from exc
+
+    def _encrypt_module_environment_entries(self, entries: list[dict[str, Any]]) -> str:
+        normalized = _normalize_module_environment_entries(entries)
+        payload = json.dumps(normalized, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        return self._get_module_env_fernet().encrypt(payload).decode("utf-8")
+
+    def _decrypt_module_environment_entries(self, encrypted_value: Any) -> list[dict[str, Any]]:
+        value = _clean_optional_text(encrypted_value)
+        if not value:
+            return []
+        try:
+            decrypted = self._get_module_env_fernet().decrypt(value.encode("utf-8")).decode("utf-8")
+        except InvalidToken as exc:
+            raise RuntimeError("module environment entries could not be decrypted with the configured key") from exc
+        payload = json.loads(decrypted)
+        return _normalize_module_environment_entries(payload)
+
     async def ensure_bundle_requirements_installed(self, bundle_path: str) -> None:
         root = Path(bundle_path).expanduser().resolve()
         requirements_path = root / "requirements.txt"
-        if not requirements_path.exists() or not requirements_path.is_file():
+        bundle_toml_path = root / "bundle.toml"
+        system_dependency_commands: list[str] = []
+        if bundle_toml_path.exists() and bundle_toml_path.is_file():
+            try:
+                payload = tomllib.loads(bundle_toml_path.read_text(encoding="utf-8"))
+                runtime_payload = payload.get("runtime")
+                if isinstance(runtime_payload, dict):
+                    raw_commands = runtime_payload.get("system_dependency_commands")
+                    if isinstance(raw_commands, list):
+                        system_dependency_commands = [str(item).strip() for item in raw_commands if isinstance(item, str) and item.strip()]
+            except Exception:
+                system_dependency_commands = []
+
+        requirements_bytes = requirements_path.read_bytes() if requirements_path.exists() and requirements_path.is_file() else b""
+        if not requirements_bytes and not system_dependency_commands:
             return
-        requirements_bytes = requirements_path.read_bytes()
-        digest = hashlib.sha256(requirements_bytes).hexdigest()
-        cache_key = str(requirements_path)
+
+        digest = hashlib.sha256(
+            json.dumps(
+                {
+                    "requirements_sha256": hashlib.sha256(requirements_bytes).hexdigest() if requirements_bytes else None,
+                    "system_dependency_commands": system_dependency_commands,
+                },
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        cache_key = str(root)
         if self._installed_bundle_requirements.get(cache_key) == digest:
             logger.info(
                 "bundle_requirements_install_skipped_cached bundle_path=%s requirements_path=%s",
@@ -294,26 +381,41 @@ class AppServices:
             )
 
             def run_install() -> None:
-                completed = subprocess.run(
-                    [
-                        sys.executable,
-                        "-m",
-                        "pip",
-                        "install",
-                        "--disable-pip-version-check",
-                        "-r",
-                        str(requirements_path),
-                    ],
-                    cwd=str(root),
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                )
-                if completed.returncode != 0:
-                    stderr = (completed.stderr or "").strip()
-                    stdout = (completed.stdout or "").strip()
-                    detail = stderr or stdout or "pip install failed"
-                    raise RuntimeError(f"failed to install bundle requirements: {detail}")
+                for command in system_dependency_commands:
+                    completed = subprocess.run(
+                        ["/bin/sh", "-lc", command],
+                        cwd=str(root),
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
+                    if completed.returncode != 0:
+                        stderr = (completed.stderr or "").strip()
+                        stdout = (completed.stdout or "").strip()
+                        detail = stderr or stdout or "system dependency command failed"
+                        raise RuntimeError(f"failed to install bundle system dependencies: {detail}")
+
+                if requirements_bytes:
+                    completed = subprocess.run(
+                        [
+                            sys.executable,
+                            "-m",
+                            "pip",
+                            "install",
+                            "--disable-pip-version-check",
+                            "-r",
+                            str(requirements_path),
+                        ],
+                        cwd=str(root),
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
+                    if completed.returncode != 0:
+                        stderr = (completed.stderr or "").strip()
+                        stdout = (completed.stdout or "").strip()
+                        detail = stderr or stdout or "pip install failed"
+                        raise RuntimeError(f"failed to install bundle requirements: {detail}")
 
             try:
                 await asyncio.to_thread(run_install)
@@ -443,6 +545,7 @@ class AppServices:
         helper_lm_profile: dict[str, Any] | None,
         dspy_config: dict[str, Any],
         baseline_summary: dict[str, Any] | None,
+        runtime_env: dict[str, str] | None,
         emit: Any,
     ) -> dict[str, Any]:
         from app.executor.module_runner import run_bundle_optimization
@@ -460,6 +563,7 @@ class AppServices:
                 helper_lm_profile=helper_lm_profile,
                 dspy_config=dspy_config,
                 baseline_summary=baseline_summary,
+                runtime_env=runtime_env,
                 log_event=emit,
             )
 
@@ -480,6 +584,7 @@ class AppServices:
                     "helper_lm_profile": helper_lm_profile,
                     "dspy_config": dspy_config,
                     "baseline_summary": baseline_summary,
+                    "runtime_env": runtime_env,
                 },
                 result_queue,
                 log_queue,
@@ -687,6 +792,8 @@ class AppServices:
                   version_hash text,
                   bundle_name text,
                   bundle_version text,
+                  github_secrets_environment_name text,
+                  environment_entries_encrypted text,
                   status text not null,
                   deleted_at timestamptz,
                   created_at timestamptz not null,
@@ -696,6 +803,8 @@ class AppServices:
             )
             await conn.execute("alter table module_imports add column if not exists bundle_name text;")
             await conn.execute("alter table module_imports add column if not exists bundle_version text;")
+            await conn.execute("alter table module_imports add column if not exists github_secrets_environment_name text;")
+            await conn.execute("alter table module_imports add column if not exists environment_entries_encrypted text;")
             await conn.execute("alter table module_imports add column if not exists deleted_at timestamptz;")
             await conn.execute("alter table module_imports add column if not exists github_repo_url text;")
             await conn.execute("alter table module_imports add column if not exists github_branch text;")
@@ -1403,6 +1512,8 @@ class AppServices:
         sync_status: str | None = None,
         bundle_name: str | None = None,
         bundle_version: str | None = None,
+        github_secrets_environment_name: str | None = None,
+        environment_entries: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
@@ -1418,6 +1529,8 @@ class AppServices:
             normalized_upstream_commit_sha,
             sync_status,
         )
+        normalized_environment_name = _clean_optional_text(github_secrets_environment_name)
+        encrypted_environment_entries = self._encrypt_module_environment_entries(environment_entries or []) if environment_entries is not None else None
         async with self.postgres_pool.acquire() as conn:
             await conn.execute(
                 """
@@ -1428,6 +1541,8 @@ class AppServices:
                   version_hash,
                   bundle_name,
                   bundle_version,
+                  github_secrets_environment_name,
+                  environment_entries_encrypted,
                   github_repo_url,
                   github_branch,
                   github_subpath,
@@ -1440,7 +1555,7 @@ class AppServices:
                   created_at,
                   updated_at
                 )
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
                 """,
                 module_id,
                 source,
@@ -1448,6 +1563,8 @@ class AppServices:
                 version_hash,
                 _clean_optional_text(bundle_name),
                 _clean_optional_text(bundle_version),
+                normalized_environment_name,
+                encrypted_environment_entries,
                 _clean_optional_text(github_repo_url),
                 _clean_optional_text(github_branch),
                 _normalize_github_subpath(github_subpath),
@@ -1668,6 +1785,12 @@ class AppServices:
         created_at = row["created_at"]
         last_synced_at = self._row_value(row, "last_synced_at")
         bundle_metadata = self._load_module_bundle_metadata(row)
+        try:
+            environment_entries = self._decrypt_module_environment_entries(self._row_value(row, "environment_entries_encrypted"))
+            environment_error = None
+        except RuntimeError as exc:
+            environment_entries = []
+            environment_error = str(exc)
         return {
             "id": row["id"],
             "source": row["source"],
@@ -1683,6 +1806,9 @@ class AppServices:
             "github_repo_url": self._row_value(row, "github_repo_url"),
             "github_branch": self._row_value(row, "github_branch"),
             "github_subpath": self._row_value(row, "github_subpath"),
+            "github_secrets_environment_name": self._row_value(row, "github_secrets_environment_name"),
+            "environment_entries": environment_entries,
+            "environment_error": environment_error,
             "checkout_path": self._row_value(row, "checkout_path"),
             "current_commit_sha": self._row_value(row, "current_commit_sha"),
             "upstream_commit_sha": self._row_value(row, "upstream_commit_sha"),
@@ -1707,7 +1833,8 @@ class AppServices:
             rows = await conn.fetch(
                 """
                 select m.id, m.source, m.source_ref, m.version_hash, m.bundle_name, m.bundle_version, m.status, m.created_at,
-                       m.github_repo_url, m.github_branch, m.github_subpath, m.checkout_path, m.current_commit_sha, m.upstream_commit_sha,
+                       m.github_repo_url, m.github_branch, m.github_subpath, m.github_secrets_environment_name, m.environment_entries_encrypted,
+                       m.checkout_path, m.current_commit_sha, m.upstream_commit_sha,
                        m.sync_status, m.last_synced_at, m.last_sync_error, m.current_revision_id,
                        r.validation_status, r.smoke_status, r.diagnostics,
                        r.validation_revision_id, r.validation_commit_sha, r.validation_bundle_version,
@@ -1845,6 +1972,44 @@ class AppServices:
                 module_id,
                 source_ref,
             )
+
+    async def set_module_environment_config(
+        self,
+        module_id: str,
+        github_secrets_environment_name: str | None,
+        environment_entries: list[dict[str, Any]],
+    ) -> None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        normalized_environment_name = _clean_optional_text(github_secrets_environment_name)
+        encrypted_entries = self._encrypt_module_environment_entries(environment_entries)
+        async with self.postgres_pool.acquire() as conn:
+            await conn.execute(
+                """
+                update module_imports
+                set github_secrets_environment_name = $2,
+                    environment_entries_encrypted = $3,
+                    updated_at = now()
+                where id = $1
+                """,
+                module_id,
+                normalized_environment_name,
+                encrypted_entries,
+            )
+
+    async def get_module_runtime_environment(self, module_id: str) -> dict[str, str]:
+        module = await self.get_module(module_id)
+        if module is None:
+            return {}
+        runtime_env: dict[str, str] = {}
+        for entry in module.get("environment_entries") or []:
+            if not isinstance(entry, dict):
+                continue
+            key = str(entry.get("key") or "").strip()
+            if not key:
+                continue
+            runtime_env[key] = str(entry.get("value") or "")
+        return runtime_env
 
     async def list_module_revisions(self, module_id: str) -> list[dict[str, Any]]:
         if self.postgres_pool is None:
@@ -3101,6 +3266,7 @@ class AppServices:
             strategy = _normalize_optimization_strategy(str(job.get("strategy") or "bootstrap_fewshot"))
             emit(f"normalized_strategy={strategy}")
             baseline_summary = None
+            runtime_env = await self.get_module_runtime_environment(str(job["module_import_id"]))
             if strategy in {"bootstrap_fewshot", "miprov2", "gepa"}:
                 train_records: list[dict[str, Any]] = []
                 if job.get("dataset_id"):
@@ -3189,6 +3355,7 @@ class AppServices:
                     helper_lm_profile=helper_lm_profile,
                     dspy_config=self._json_dict(job.get("normalized_config")).get("dspy_config", {}),
                     baseline_summary=baseline_summary,
+                    runtime_env=runtime_env,
                     emit=emit,
                 )
             else:
@@ -3199,6 +3366,7 @@ class AppServices:
                     bundle_path=job["bundle_path"],
                     eval_inputs=job["val_inputs"] or job["train_inputs"],
                     num_threads=job["num_threads"],
+                    runtime_env=runtime_env,
                 )
                 optimization_result = {
                     "artifact_path": f"optimization://{optimization_job_id}/score-{evaluation_result['score_pct']}",
@@ -4812,7 +4980,7 @@ class AppServices:
             task = await conn.fetchrow(
                 """
                 select t.id, t.plan_id, t.status, t.input_payload, t.label_payload,
-                       p.bundle_path, p.max_workers, p.mlflow_experiment_id, p.mlflow_parent_run_id, p.project_id,
+                       p.bundle_path, p.module_import_id, p.max_workers, p.mlflow_experiment_id, p.mlflow_parent_run_id, p.project_id,
                        p.status as plan_status,
                        p.lm_profile_id,
                        lp.model as lm_model,
@@ -4871,6 +5039,7 @@ class AppServices:
                     "label": self._json_dict(task["label_payload"]),
                 }
             ]
+            runtime_env = await self.get_module_runtime_environment(str(task["module_import_id"]))
             parent_run_id = str(task["mlflow_parent_run_id"] or "")
             experiment_id = str(task["mlflow_experiment_id"] or "")
             tracking_uri = str(getattr(self.settings, "mlflow_tracking_uri", "") or "")
@@ -4902,6 +5071,7 @@ class AppServices:
                     num_threads=1,
                     parent_run_id=parent_run_id,
                     lm_profile=lm_profile,
+                    runtime_env=runtime_env,
                 )
                 if tracking_uri and experiment_id:
                     trace_ids_after = _recent_trace_ids(tracking_uri, experiment_id)
@@ -4918,6 +5088,7 @@ class AppServices:
                     eval_inputs=eval_inputs,
                     num_threads=1,
                     lm_profile=lm_profile,
+                    runtime_env=runtime_env,
                 )
             item = result["items"][0]
             score = float(item["score"])
@@ -4958,6 +5129,7 @@ class AppServices:
                         datetime.now(timezone.utc),
                     )
                 else:
+                    prediction_payload = _json_ready(item["prediction"])
                     await conn.execute(
                         """
                         update agent_run_tasks
@@ -4965,7 +5137,7 @@ class AppServices:
                         where id=$1
                         """,
                         task_id,
-                        __import__("json").dumps(item["prediction"]),
+                        __import__("json").dumps(prediction_payload),
                         score,
                         bool(item.get("passed", False)),
                         str(item["rationale"]),

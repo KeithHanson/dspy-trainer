@@ -7,6 +7,34 @@ import { LoadingState } from "../components/states/LoadingState";
 
 const JOBS_POLL_MS = 2500;
 
+function parseOptimizationProgress(executionLog) {
+  const text = typeof executionLog === "string" ? executionLog : "";
+  const lines = text.split(/\r?\n/);
+  let progress = null;
+  let iteration = null;
+
+  for (const line of lines) {
+    const progressMatch = line.match(/GEPA Optimization:\s+(\d+)%.*?\|\s*(\d+)\/(\d+)/);
+    if (progressMatch) {
+      progress = {
+        percent: Number(progressMatch[1]),
+        completed: Number(progressMatch[2]),
+        total: Number(progressMatch[3]),
+      };
+    }
+    const iterationMatch = line.match(/Iteration\s+(\d+):\s+Selected program\s+(\d+)\s+score:\s+([0-9.]+)/);
+    if (iterationMatch) {
+      iteration = {
+        iteration: Number(iterationMatch[1]),
+        selectedProgram: Number(iterationMatch[2]),
+        score: Number(iterationMatch[3]),
+      };
+    }
+  }
+
+  return { progress, iteration };
+}
+
 export function OptimizationJobsPage() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
@@ -304,6 +332,7 @@ export function OptimizationJobsPage() {
 
   const comparison = job?.comparison_summary || {};
   const detailJobId = job?.id || "";
+  const optimizerProgress = parseOptimizationProgress(job?.execution_log);
 
   const executionLm = job?.execution_lm_profile_id ? (profileNames[job.execution_lm_profile_id] || job.execution_lm_profile_id) : "-";
   const helperLm = job?.helper_lm_profile_id ? (profileNames[job.helper_lm_profile_id] || job.helper_lm_profile_id) : "-";
@@ -356,6 +385,24 @@ export function OptimizationJobsPage() {
               {job.status !== "succeeded" && job.status !== "failed" && job.status !== "canceled" ? (
                 <div className="optimization-live-note" role="status">
                   {isRefreshingJob ? "Refreshing live run output..." : "Live run output refreshes automatically."}
+                </div>
+              ) : null}
+              {optimizerProgress.progress ? (
+                <div className="panel card-pad optimization-detail-panel">
+                  <div className="row between" style={{ marginBottom: 8 }}>
+                    <h3 className="t-h2">Optimizer progress</h3>
+                    <span className="cap mono">{optimizerProgress.progress.completed}/{optimizerProgress.progress.total}</span>
+                  </div>
+                  <div className="dashboard-progress-track" style={{ marginTop: 0 }}>
+                    <span className="dashboard-progress-segment dashboard-progress-pass" style={{ width: `${Math.max(0, Math.min(100, optimizerProgress.progress.percent))}%` }} />
+                    <span className="dashboard-progress-segment dashboard-progress-remaining" style={{ width: `${Math.max(0, 100 - Math.max(0, Math.min(100, optimizerProgress.progress.percent)))}%` }} />
+                  </div>
+                  <div className="row gap-3" style={{ marginTop: 10, flexWrap: "wrap" }}>
+                    <span className="cap mono">{optimizerProgress.progress.percent}% complete</span>
+                    {optimizerProgress.iteration ? <span className="cap mono">Iteration {optimizerProgress.iteration.iteration}</span> : null}
+                    {optimizerProgress.iteration ? <span className="cap mono">Program {optimizerProgress.iteration.selectedProgram}</span> : null}
+                    {optimizerProgress.iteration ? <span className="cap mono">Score {optimizerProgress.iteration.score.toFixed(3)}</span> : null}
+                  </div>
                 </div>
               ) : null}
             </section>

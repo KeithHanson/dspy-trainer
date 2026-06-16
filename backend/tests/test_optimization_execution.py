@@ -436,6 +436,90 @@ def test_run_bundle_optimization_gepa_includes_feedback(monkeypatch, tmp_path):
     assert strategy_details["num_full_val_evals"] == 4
 
 
+def test_run_bundle_optimization_prefers_bundle_target_output_fields(monkeypatch, tmp_path):
+    class FakeDeclaredTargetGEPA:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def compile(self, student, *, trainset, valset):
+            assert len(trainset) == 1
+            assert len(valset) == 1
+            train_payload = trainset[0].toDict()
+            assert train_payload["response_text"] == "Hello"
+            assert train_payload["response_kind"] == "direct_answer"
+            assert train_payload["optimization_feedback"] == "keep the direct answer"
+            assert "emit_events" not in train_payload
+            assert "raw_output" not in train_payload
+            student.predict.demos = list(trainset)
+            student.detailed_results = SimpleNamespace(
+                candidates=["a"],
+                total_metric_calls=3,
+                num_full_val_evals=1,
+            )
+            return student
+
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "module.py").write_text(
+        "import dspy\n"
+        "class Sig(dspy.Signature):\n"
+        "  question=dspy.InputField()\n"
+        "  response_text=dspy.OutputField()\n"
+        "  response_kind=dspy.OutputField()\n"
+        "  emit_events=dspy.OutputField()\n"
+        "  raw_output=dspy.OutputField()\n"
+        "class Program(dspy.Module):\n"
+        "  def __init__(self):\n"
+        "    super().__init__()\n"
+        "    self.predict = dspy.Predict(Sig)\n"
+        "  def forward(self, question: str):\n"
+        "    return self.predict(question=question)\n"
+        "def build_program():\n"
+        "  return Program()\n",
+        encoding="utf-8",
+    )
+    (bundle / "metric.py").write_text(
+        "def judge_metric(example, prediction, trace=None):\n"
+        "  return {'score': 1.0, 'rationale': 'ok', 'flags': [], 'raw_response': {}}\n",
+        encoding="utf-8",
+    )
+    (bundle / "bundle.toml").write_text(
+        "name='declared-targets'\n"
+        "version='0.1.0'\n"
+        "score_pass_threshold=0.8\n"
+        "[optimization]\n"
+        "target_output_fields=['response_text', 'response_kind']\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(module_runner.dspy, "GEPA", FakeDeclaredTargetGEPA)
+
+    result = module_runner.run_bundle_optimization(
+        bundle_path=str(bundle),
+        strategy="gepa",
+        train_records=[
+            {
+                "input": {"question": "Say hello"},
+                "label": {"expected_behavior": "reply directly"},
+                "prediction": {
+                    "response_text": "Hello",
+                    "response_kind": "direct_answer",
+                    "emit_events": [{"type": "status", "content": "searching"}],
+                    "raw_output": {"trace": "internal"},
+                },
+                "feedback": "keep the direct answer",
+            }
+        ],
+        val_inputs=[{"input": {"question": "Say hello"}, "label": {"expected_behavior": "reply directly"}}],
+        artifact_dir=str(tmp_path / "declared-target-artifact"),
+        dspy_config={"auto": "light", "track_stats": True},
+    )
+
+    assert Path(result["artifact_path"]).exists()
+    assert result["telemetry_summary"]["dataset_summary"]["target_provenance_counts"] == {"prediction_payload": 1}
+    assert result["telemetry_summary"]["strategy_details"]["optimizer_class"] == "GEPA"
+
+
 def test_run_optimization_job_persists_artifact_and_summaries(monkeypatch):
     services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
     state = {

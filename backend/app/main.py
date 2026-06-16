@@ -59,6 +59,8 @@ class ModuleImportRequest(BaseModel):
     current_commit_sha: str | None = None
     upstream_commit_sha: str | None = None
     sync_status: str | None = None
+    github_secrets_environment_name: str | None = None
+    environment_entries: list[dict[str, Any]] | None = None
 
 
 class ValidateRequest(BaseModel):
@@ -74,6 +76,8 @@ class SmokeTestRequest(BaseModel):
 class ModuleMetadataUpdateRequest(BaseModel):
     bundle_name: str | None = None
     bundle_version: str | None = None
+    github_secrets_environment_name: str | None = None
+    environment_entries: list[dict[str, Any]] | None = None
 
 
 class ModuleSyncRequest(BaseModel):
@@ -293,6 +297,8 @@ async def import_module(request: Request, payload: ModuleImportRequest):
         current_commit_sha=payload.current_commit_sha,
         upstream_commit_sha=payload.upstream_commit_sha,
         sync_status=payload.sync_status,
+        github_secrets_environment_name=payload.github_secrets_environment_name,
+        environment_entries=payload.environment_entries,
     )
     return {"id": result["id"], "status": result["status"]}
 
@@ -327,11 +333,23 @@ async def update_module(module_id: str, request: Request, payload: ModuleMetadat
             return JSONResponse(status_code=409, content={"error": str(exc), "sync_state": exc.sync_state})
     bundle_name = payload.bundle_name.strip() if isinstance(payload.bundle_name, str) else None
     bundle_version = payload.bundle_version.strip() if isinstance(payload.bundle_version, str) else None
-    await services.set_module_bundle_metadata(
-        module_id,
-        bundle_name if bundle_name else "",
-        bundle_version if bundle_version else "",
-    )
+    if payload.bundle_name is not None or payload.bundle_version is not None:
+        await services.set_module_bundle_metadata(
+            module_id,
+            bundle_name,
+            bundle_version,
+        )
+    if payload.github_secrets_environment_name is not None or payload.environment_entries is not None:
+        try:
+            await services.set_module_environment_config(
+                module_id,
+                payload.github_secrets_environment_name,
+                payload.environment_entries or [],
+            )
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"error": str(exc)})
+        except RuntimeError as exc:
+            return JSONResponse(status_code=400, content={"error": str(exc)})
     updated = await services.get_module(module_id)
     if updated is None:
         return JSONResponse(status_code=404, content={"error": "module not found"})
@@ -462,10 +480,12 @@ async def smoke_test_module(module_id: str, request: Request, payload: SmokeTest
 
     try:
         await services.ensure_bundle_requirements_installed(module_state["bundle_path"])
+        runtime_env = await services.get_module_runtime_environment(module_id)
         report = run_bundle_eval(
             bundle_path=module_state["bundle_path"],
             eval_inputs=payload.eval_inputs,
             num_threads=payload.num_threads,
+            runtime_env=runtime_env,
         )
         diagnostics = [
             {

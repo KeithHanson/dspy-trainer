@@ -1,4 +1,6 @@
 import sys
+import logging
+import os
 from pathlib import Path
 
 import pytest
@@ -7,7 +9,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.executor import module_runner
-from app.executor.module_runner import run_bundle_eval, run_bundle_optimization
+from app.executor.module_runner import _capture_process_output, run_bundle_eval, run_bundle_optimization
 
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "module_bundles"
@@ -105,6 +107,67 @@ def test_run_bundle_eval_prefers_module_build_lm_over_profile():
         },
     )
     assert result["items"][0]["score"] == 1.0
+
+
+def test_run_bundle_eval_injects_runtime_environment(tmp_path):
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "module.py").write_text(
+        "import os\n"
+        "import dspy\n"
+        "class Program(dspy.Module):\n"
+        "  def forward(self, question: str):\n"
+        "    return dspy.Prediction(answer=os.getenv('SPECIAL_TOKEN', 'missing'))\n"
+        "def build_program():\n"
+        "  return Program()\n"
+        "def build_lm():\n"
+        "  if os.getenv('SPECIAL_TOKEN') != 'expected-value':\n"
+        "    raise RuntimeError('runtime env missing')\n"
+        "  return None\n",
+        encoding="utf-8",
+    )
+    (bundle / "metric.py").write_text(
+        "def judge_metric(example, prediction, trace=None):\n"
+        "  matched = str(prediction.answer) == 'expected-value'\n"
+        "  return {'score': 1.0 if matched else 0.0, 'rationale': 'ok' if matched else 'missing', 'flags': [] if matched else ['missing'], 'raw_response': {'answer': prediction.answer}}\n",
+        encoding="utf-8",
+    )
+    (bundle / "bundle.toml").write_text(
+        "name='x'\nversion='0.1.0'\nscore_pass_threshold=0.8\n",
+        encoding="utf-8",
+    )
+
+    assert os.getenv("SPECIAL_TOKEN") is None
+    result = run_bundle_eval(
+        bundle_path=str(bundle),
+        eval_inputs=[{"input": {"question": "Q"}, "label": {}}],
+        runtime_env={"SPECIAL_TOKEN": "expected-value"},
+    )
+
+    assert result["items"][0]["score"] == 1.0
+    assert result["items"][0]["prediction"]["answer"] == "expected-value"
+    assert os.getenv("SPECIAL_TOKEN") is None
+
+
+def test_capture_process_output_captures_named_dspy_logger():
+    logger = logging.getLogger("dspy.teleprompt.gepa.gepa")
+    original_handlers = list(logger.handlers)
+    original_propagate = logger.propagate
+    original_level = logger.level
+    logger.handlers = []
+    logger.propagate = False
+    logger.setLevel(logging.INFO)
+    captured: list[str] = []
+    try:
+        with _capture_process_output(captured.append):
+            logger.info("Iteration 44: Selected program 0 score: 0.7777777777777778")
+    finally:
+        logger.handlers = original_handlers
+        logger.propagate = original_propagate
+        logger.setLevel(original_level)
+
+    assert any("raw_logging_begin" == line for line in captured)
+    assert any("Iteration 44: Selected program 0 score: 0.7777777777777778" in line for line in captured)
 
 
 def test_build_lm_profile_alias_omits_upstream_api_base(monkeypatch):

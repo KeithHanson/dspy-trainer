@@ -28,6 +28,9 @@ Building production LLM programs requires iteration—lots of it. DSPy Trainer g
 ```bash
 cp .env.sample .env
 # Edit .env - at minimum, add your GITHUB_PAT
+# If you plan to store module environment entries in the UI,
+# also generate DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY:
+# python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
 ### 2. Start the Stack
@@ -79,6 +82,7 @@ my-bundle/
 - GitHub-backed with commit provenance
 - Validated before first run
 - Can declare optimized program state for loading
+- Can optionally narrow optimization targets via `optimization.target_output_fields`
 
 ### 📊 Dataset
 
@@ -236,7 +240,12 @@ fields = [{ key = "question", label = "Question", required = true, multiline = t
 
 [evaluation.label]
 fields = [{ key = "expected", label = "Expected", required = true, multiline = true }]
+
+[optimization]
+target_output_fields = ["answer"]
 ```
+
+`optimization.target_output_fields` is optional. When provided, DSPy Trainer uses only those predictor output fields as optimization targets instead of reusing every key present in prior prediction payloads. This is useful for bundles whose predictions include debug traces or other bulky internal fields that should still be judged during evals but should not be optimized directly.
 
 ### Testing Locally
 
@@ -282,6 +291,7 @@ When you launch an optimization job:
 1. Derives training data from eval results
    - **BootstrapFewShot/MIPROv2**: Use high-scoring examples as demos
    - **GEPA**: Use judge rationale as feedback
+   - Bundles can restrict optimization targets with `bundle.toml` `optimization.target_output_fields`
 2. Runs DSPy optimizer (`compile()`)
 3. Generates optimized artifact (e.g., `program.json`)
 4. Creates temporary Git worktree
@@ -432,11 +442,18 @@ Key variables in `.env`:
 | `GITHUB_PAT` | GitHub API access for bundle import/sync | ✅ |
 | `GIT_COMMIT_NAME` | Git author name for optimization commits | Recommended |
 | `GIT_COMMIT_EMAIL` | Git author email for optimization commits | Recommended |
+| `DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY` | Encrypts module environment entries stored in Postgres | Required for module env UI |
 | `DSPY_TRAINER_POSTGRES_DSN` | Postgres connection | ✅ (auto in Compose) |
 | `DSPY_TRAINER_REDIS_URL` | Redis connection | ✅ (auto in Compose) |
 | `LITELLM_MASTER_KEY` | LiteLLM proxy auth | ✅ (auto in Compose) |
 
 See [`.env.sample`](.env.sample) for full reference.
+
+Generate `DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY` with:
+
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
 
 ### LiteLLM Configuration
 

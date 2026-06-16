@@ -14,6 +14,13 @@ All settings use the `DSPY_TRAINER_` prefix.
 - `DSPY_TRAINER_LITELLM_API_KEY` (optional; required when LiteLLM health endpoint is protected)
 - `DSPY_TRAINER_BACKEND_HOST` (default: `0.0.0.0`)
 - `DSPY_TRAINER_BACKEND_PORT` (default: `8000`)
+- `DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY` (required for module environment storage)
+
+Generate the module environment encryption key with:
+
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
 
 ## Run
 

@@ -40,6 +40,8 @@ async def fake_create_module_import(self, source, source_ref, version_hash, **kw
         "github_repo_url": kwargs.get("github_repo_url"),
         "github_branch": kwargs.get("github_branch"),
         "github_subpath": kwargs.get("github_subpath"),
+        "github_secrets_environment_name": kwargs.get("github_secrets_environment_name"),
+        "environment_entries": kwargs.get("environment_entries") or [],
         "checkout_path": kwargs.get("checkout_path") or source_ref,
         "current_commit_sha": kwargs.get("current_commit_sha") or version_hash,
         "upstream_commit_sha": kwargs.get("upstream_commit_sha") or kwargs.get("current_commit_sha") or version_hash,
@@ -102,6 +104,20 @@ async def fake_set_module_source_ref(self, module_id, source_ref):
     STORE[module_id]["source_ref"] = source_ref
 
 
+async def fake_set_module_environment_config(self, module_id, github_secrets_environment_name, environment_entries):
+    if module_id not in STORE:
+        return
+    STORE[module_id]["github_secrets_environment_name"] = github_secrets_environment_name
+    STORE[module_id]["environment_entries"] = environment_entries
+
+
+async def fake_get_module_runtime_environment(self, module_id):
+    module = STORE.get(module_id)
+    if module is None:
+        return {}
+    return {entry["key"]: entry["value"] for entry in module.get("environment_entries", [])}
+
+
 async def fake_get_module(self, module_id):
     return STORE.get(module_id)
 
@@ -138,6 +154,8 @@ async def fake_import_github_module(self, github_repo_url, github_branch, github
         "github_repo_url": github_repo_url,
         "github_branch": github_branch,
         "github_subpath": github_subpath,
+        "github_secrets_environment_name": None,
+        "environment_entries": [],
         "checkout_path": "/tmp/dspy-trainer/checkouts/mod-1",
         "current_commit_sha": "abc123",
         "upstream_commit_sha": "abc123",
@@ -211,6 +229,8 @@ def _patch_services(monkeypatch):
     monkeypatch.setattr(main_mod.AppServices, "ensure_module_mutation_allowed", fake_ensure_module_mutation_allowed)
     monkeypatch.setattr(main_mod.AppServices, "set_module_bundle_metadata", fake_set_module_bundle_metadata)
     monkeypatch.setattr(main_mod.AppServices, "set_module_source_ref", fake_set_module_source_ref)
+    monkeypatch.setattr(main_mod.AppServices, "set_module_environment_config", fake_set_module_environment_config)
+    monkeypatch.setattr(main_mod.AppServices, "get_module_runtime_environment", fake_get_module_runtime_environment)
 
 
 def test_module_import_and_status_flow(monkeypatch):
@@ -223,8 +243,9 @@ def test_module_import_and_status_flow(monkeypatch):
 
     monkeypatch.setattr(main_mod.AppServices, "ensure_bundle_requirements_installed", fake_ensure_bundle_requirements_installed)
 
-    def fake_run_bundle_eval(bundle_path, eval_inputs, num_threads=1):
+    def fake_run_bundle_eval(bundle_path, eval_inputs, num_threads=1, runtime_env=None):
         _ = (bundle_path, eval_inputs, num_threads)
+        assert runtime_env == {}
         raise RuntimeError("runtime error")
 
     monkeypatch.setattr(main_mod, "run_bundle_eval", fake_run_bundle_eval)
@@ -318,6 +339,8 @@ def test_module_metadata_can_be_updated(monkeypatch):
         "source": "upload",
         "source_ref": "/tmp/bundle",
         "checkout_path": "/tmp/bundle",
+        "github_secrets_environment_name": None,
+        "environment_entries": [],
     }
 
     with TestClient(main_mod.app) as client:
@@ -326,6 +349,42 @@ def test_module_metadata_can_be_updated(monkeypatch):
         payload = response.json()
         assert payload["bundle_name"] == "after-name"
         assert payload["bundle_version"] == "2.0.0"
+
+
+def test_module_environment_can_be_updated(monkeypatch):
+    STORE.clear()
+    _patch_services(monkeypatch)
+    STORE["mod-env"] = {
+        "id": "mod-env",
+        "status": "validated",
+        "validation_status": "passed",
+        "smoke_status": "pending",
+        "diagnostics": [],
+        "bundle_name": "before-name",
+        "bundle_version": "0.1.0",
+        "source": "upload",
+        "source_ref": "/tmp/bundle",
+        "checkout_path": "/tmp/bundle",
+        "github_secrets_environment_name": None,
+        "environment_entries": [],
+    }
+
+    with TestClient(main_mod.app) as client:
+        response = client.patch(
+            "/modules/mod-env",
+            json={
+                "github_secrets_environment_name": "agentic-chat-prod",
+                "environment_entries": [
+                    {"key": "AGENTIC_CHAT_ENDPOINT", "value": "https://example.test", "is_secret": True},
+                    {"key": "P21_READ_DB_SERVER", "value": "db.example.internal", "is_secret": False},
+                ],
+            },
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["github_secrets_environment_name"] == "agentic-chat-prod"
+        assert payload["environment_entries"][0]["key"] == "AGENTIC_CHAT_ENDPOINT"
+        assert payload["environment_entries"][0]["is_secret"] is True
 
 
 def test_module_import_and_list_include_git_revision_metadata(monkeypatch):
@@ -470,8 +529,9 @@ def test_smoke_test_rerun_overwrites_status(monkeypatch):
 
     results = [RuntimeError("first fail"), {"score_pct": 100.0, "items": []}]
 
-    def fake_run_bundle_eval(bundle_path, eval_inputs, num_threads=1):
+    def fake_run_bundle_eval(bundle_path, eval_inputs, num_threads=1, runtime_env=None):
         item = results.pop(0)
+        assert runtime_env == {}
         if isinstance(item, Exception):
             raise item
         return item

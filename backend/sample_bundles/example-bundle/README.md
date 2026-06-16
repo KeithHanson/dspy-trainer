@@ -36,3 +36,17 @@ You can also set credentials through environment variables instead of flags:
 - `DSPY_MODEL` or `OPENAI_MODEL`
 - `DSPY_API_BASE` or `OPENAI_API_BASE`
 - `DSPY_API_KEY` or `OPENAI_API_KEY`
+
+## Optional system dependency commands
+
+If your bundle needs OS libraries before `requirements.txt` can be installed, declare them in `bundle.toml`:
+
+```toml
+[runtime]
+system_dependency_commands = [
+  "apt-get update",
+  "apt-get install -y --no-install-recommends unixodbc unixodbc-dev libodbc2",
+]
+```
+
+These commands run before the bundle `requirements.txt` install step inside the backend/worker container.

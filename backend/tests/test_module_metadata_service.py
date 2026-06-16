@@ -1,15 +1,19 @@
 import asyncio
 import os
 import sys
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+
+from cryptography.fernet import Fernet
+import pytest
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import Settings
-from app.services import AppServices, _classify_sync_status
+from app.services import AppServices, _classify_sync_status, _json_ready
 
 
 class _Conn:
@@ -112,7 +116,17 @@ def test_set_module_bundle_metadata_updates_saved_bundle_toml(tmp_path):
 
 
 def test_build_module_payload_includes_github_and_revision_metadata():
-    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+    services = AppServices(
+        Settings(
+            postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer",
+            module_env_encryption_key=Fernet.generate_key().decode("utf-8"),
+        )
+    )
+    encrypted_entries = services._encrypt_module_environment_entries(
+        [
+            {"key": "AGENTIC_CHAT_ENDPOINT", "value": "https://example.test", "is_secret": True},
+        ]
+    )
 
     payload = services._build_module_payload(
         {
@@ -129,6 +143,8 @@ def test_build_module_payload_includes_github_and_revision_metadata():
             "diagnostics": [],
             "github_repo_url": "https://github.com/example/demo-bundle",
             "github_branch": "main",
+            "github_secrets_environment_name": "agentic-chat-prod",
+            "environment_entries_encrypted": encrypted_entries,
             "checkout_path": "/tmp/dspy-trainer/checkouts/mod-1",
             "current_commit_sha": "abc123",
             "upstream_commit_sha": "abc123",
@@ -147,6 +163,12 @@ def test_build_module_payload_includes_github_and_revision_metadata():
 
     assert payload["github_repo_url"] == "https://github.com/example/demo-bundle"
     assert payload["github_branch"] == "main"
+    assert payload["github_secrets_environment_name"] == "agentic-chat-prod"
+    assert payload["environment_entries"][0] == {
+        "key": "AGENTIC_CHAT_ENDPOINT",
+        "value": "https://example.test",
+        "is_secret": True,
+    }
     assert payload["checkout_path"] == "/tmp/dspy-trainer/checkouts/mod-1"
     assert payload["current_commit_sha"] == "abc123"
     assert payload["sync_status"] == "synced"
@@ -336,3 +358,65 @@ def test_ensure_bundle_requirements_installed_caches_by_requirements_hash(tmp_pa
 
     assert len(calls) == 2
     assert calls[0][-2:] == ["-r", str(requirements)]
+
+
+def test_ensure_bundle_requirements_installed_runs_system_commands_before_pip(tmp_path, monkeypatch):
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+    bundle_root = tmp_path / "bundle"
+    bundle_root.mkdir()
+    (bundle_root / "bundle.toml").write_text(
+        "name='x'\nversion='0.1.0'\nscore_pass_threshold=0.8\n[runtime]\nsystem_dependency_commands=['echo system-1','echo system-2']\n",
+        encoding="utf-8",
+    )
+    requirements = bundle_root / "requirements.txt"
+    requirements.write_text("httpx==0.27.0\n", encoding="utf-8")
+
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        calls.append(list(args))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("app.services.subprocess.run", fake_run)
+
+    asyncio.run(services.ensure_bundle_requirements_installed(str(bundle_root)))
+
+    assert calls[0] == ["/bin/sh", "-lc", "echo system-1"]
+    assert calls[1] == ["/bin/sh", "-lc", "echo system-2"]
+    assert calls[2][-2:] == ["-r", str(requirements)]
+
+
+def test_ensure_bundle_requirements_installed_surfaces_system_command_failure(tmp_path, monkeypatch):
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+    bundle_root = tmp_path / "bundle"
+    bundle_root.mkdir()
+    (bundle_root / "bundle.toml").write_text(
+        "name='x'\nversion='0.1.0'\nscore_pass_threshold=0.8\n[runtime]\nsystem_dependency_commands=['exit 7']\n",
+        encoding="utf-8",
+    )
+
+    def fake_run(args, **kwargs):
+        return SimpleNamespace(returncode=7, stdout="", stderr="failed")
+
+    monkeypatch.setattr("app.services.subprocess.run", fake_run)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        asyncio.run(services.ensure_bundle_requirements_installed(str(bundle_root)))
+
+    assert "failed to install bundle system dependencies" in str(exc_info.value)
+
+
+def test_json_ready_serializes_decimal_values():
+    payload = {
+        "table_rows": [
+            {"revenue": Decimal("3577181.22")},
+        ],
+        "raw_output": {"value": Decimal("31.13")},
+    }
+
+    normalized = _json_ready(payload)
+
+    assert normalized == {
+        "table_rows": [{"revenue": "3577181.22"}],
+        "raw_output": {"value": "31.13"},
+    }

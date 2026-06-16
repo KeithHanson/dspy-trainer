@@ -7,6 +7,7 @@ import io
 import inspect
 import json
 import logging
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -105,13 +106,25 @@ def _capture_process_output(log_event: Callable[[str], None] | None):
 
     handler = _ProcessLogHandler(log_event)
     handler.setLevel(logging.NOTSET)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%Y/%m/%d %H:%M:%S"))
     root_logger = logging.getLogger()
+    attached_loggers: list[logging.Logger] = [root_logger]
     root_logger.addHandler(handler)
+    for logger_name, logger_obj in logging.Logger.manager.loggerDict.items():
+        if not isinstance(logger_obj, logging.Logger):
+            continue
+        if logger_name.startswith("dspy"):
+            logger_obj.addHandler(handler)
+            attached_loggers.append(logger_obj)
     try:
         with redirect_stdout(stdout_writer), redirect_stderr(stderr_writer):
             yield
     finally:
-        root_logger.removeHandler(handler)
+        for logger_obj in attached_loggers:
+            try:
+                logger_obj.removeHandler(handler)
+            except Exception:
+                pass
         handler.flush()
         stdout_writer.finish()
         stderr_writer.finish()
@@ -228,10 +241,11 @@ def _build_lm_from_profile(lm_profile: dict[str, Any]) -> Any:
     return lm_cls(**kwargs)
 
 
-def _load_bundle(bundle_path: str) -> tuple[Path, float, str | None, ModuleType, ModuleType]:
+def _load_bundle(bundle_path: str) -> tuple[Path, float, str | None, list[str] | None, ModuleType, ModuleType]:
     root = Path(bundle_path).expanduser().resolve()
     pass_threshold = 0.5
     optimized_program_state: str | None = None
+    target_output_fields: list[str] | None = None
     toml_path = root / "bundle.toml"
     if toml_path.exists():
         try:
@@ -242,6 +256,22 @@ def _load_bundle(bundle_path: str) -> tuple[Path, float, str | None, ModuleType,
             state_value = payload.get("optimized_program_state")
             if isinstance(state_value, str) and state_value.strip():
                 optimized_program_state = state_value.strip()
+            optimization_payload = payload.get("optimization")
+            raw_target_output_fields = (
+                optimization_payload.get("target_output_fields")
+                if isinstance(optimization_payload, dict)
+                else None
+            )
+            if isinstance(raw_target_output_fields, list):
+                normalized_target_output_fields: list[str] = []
+                for item in raw_target_output_fields:
+                    if not isinstance(item, str):
+                        continue
+                    normalized = item.strip()
+                    if normalized and normalized not in normalized_target_output_fields:
+                        normalized_target_output_fields.append(normalized)
+                if normalized_target_output_fields:
+                    target_output_fields = normalized_target_output_fields
         except Exception:
             pass
 
@@ -253,7 +283,30 @@ def _load_bundle(bundle_path: str) -> tuple[Path, float, str | None, ModuleType,
     if not hasattr(metric_mod, "judge_metric"):
         raise RuntimeError("metric.py must define judge_metric(example, prediction)")
 
-    return root, pass_threshold, optimized_program_state, module_mod, metric_mod
+    return root, pass_threshold, optimized_program_state, target_output_fields, module_mod, metric_mod
+
+
+@contextmanager
+def _temporary_environment(runtime_env: dict[str, str] | None):
+    if not runtime_env:
+        yield
+        return
+
+    original_values: dict[str, str] = {}
+    missing_keys: list[str] = []
+    for key, value in runtime_env.items():
+        if key in os.environ:
+            original_values[key] = os.environ[key]
+        else:
+            missing_keys.append(key)
+        os.environ[key] = value
+    try:
+        yield
+    finally:
+        for key, value in original_values.items():
+            os.environ[key] = value
+        for key in missing_keys:
+            os.environ.pop(key, None)
 
 
 def _load_program_state(program: Any, program_state_path: Path) -> None:
@@ -599,44 +652,59 @@ def run_bundle_optimization(
     dspy_config: dict[str, Any] | None = None,
     baseline_summary: dict[str, Any] | None = None,
     log_event: Callable[[str], None] | None = None,
+    runtime_env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     def _log(message: str) -> None:
         if log_event is not None:
             log_event(message)
 
-    root, pass_threshold, optimized_program_state, module_mod, metric_mod = _load_bundle(bundle_path)
-    raw_metric_fn = metric_mod.judge_metric
-    config = dict(dspy_config or {})
-    _log(f"bundle_path={bundle_path}")
-    _log(f"pass_threshold={pass_threshold}")
+    with _temporary_environment(runtime_env):
+        root, pass_threshold, optimized_program_state, target_output_fields, module_mod, metric_mod = _load_bundle(bundle_path)
+        raw_metric_fn = metric_mod.judge_metric
+        config = dict(dspy_config or {})
+        _log(f"bundle_path={bundle_path}")
+        _log(f"pass_threshold={pass_threshold}")
 
-    def _build_execution_lm() -> Any:
-        if execution_lm_profile is not None:
-            return _build_lm_from_profile(execution_lm_profile)
-        if hasattr(module_mod, "build_lm"):
-            return module_mod.build_lm()
-        return None
+        def _build_execution_lm() -> Any:
+            if execution_lm_profile is not None:
+                return _build_lm_from_profile(execution_lm_profile)
+            if hasattr(module_mod, "build_lm"):
+                return module_mod.build_lm()
+            return None
 
-    student_program = module_mod.build_program()
-    if optimized_program_state is not None:
-        _load_program_state(student_program, root / optimized_program_state)
+        student_program = module_mod.build_program()
+        if optimized_program_state is not None:
+            _load_program_state(student_program, root / optimized_program_state)
 
-    execution_lm: Any | None = _build_execution_lm()
-    if execution_lm is not None:
-        _disable_lm_cache(execution_lm)
-        student_program.set_lm(execution_lm)
+        execution_lm: Any | None = _build_execution_lm()
+        if execution_lm is not None:
+            _disable_lm_cache(execution_lm)
+            student_program.set_lm(execution_lm)
 
-    helper_lm = None
-    if helper_lm_profile is not None:
-        helper_lm = _build_lm_from_profile(helper_lm_profile)
-    elif execution_lm is not None:
-        helper_lm = execution_lm
-    if helper_lm is not None:
-        _disable_lm_cache(helper_lm)
+        helper_lm = None
+        if helper_lm_profile is not None:
+            helper_lm = _build_lm_from_profile(helper_lm_profile)
+        elif execution_lm is not None:
+            helper_lm = execution_lm
+        if helper_lm is not None:
+            _disable_lm_cache(helper_lm)
 
-    with _capture_process_output(log_event):
-        predictor_output_fields = _collect_output_fields(student_program)
-        output_fields, output_field_source = _resolve_demo_output_fields(train_records, predictor_output_fields)
+        with _capture_process_output(log_event):
+            predictor_output_fields = _collect_output_fields(student_program)
+            if target_output_fields is not None:
+                missing_target_output_fields = [
+                    field_name for field_name in target_output_fields if field_name not in predictor_output_fields
+                ]
+                if missing_target_output_fields:
+                    missing_fields = ",".join(missing_target_output_fields)
+                    raise RuntimeError(
+                        "bundle optimization.target_output_fields must match predictor outputs; "
+                        f"missing fields: {missing_fields}"
+                    )
+                output_fields = list(target_output_fields)
+                output_field_source = "bundle_optimization_target_output_fields"
+            else:
+                output_fields, output_field_source = _resolve_demo_output_fields(train_records, predictor_output_fields)
         _log(f"predictor_output_fields={','.join(predictor_output_fields) if predictor_output_fields else '<none>'}")
         _log(f"output_fields={','.join(output_fields) if output_fields else '<none>'}")
         _log(f"output_field_source={output_field_source}")
@@ -816,19 +884,21 @@ def run_bundle_eval(
     eval_inputs: list[dict[str, Any]],
     num_threads: int = 1,
     lm_profile: dict[str, Any] | None = None,
+    runtime_env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    root, pass_threshold, optimized_program_state, module_mod, metric_mod = _load_bundle(bundle_path)
+    with _temporary_environment(runtime_env):
+        root, pass_threshold, optimized_program_state, _, module_mod, metric_mod = _load_bundle(bundle_path)
 
-    program = module_mod.build_program()
-    if optimized_program_state is not None:
-        _load_program_state(program, root / optimized_program_state)
-    if hasattr(module_mod, "build_lm"):
-        lm = module_mod.build_lm()
-    elif lm_profile is not None:
-        lm = _build_lm_from_profile(lm_profile)
-    else:
-        lm = None
-    if lm is not None:
-        _disable_lm_cache(lm)
-    raw_metric_fn = metric_mod.judge_metric
-    return _evaluate_program(program, raw_metric_fn, eval_inputs, pass_threshold, lm)
+        program = module_mod.build_program()
+        if optimized_program_state is not None:
+            _load_program_state(program, root / optimized_program_state)
+        if hasattr(module_mod, "build_lm"):
+            lm = module_mod.build_lm()
+        elif lm_profile is not None:
+            lm = _build_lm_from_profile(lm_profile)
+        else:
+            lm = None
+        if lm is not None:
+            _disable_lm_cache(lm)
+        raw_metric_fn = metric_mod.judge_metric
+        return _evaluate_program(program, raw_metric_fn, eval_inputs, pass_threshold, lm)

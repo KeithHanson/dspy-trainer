@@ -89,6 +89,7 @@ services:
       DSPY_TRAINER_GITHUB_PAT: ${GITHUB_PAT:-}
       DSPY_TRAINER_GIT_COMMIT_NAME: ${GIT_COMMIT_NAME:-DSPy Trainer}
       DSPY_TRAINER_GIT_COMMIT_EMAIL: ${GIT_COMMIT_EMAIL:-dspy-trainer@local}
+      DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY: ${DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY:-}
       DSPY_TRAINER_BACKEND_HOST: 0.0.0.0
       DSPY_TRAINER_BACKEND_PORT: 8000
     depends_on:
@@ -112,21 +113,6 @@ services:
       timeout: 5s
       retries: 10
       start_period: 15s
-    develop:
-      watch:
-        - action: sync+restart
-          path: ./backend/app
-          target: /app/backend/app
-          ignore:
-            - __pycache__/
-            - "*.pyc"
-        - action: sync+restart
-          path: ./backend/worker.py
-          target: /app/backend/worker.py
-        - action: rebuild
-          path: ./backend/requirements.txt
-        - action: rebuild
-          path: ./backend/Dockerfile
 
   worker:
     build:
@@ -145,6 +131,7 @@ services:
       DSPY_TRAINER_GITHUB_PAT: ${GITHUB_PAT:-}
       DSPY_TRAINER_GIT_COMMIT_NAME: ${GIT_COMMIT_NAME:-DSPy Trainer}
       DSPY_TRAINER_GIT_COMMIT_EMAIL: ${GIT_COMMIT_EMAIL:-dspy-trainer@local}
+      DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY: ${DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -166,21 +153,6 @@ services:
       timeout: 5s
       retries: 10
       start_period: 15s
-    develop:
-      watch:
-        - action: sync+restart
-          path: ./backend/app
-          target: /app/backend/app
-          ignore:
-            - __pycache__/
-            - "*.pyc"
-        - action: sync+restart
-          path: ./backend/worker.py
-          target: /app/backend/worker.py
-        - action: rebuild
-          path: ./backend/requirements.txt
-        - action: rebuild
-          path: ./backend/Dockerfile
 
   web:
     build:
@@ -202,20 +174,6 @@ services:
       timeout: 5s
       retries: 10
       start_period: 10s
-    develop:
-      watch:
-        - action: rebuild
-          path: ./web/src
-        - action: rebuild
-          path: ./web/index.html
-        - action: rebuild
-          path: ./web/nginx.conf
-        - action: rebuild
-          path: ./web/package.json
-        - action: rebuild
-          path: ./web/package-lock.json
-        - action: rebuild
-          path: ./web/Dockerfile
 
 volumes:
   postgres_data:

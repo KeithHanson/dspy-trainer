@@ -2,5 +2,6 @@
 - Current product flow is dataset-first: import/create module bundle -> validate bundle contract -> create evaluation dataset -> create evaluation plan -> create/enqueue agent run plan -> inspect task results -> derive optimization datasets / launch optimization jobs.
 - Actual backend surface is defined in `backend/app/main.py`; root `README.md` is broadly directionally correct but some planning docs still describe older containerized-entrypoint/TUI concepts that are not the implemented runtime contract.
 - Runtime contract today is directory bundles with `module.py`, `metric.py`, and `bundle.toml`, executed by backend/worker code rather than user-supplied Dockerfiles.
+- Bundle metadata now optionally includes `[optimization].target_output_fields` to narrow the output fields used as optimizer targets without changing what eval judges can inspect.
 - Compose-first architecture: postgres + redis + mlflow + litellm-proxy + backend + worker + web. Postgres is source of truth, MLflow is tracking plane, Redis is queue/worker presence.
-- Read `mem:backend/core` for route/runtime details, `mem:backend/bundles` for bundle contract, `mem:web/core` for user workflow shape, and `mem:tech_stack` for dependency/runtime specifics.
+- Read `mem:backend/core` for route/runtime details, `mem:backend/optimization` for optimizer dataset/split behavior, `mem:backend/bundles` for bundle contract, `mem:web/core` for user workflow shape, and `mem:tech_stack` for dependency/runtime specifics.

@@ -16,6 +16,7 @@ export function App() {
         <Route path="/" element={<Navigate to="/dashboard" replace />} />
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/bundles" element={<BundlesPage />} />
+        <Route path="/bundles/:moduleId" element={<BundlesPage />} />
         <Route path="/datasets" element={<DatasetsPage />} />
         <Route path="/datasets/new" element={<DatasetEditorPage />} />
         <Route path="/datasets/:datasetId/edit" element={<DatasetEditorPage />} />

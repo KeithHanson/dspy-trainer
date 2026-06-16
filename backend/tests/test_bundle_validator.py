@@ -41,6 +41,43 @@ def test_validator_accepts_valid_bundle():
         "input_template": {"question": ""},
         "label_template": {"expected": ""},
     }
+    assert report.metadata["optimization"] == {"target_output_fields": None}
+
+
+def test_validator_accepts_optimization_target_output_fields(tmp_path):
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "module.py").write_text(
+        "import dspy\n"
+        "class Sig(dspy.Signature):\n"
+        "  q=dspy.InputField()\n"
+        "  answer=dspy.OutputField()\n"
+        "  confidence=dspy.OutputField()\n"
+        "class Agent(dspy.Module):\n"
+        "  def forward(self, q: str):\n"
+        "    return dspy.Prediction(answer='x', confidence='high')\n"
+        "def build_program():\n"
+        "  return Agent()\n",
+        encoding="utf-8",
+    )
+    (bundle / "metric.py").write_text(
+        "def judge_metric(example, prediction, trace=None):\n"
+        "  return {'score': 1.0, 'rationale': 'ok', 'flags': [], 'raw_response': {}}\n",
+        encoding="utf-8",
+    )
+    (bundle / "bundle.toml").write_text(
+        "name='x'\n"
+        "version='0.1.0'\n"
+        "score_pass_threshold=0.8\n"
+        "[optimization]\n"
+        "target_output_fields=['answer', 'confidence', 'answer']\n",
+        encoding="utf-8",
+    )
+
+    report = validate_bundle(str(bundle))
+
+    assert report.passed is True
+    assert report.metadata["optimization"] == {"target_output_fields": ["answer", "confidence"]}
 
 
 def test_validator_reports_missing_files():
@@ -216,3 +253,94 @@ def test_validator_rejects_invalid_evaluation_contract(tmp_path):
     report = validate_bundle(str(bundle))
     assert report.passed is False
     assert "bundle_toml_evaluation_input_field_key_missing" in _diag_codes(report)
+
+
+def test_validator_accepts_runtime_system_dependency_commands(tmp_path):
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "module.py").write_text(
+        "import dspy\n"
+        "class Sig(dspy.Signature):\n"
+        "  q=dspy.InputField()\n"
+        "  a=dspy.OutputField()\n"
+        "class Agent(dspy.Module):\n"
+        "  def forward(self, q: str):\n"
+        "    return dspy.Prediction(a='x')\n"
+        "def build_program():\n"
+        "  return Agent()\n",
+        encoding="utf-8",
+    )
+    (bundle / "metric.py").write_text(
+        "def judge_metric(example, prediction, trace=None):\n"
+        "  return {'score': 1.0, 'rationale': 'ok', 'flags': [], 'raw_response': {}}\n",
+        encoding="utf-8",
+    )
+    (bundle / "bundle.toml").write_text(
+        "name='x'\nversion='0.1.0'\nscore_pass_threshold=0.8\n[runtime]\nsystem_dependency_commands=['apt-get update','apt-get install -y unixodbc']\n",
+        encoding="utf-8",
+    )
+
+    report = validate_bundle(str(bundle))
+    assert report.passed is True
+    assert report.metadata["system_dependency_commands"] == ["apt-get update", "apt-get install -y unixodbc"]
+
+
+def test_validator_rejects_invalid_runtime_system_dependency_commands(tmp_path):
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "module.py").write_text(
+        "import dspy\n"
+        "class Sig(dspy.Signature):\n"
+        "  q=dspy.InputField()\n"
+        "  a=dspy.OutputField()\n"
+        "class Agent(dspy.Module):\n"
+        "  def forward(self, q: str):\n"
+        "    return dspy.Prediction(a='x')\n"
+        "def build_program():\n"
+        "  return Agent()\n",
+        encoding="utf-8",
+    )
+    (bundle / "metric.py").write_text(
+        "def judge_metric(example, prediction, trace=None):\n"
+        "  return {'score': 1.0, 'rationale': 'ok', 'flags': [], 'raw_response': {}}\n",
+        encoding="utf-8",
+    )
+    (bundle / "bundle.toml").write_text(
+        "name='x'\nversion='0.1.0'\nscore_pass_threshold=0.8\n[runtime]\nsystem_dependency_commands=['', 1]\n",
+        encoding="utf-8",
+    )
+
+    report = validate_bundle(str(bundle))
+    assert report.passed is False
+    assert "bundle_toml_runtime_system_dependency_commands_invalid" in _diag_codes(report)
+
+
+def test_validator_rejects_invalid_optimization_target_output_fields(tmp_path):
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "module.py").write_text(
+        "import dspy\n"
+        "class Sig(dspy.Signature):\n"
+        "  q=dspy.InputField()\n"
+        "  a=dspy.OutputField()\n"
+        "class Agent(dspy.Module):\n"
+        "  def forward(self, q: str):\n"
+        "    return dspy.Prediction(a='x')\n"
+        "def build_program():\n"
+        "  return Agent()\n",
+        encoding="utf-8",
+    )
+    (bundle / "metric.py").write_text(
+        "def judge_metric(example, prediction, trace=None):\n"
+        "  return {'score': 1.0, 'rationale': 'ok', 'flags': [], 'raw_response': {}}\n",
+        encoding="utf-8",
+    )
+    (bundle / "bundle.toml").write_text(
+        "name='x'\nversion='0.1.0'\nscore_pass_threshold=0.8\n[optimization]\ntarget_output_fields=['', 1]\n",
+        encoding="utf-8",
+    )
+
+    report = validate_bundle(str(bundle))
+
+    assert report.passed is False
+    assert "bundle_toml_optimization_target_output_fields_invalid" in _diag_codes(report)
