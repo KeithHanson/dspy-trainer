@@ -2944,9 +2944,9 @@ class AppServices:
         )
         return evaluation_plan, run_plan
 
-    async def _await_agent_run_plan_completion(self, plan_id: str, timeout_s: float = 600.0) -> dict[str, Any] | None:
-        deadline = asyncio.get_running_loop().time() + timeout_s
-        while asyncio.get_running_loop().time() < deadline:
+    async def _await_agent_run_plan_completion(self, plan_id: str, timeout_s: float | None = None) -> dict[str, Any] | None:
+        deadline = None if timeout_s is None else asyncio.get_running_loop().time() + timeout_s
+        while deadline is None or asyncio.get_running_loop().time() < deadline:
             plan = await self.get_agent_run_plan(plan_id)
             if plan is None:
                 return None
