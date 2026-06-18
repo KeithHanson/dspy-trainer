@@ -602,6 +602,41 @@ describe("BundlesPage", () => {
     vi.unstubAllGlobals();
   });
 
+  it("renders a stacked empty eval trend state when a bundle has no scored runs", async () => {
+    const fetchMock = vi.fn((url, init) => {
+      if (String(url).includes("/agent-run-plans?") && (!init || init.method === "GET")) {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([]),
+        });
+      }
+      if (String(url).endsWith("/modules") && (!init || init.method === "GET")) {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([
+            {
+              id: "mod-empty",
+              bundle_name: "agentic-chat",
+              validation_status: "passed",
+              status: "validated",
+              diagnostics: [],
+            },
+          ]),
+        });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderBundlesApp();
+
+    const emptyStateLabel = await screen.findByText("No evals yet");
+    expect(emptyStateLabel.closest(".bundles-sparkline-card-empty")).toBeInTheDocument();
+    expect(screen.getByText("Eval trend")).toBeInTheDocument();
+
+    vi.unstubAllGlobals();
+  });
+
   it("syncs a bundle from the list and shows a success notice", async () => {
     const fetchMock = vi.fn((url, init) => {
       if (String(url).includes("/agent-run-plans?") && (!init || init.method === "GET")) {

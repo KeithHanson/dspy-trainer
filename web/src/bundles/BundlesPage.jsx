@@ -436,7 +436,7 @@ function BundleEvalSparkline({ bundle, history }) {
   const scoredHistory = Array.isArray(history) ? history.filter((item) => Number.isFinite(item?.average_score)) : [];
   if (!scoredHistory.length) {
     return (
-      <div className="bundles-sparkline-card">
+      <div className="bundles-sparkline-card bundles-sparkline-card-empty">
         <span className="t-label">Eval trend</span>
         <span className="cap">No evals yet</span>
       </div>
