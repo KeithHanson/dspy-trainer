@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
+import secrets
 import json
 import logging
 import multiprocessing
@@ -84,6 +85,25 @@ def _normalize_module_environment_entries(entries: Any) -> list[dict[str, Any]]:
 
 def _json_ready(value: Any) -> Any:
     return json.loads(json.dumps(value, default=str))
+
+
+def _normalize_bundle_endpoint_name(value: Any) -> str:
+    name = str(value or "").strip()
+    if not name:
+        raise ValueError("endpoint name is required")
+    if len(name) > 80:
+        raise ValueError("endpoint name must be 80 characters or fewer")
+    return name
+
+
+def _normalize_pinned_worker_count(value: Any) -> int:
+    try:
+        count = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("pinned_worker_count must be an integer") from exc
+    if count < 1:
+        raise ValueError("pinned_worker_count must be at least 1")
+    return count
 
 
 def _run_agent_run_task_eval_process(payload: dict[str, Any], result_queue: Any) -> None:
@@ -868,6 +888,47 @@ class AppServices:
             "busy_workers": max(0, reported_workers - available_workers),
         }
 
+    async def _list_registered_workers(self, prefix: str) -> list[dict[str, Any]]:
+        if self.redis is None:
+            return []
+        redis_prefix = f"{prefix}:"
+        keys = await self.redis.keys(f"{redis_prefix}*")
+        workers: list[dict[str, Any]] = []
+        for key in keys:
+            raw = await self.redis.get(key)
+            if not raw:
+                continue
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            worker_id = payload.get("worker_id") or key.replace(redis_prefix, "", 1)
+            workers.append(
+                {
+                    "worker_id": str(worker_id),
+                    "status": str(payload.get("status") or "unknown"),
+                    "task_id": payload.get("task_id"),
+                    "last_seen": payload.get("last_seen"),
+                    "kind": str(payload.get("kind") or "worker"),
+                    "endpoint_id": payload.get("endpoint_id"),
+                }
+            )
+        workers.sort(key=lambda item: item["worker_id"])
+        return workers
+
+    async def list_endpoint_workers(self) -> dict[str, Any]:
+        workers = await self._list_registered_workers(self.settings.endpoint_worker_registry_prefix)
+        available_workers = sum(1 for item in workers if item["status"] in {"listening", "idle"})
+        reported_workers = len(workers)
+        total_workers = max(reported_workers, max(0, int(self.settings.total_endpoint_workers)))
+        return {
+            "items": workers,
+            "total_workers": total_workers,
+            "reported_workers": reported_workers,
+            "available_workers": available_workers,
+            "busy_workers": max(0, reported_workers - available_workers),
+        }
+
     async def init_db(self) -> None:
         if self.postgres_pool is None:
             return
@@ -942,6 +1003,24 @@ class AppServices:
                 );
                 """
             )
+            await conn.execute(
+                """
+                create table if not exists bundle_endpoints (
+                  id text primary key,
+                  module_import_id text not null references module_imports(id) on delete cascade,
+                  lm_profile_id text references lm_profiles(id) on delete set null,
+                  pinned_worker_count int not null default 1,
+                  name text not null,
+                  key_hash text not null,
+                  key_preview text not null,
+                  created_at timestamptz not null,
+                  updated_at timestamptz not null
+                );
+                """
+            )
+            await conn.execute("alter table bundle_endpoints add column if not exists lm_profile_id text references lm_profiles(id) on delete set null;")
+            await conn.execute("alter table bundle_endpoints add column if not exists pinned_worker_count int not null default 1;")
+            await conn.execute("create index if not exists idx_bundle_endpoints_module_import_id on bundle_endpoints(module_import_id, created_at desc);")
             await conn.execute(
                 """
                 create table if not exists optimization_datasets (
@@ -2099,6 +2178,469 @@ class AppServices:
                 continue
             runtime_env[key] = str(entry.get("value") or "")
         return runtime_env
+
+    @staticmethod
+    def _generate_bundle_endpoint_key() -> str:
+        return f"bep_{secrets.token_urlsafe(24)}"
+
+    @staticmethod
+    def _hash_bundle_endpoint_key(key: str) -> str:
+        return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _build_bundle_endpoint_payload(row: Any) -> dict[str, Any]:
+        payload = {
+            "id": row["id"],
+            "module_import_id": row["module_import_id"],
+            "lm_profile_id": AppServices._row_value(row, "lm_profile_id"),
+            "pinned_worker_count": int(AppServices._row_value(row, "pinned_worker_count") or 1),
+            "name": row["name"],
+            "key_preview": row["key_preview"],
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+            "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+        }
+        module_name = AppServices._row_value(row, "module_bundle_name")
+        if module_name is not None:
+            payload["module_bundle_name"] = module_name
+        lm_profile_name = AppServices._row_value(row, "lm_profile_name")
+        if lm_profile_name is not None:
+            payload["lm_profile_name"] = lm_profile_name
+        return payload
+
+    async def list_all_bundle_endpoints(self) -> list[dict[str, Any]]:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                select e.id, e.module_import_id, e.lm_profile_id, e.pinned_worker_count, e.name, e.key_preview, e.created_at, e.updated_at,
+                       m.bundle_name as module_bundle_name,
+                       lp.name as lm_profile_name
+                from bundle_endpoints e
+                join module_imports m on m.id = e.module_import_id
+                left join lm_profiles lp on lp.id = e.lm_profile_id and lp.archived_at is null
+                where m.deleted_at is null
+                order by e.created_at desc
+                """
+            )
+        return [self._build_bundle_endpoint_payload(row) for row in rows]
+
+    async def get_bundle_endpoint(self, endpoint_id: str) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                select e.id, e.module_import_id, e.lm_profile_id, e.pinned_worker_count, e.name, e.key_preview, e.created_at, e.updated_at,
+                       m.bundle_name as module_bundle_name,
+                       lp.name as lm_profile_name
+                from bundle_endpoints e
+                join module_imports m on m.id = e.module_import_id
+                left join lm_profiles lp on lp.id = e.lm_profile_id and lp.archived_at is null
+                where e.id = $1 and m.deleted_at is null
+                """,
+                endpoint_id,
+            )
+        if row is None:
+            return None
+        return self._build_bundle_endpoint_payload(row)
+
+    async def list_bundle_endpoints(self, module_id: str) -> list[dict[str, Any]] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        module = await self.get_module(module_id)
+        if module is None:
+            return None
+        async with self.postgres_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                select e.id, e.module_import_id, e.lm_profile_id, e.pinned_worker_count, e.name, e.key_preview, e.created_at, e.updated_at,
+                       m.bundle_name as module_bundle_name,
+                       lp.name as lm_profile_name
+                from bundle_endpoints e
+                join module_imports m on m.id = e.module_import_id
+                left join lm_profiles lp on lp.id = e.lm_profile_id and lp.archived_at is null
+                where e.module_import_id = $1 and m.deleted_at is null
+                order by created_at asc
+                """,
+                module_id,
+            )
+        return [self._build_bundle_endpoint_payload(row) for row in rows]
+
+    async def create_bundle_endpoint(
+        self,
+        module_id: str,
+        name: str,
+        lm_profile_id: str | None = None,
+        pinned_worker_count: int = 1,
+    ) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        module = await self.get_module(module_id)
+        if module is None:
+            return None
+        normalized_lm_profile_id = str(lm_profile_id or "").strip() or None
+        normalized_pinned_worker_count = _normalize_pinned_worker_count(pinned_worker_count)
+        if normalized_lm_profile_id is not None:
+            profile = await self.get_lm_profile(normalized_lm_profile_id)
+            if profile is None:
+                raise ValueError("lm profile not found")
+        endpoint_id = str(uuid4())
+        key = self._generate_bundle_endpoint_key()
+        key_hash = self._hash_bundle_endpoint_key(key)
+        normalized_name = _normalize_bundle_endpoint_name(name)
+        preview = key[-6:]
+        now = datetime.now(timezone.utc)
+        async with self.postgres_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                insert into bundle_endpoints (id, module_import_id, lm_profile_id, pinned_worker_count, name, key_hash, key_preview, created_at, updated_at)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                returning id, module_import_id, lm_profile_id, pinned_worker_count, name, key_preview, created_at, updated_at
+                """,
+                endpoint_id,
+                module_id,
+                normalized_lm_profile_id,
+                normalized_pinned_worker_count,
+                normalized_name,
+                key_hash,
+                preview,
+                now,
+                now,
+            )
+        payload = await self.get_bundle_endpoint(str(row["id"]))
+        if payload is None:
+            return None
+        payload["api_key"] = key
+        await self.reconcile_endpoint_worker_assignments()
+        return payload
+
+    async def create_bundle_endpoint_global(
+        self,
+        name: str,
+        module_import_id: str,
+        lm_profile_id: str | None = None,
+        pinned_worker_count: int = 1,
+    ) -> dict[str, Any] | None:
+        normalized_module_id = str(module_import_id or "").strip()
+        if not normalized_module_id:
+            raise ValueError("module_import_id is required")
+        return await self.create_bundle_endpoint(normalized_module_id, name, lm_profile_id, pinned_worker_count)
+
+    async def update_bundle_endpoint(
+        self,
+        module_id: str,
+        endpoint_id: str,
+        name: str,
+        lm_profile_id: str | None = None,
+        pinned_worker_count: int | None = None,
+    ) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        current = await self.get_bundle_endpoint(endpoint_id)
+        if current is None or str(current.get("module_import_id") or "") != module_id:
+            return None
+        normalized_name = _normalize_bundle_endpoint_name(name)
+        normalized_lm_profile_id = str(lm_profile_id or "").strip() or None
+        next_pinned_worker_count = current.get("pinned_worker_count") if pinned_worker_count is None else pinned_worker_count
+        normalized_pinned_worker_count = _normalize_pinned_worker_count(next_pinned_worker_count)
+        if normalized_lm_profile_id is not None:
+            profile = await self.get_lm_profile(normalized_lm_profile_id)
+            if profile is None:
+                raise ValueError("lm profile not found")
+        now = datetime.now(timezone.utc)
+        async with self.postgres_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                update bundle_endpoints
+                set name = $3,
+                    lm_profile_id = $4,
+                    pinned_worker_count = $5,
+                    updated_at = $6
+                where id = $1 and module_import_id = $2
+                returning id, module_import_id, lm_profile_id, pinned_worker_count, name, key_preview, created_at, updated_at
+                """,
+                endpoint_id,
+                module_id,
+                normalized_name,
+                normalized_lm_profile_id,
+                normalized_pinned_worker_count,
+                now,
+            )
+        if row is None:
+            return None
+        payload = await self.get_bundle_endpoint(str(row["id"]))
+        await self.reconcile_endpoint_worker_assignments()
+        return payload
+
+    async def update_bundle_endpoint_global(
+        self,
+        endpoint_id: str,
+        *,
+        name: str | None = None,
+        module_import_id: str | None = None,
+        lm_profile_id: str | None = None,
+        pinned_worker_count: int | None = None,
+    ) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        current = await self.get_bundle_endpoint(endpoint_id)
+        if current is None:
+            return None
+        next_name = current["name"] if name is None else _normalize_bundle_endpoint_name(name)
+        next_module_id = str(module_import_id or current["module_import_id"]).strip()
+        next_lm_profile_id = lm_profile_id if lm_profile_id is not None else current.get("lm_profile_id")
+        normalized_lm_profile_id = str(next_lm_profile_id or "").strip() or None
+        next_pinned_worker_count = current.get("pinned_worker_count") if pinned_worker_count is None else pinned_worker_count
+        normalized_pinned_worker_count = _normalize_pinned_worker_count(next_pinned_worker_count)
+        if not next_module_id:
+            raise ValueError("module_import_id is required")
+        if await self.get_module(next_module_id) is None:
+            raise ValueError("module not found")
+        if normalized_lm_profile_id is not None and await self.get_lm_profile(normalized_lm_profile_id) is None:
+            raise ValueError("lm profile not found")
+        now = datetime.now(timezone.utc)
+        async with self.postgres_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                update bundle_endpoints
+                set name = $2,
+                    module_import_id = $3,
+                    lm_profile_id = $4,
+                    pinned_worker_count = $5,
+                    updated_at = $6
+                where id = $1
+                returning id, module_import_id, lm_profile_id, pinned_worker_count, name, key_preview, created_at, updated_at
+                """,
+                endpoint_id,
+                next_name,
+                next_module_id,
+                normalized_lm_profile_id,
+                normalized_pinned_worker_count,
+                now,
+            )
+        if row is None:
+            return None
+        payload = await self.get_bundle_endpoint(str(row["id"]))
+        await self.reconcile_endpoint_worker_assignments()
+        return payload
+
+    async def delete_bundle_endpoint(self, module_id: str, endpoint_id: str) -> bool:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            result = await conn.execute(
+                "delete from bundle_endpoints where id = $1 and module_import_id = $2",
+                endpoint_id,
+                module_id,
+            )
+        await self.reconcile_endpoint_worker_assignments()
+        return result.endswith("1")
+
+    async def delete_bundle_endpoint_global(self, endpoint_id: str) -> bool:
+        current = await self.get_bundle_endpoint(endpoint_id)
+        if current is None:
+            return False
+        deleted = await self.delete_bundle_endpoint(str(current["module_import_id"]), endpoint_id)
+        await self.reconcile_endpoint_worker_assignments()
+        return deleted
+
+    async def regenerate_bundle_endpoint_key(self, module_id: str, endpoint_id: str) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        key = self._generate_bundle_endpoint_key()
+        key_hash = self._hash_bundle_endpoint_key(key)
+        preview = key[-6:]
+        now = datetime.now(timezone.utc)
+        async with self.postgres_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                update bundle_endpoints
+                set key_hash = $3,
+                    key_preview = $4,
+                    updated_at = $5
+                where id = $1 and module_import_id = $2
+                returning id, module_import_id, name, key_preview, created_at, updated_at
+                """,
+                endpoint_id,
+                module_id,
+                key_hash,
+                preview,
+                now,
+            )
+        if row is None:
+            return None
+        payload = await self.get_bundle_endpoint(str(row["id"]))
+        if payload is None:
+            return None
+        payload["api_key"] = key
+        return payload
+
+    async def regenerate_bundle_endpoint_key_global(self, endpoint_id: str) -> dict[str, Any] | None:
+        current = await self.get_bundle_endpoint(endpoint_id)
+        if current is None:
+            return None
+        return await self.regenerate_bundle_endpoint_key(str(current["module_import_id"]), endpoint_id)
+
+    async def authenticate_bundle_endpoint(self, endpoint_id: str, api_key: str) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        normalized_key = str(api_key or "").strip()
+        if not normalized_key:
+            return None
+        async with self.postgres_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                select id, module_import_id, lm_profile_id, pinned_worker_count, name, key_hash, key_preview, created_at, updated_at
+                from bundle_endpoints
+                where id = $1
+                """,
+                endpoint_id,
+            )
+        if row is None:
+            return None
+        if not secrets.compare_digest(str(row["key_hash"] or ""), self._hash_bundle_endpoint_key(normalized_key)):
+            return None
+        return self._build_bundle_endpoint_payload(row)
+
+    def _endpoint_worker_assignment_key(self, worker_id: str) -> str:
+        return f"{self.settings.endpoint_worker_assignment_prefix}:{worker_id}"
+
+    def _endpoint_queue_name(self, endpoint_id: str) -> str:
+        return f"{self.settings.endpoint_queue_prefix}:{endpoint_id}"
+
+    def _endpoint_invocation_channel(self, invocation_id: str) -> str:
+        return f"{self.settings.endpoint_invocation_channel_prefix}:{invocation_id}"
+
+    async def get_endpoint_worker_assignment(self, worker_id: str) -> dict[str, Any] | None:
+        if self.redis is None:
+            return None
+        raw = await self.redis.get(self._endpoint_worker_assignment_key(worker_id))
+        if not raw:
+            return None
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        endpoint_id = str(payload.get("endpoint_id") or "").strip()
+        if not endpoint_id:
+            return None
+        return payload
+
+    async def reconcile_endpoint_worker_assignments(self) -> None:
+        if self.redis is None:
+            return
+        endpoints = sorted(
+            await self.list_all_bundle_endpoints(),
+            key=lambda item: (str(item.get("created_at") or ""), str(item.get("id") or "")),
+        )
+        workers = await self._list_registered_workers(self.settings.endpoint_worker_registry_prefix)
+        worker_ids = [str(worker["worker_id"]) for worker in workers]
+        desired_assignments: list[str] = []
+        for endpoint in endpoints:
+            desired_assignments.extend([str(endpoint["id"])] * max(1, int(endpoint.get("pinned_worker_count") or 1)))
+        for index, worker_id in enumerate(worker_ids):
+            assignment_key = self._endpoint_worker_assignment_key(worker_id)
+            if index < len(desired_assignments):
+                endpoint_id = desired_assignments[index]
+                await self.redis.set(assignment_key, json.dumps({"worker_id": worker_id, "endpoint_id": endpoint_id}))
+            else:
+                await self.redis.delete(assignment_key)
+
+    async def count_endpoint_workers_assigned(self, endpoint_id: str) -> int:
+        workers = await self._list_registered_workers(self.settings.endpoint_worker_registry_prefix)
+        assigned = 0
+        for worker in workers:
+            assignment = await self.get_endpoint_worker_assignment(str(worker["worker_id"]))
+            if assignment and str(assignment.get("endpoint_id") or "") == endpoint_id:
+                assigned += 1
+        return assigned
+
+    async def enqueue_endpoint_invocation(
+        self,
+        endpoint_id: str,
+        input_payload: dict[str, Any],
+        *,
+        stream: bool,
+        invocation_id: str | None = None,
+    ) -> str:
+        if self.redis is None:
+            raise RuntimeError("queue not initialized")
+        await self.reconcile_endpoint_worker_assignments()
+        assigned_workers = await self.count_endpoint_workers_assigned(endpoint_id)
+        if assigned_workers < 1:
+            raise RuntimeError("endpoint has no assigned endpoint workers")
+        invocation_id = str(invocation_id or uuid4())
+        payload = {
+            "type": "endpoint_invocation",
+            "invocation_id": invocation_id,
+            "endpoint_id": endpoint_id,
+            "input_payload": input_payload,
+            "stream": bool(stream),
+        }
+        await self.redis.execute_command("LPUSH", self._endpoint_queue_name(endpoint_id), json.dumps(payload))
+        return invocation_id
+
+    async def publish_endpoint_invocation_event(self, invocation_id: str, event: str, payload: dict[str, Any]) -> None:
+        if self.redis is None:
+            return
+        await self.redis.publish(self._endpoint_invocation_channel(invocation_id), json.dumps({"event": event, "payload": payload}))
+
+    async def run_endpoint_invocation_job(
+        self,
+        invocation_id: str,
+        endpoint_id: str,
+        input_payload: dict[str, Any],
+        worker_id: str,
+        *,
+        stream: bool,
+    ) -> None:
+        endpoint = await self.get_bundle_endpoint(endpoint_id)
+        if endpoint is None:
+            await self.publish_endpoint_invocation_event(invocation_id, "error", {"error": "endpoint not found"})
+            return
+        module_state = await self.resolve_module_execution_state(str(endpoint["module_import_id"]))
+        if module_state is None:
+            await self.publish_endpoint_invocation_event(invocation_id, "error", {"error": "bundle endpoint module not found"})
+            return
+        try:
+            await self.ensure_bundle_requirements_installed(module_state["bundle_path"])
+            runtime_env = await self.get_module_runtime_environment(str(endpoint["module_import_id"]))
+            lm_profile = await self.get_lm_profile(str(endpoint["lm_profile_id"])) if endpoint.get("lm_profile_id") else None
+            if stream:
+                from app.executor.module_runner import stream_bundle
+
+                loop = asyncio.get_running_loop()
+
+                def emit_event(event_payload: dict[str, Any]) -> None:
+                    asyncio.run_coroutine_threadsafe(
+                        self.publish_endpoint_invocation_event(invocation_id, "delta", event_payload),
+                        loop,
+                    )
+
+                output = await asyncio.to_thread(
+                    stream_bundle,
+                    module_state["bundle_path"],
+                    input_payload,
+                    emit_event,
+                    lm_profile,
+                    runtime_env,
+                )
+            else:
+                from app.executor.module_runner import invoke_bundle
+
+                output = await asyncio.to_thread(
+                    invoke_bundle,
+                    module_state["bundle_path"],
+                    input_payload,
+                    lm_profile,
+                    runtime_env,
+                )
+            await self.publish_endpoint_invocation_event(invocation_id, "final", output)
+        except Exception as exc:
+            await self.publish_endpoint_invocation_event(invocation_id, "error", {"error": str(exc), "worker_id": worker_id})
 
     async def list_module_revisions(self, module_id: str) -> list[dict[str, Any]]:
         if self.postgres_pool is None:

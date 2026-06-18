@@ -1,5 +1,7 @@
 from contextlib import asynccontextmanager
 from io import BytesIO
+import asyncio
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -7,7 +9,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
@@ -42,6 +44,17 @@ app.add_middleware(
 
 
 SAMPLE_BUNDLE_DIR = Path(__file__).resolve().parents[1] / "sample_bundles" / "example-bundle"
+
+
+def _read_endpoint_api_key(request: Request) -> str:
+    auth_header = str(request.headers.get("authorization") or "").strip()
+    if auth_header.lower().startswith("bearer "):
+        return auth_header[7:].strip()
+    return str(request.headers.get("x-endpoint-key") or "").strip()
+
+
+def _format_sse_event(event: str, payload: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(payload, default=str)}\n\n"
 
 
 def _iter_sample_bundle_files(bundle_dir: Path) -> list[Path]:
@@ -82,6 +95,20 @@ class ModuleMetadataUpdateRequest(BaseModel):
 
 class ModuleSyncRequest(BaseModel):
     force: bool | None = None
+
+
+class BundleEndpointCreateRequest(BaseModel):
+    name: str
+    module_import_id: str | None = None
+    lm_profile_id: str | None = None
+    pinned_worker_count: int = 1
+
+
+class BundleEndpointUpdateRequest(BaseModel):
+    name: str | None = None
+    module_import_id: str | None = None
+    lm_profile_id: str | None = None
+    pinned_worker_count: int | None = None
 
 
 class OptimizationJobCreateRequest(BaseModel):
@@ -428,6 +455,241 @@ async def delete_module(module_id: str, request: Request):
     if not deleted:
         return JSONResponse(status_code=404, content={"error": "module not found"})
     return {"id": module_id, "deleted": True}
+
+
+@app.get("/modules/{module_id}/endpoints")
+async def list_bundle_endpoints(module_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    endpoints = await services.list_bundle_endpoints(module_id)
+    if endpoints is None:
+        return JSONResponse(status_code=404, content={"error": "module not found"})
+    return endpoints
+
+
+@app.post("/modules/{module_id}/endpoints")
+async def create_bundle_endpoint(module_id: str, request: Request, payload: BundleEndpointCreateRequest):
+    services: AppServices = request.app.state.services
+    try:
+        endpoint = await services.create_bundle_endpoint(module_id, payload.name, payload.lm_profile_id, payload.pinned_worker_count)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    if endpoint is None:
+        return JSONResponse(status_code=404, content={"error": "module not found"})
+    return endpoint
+
+
+@app.patch("/modules/{module_id}/endpoints/{endpoint_id}")
+async def update_bundle_endpoint(module_id: str, endpoint_id: str, request: Request, payload: BundleEndpointUpdateRequest):
+    services: AppServices = request.app.state.services
+    if payload.name is None:
+        return JSONResponse(status_code=400, content={"error": "name is required"})
+    try:
+        endpoint = await services.update_bundle_endpoint(
+            module_id,
+            endpoint_id,
+            payload.name,
+            payload.lm_profile_id,
+            payload.pinned_worker_count,
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    if endpoint is None:
+        return JSONResponse(status_code=404, content={"error": "endpoint not found"})
+    return endpoint
+
+
+@app.delete("/modules/{module_id}/endpoints/{endpoint_id}")
+async def delete_bundle_endpoint(module_id: str, endpoint_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    deleted = await services.delete_bundle_endpoint(module_id, endpoint_id)
+    if not deleted:
+        return JSONResponse(status_code=404, content={"error": "endpoint not found"})
+    return {"id": endpoint_id, "deleted": True}
+
+
+@app.post("/modules/{module_id}/endpoints/{endpoint_id}/regenerate-key")
+async def regenerate_bundle_endpoint_key(module_id: str, endpoint_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    endpoint = await services.regenerate_bundle_endpoint_key(module_id, endpoint_id)
+    if endpoint is None:
+        return JSONResponse(status_code=404, content={"error": "endpoint not found"})
+    return endpoint
+
+
+@app.get("/bundle-endpoints")
+async def list_all_bundle_endpoints(request: Request):
+    services: AppServices = request.app.state.services
+    return await services.list_all_bundle_endpoints()
+
+
+@app.post("/bundle-endpoints")
+async def create_bundle_endpoint_global(request: Request, payload: BundleEndpointCreateRequest):
+    services: AppServices = request.app.state.services
+    try:
+        endpoint = await services.create_bundle_endpoint_global(
+            payload.name,
+            payload.module_import_id or "",
+            payload.lm_profile_id,
+            payload.pinned_worker_count,
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    if endpoint is None:
+        return JSONResponse(status_code=404, content={"error": "module not found"})
+    return endpoint
+
+
+@app.get("/bundle-endpoints/{endpoint_id}")
+async def get_bundle_endpoint(endpoint_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    endpoint = await services.get_bundle_endpoint(endpoint_id)
+    if endpoint is None:
+        return JSONResponse(status_code=404, content={"error": "endpoint not found"})
+    return endpoint
+
+
+@app.patch("/bundle-endpoints/{endpoint_id}")
+async def update_bundle_endpoint_global(endpoint_id: str, request: Request, payload: BundleEndpointUpdateRequest):
+    services: AppServices = request.app.state.services
+    try:
+        endpoint = await services.update_bundle_endpoint_global(
+            endpoint_id,
+            name=payload.name,
+            module_import_id=payload.module_import_id,
+            lm_profile_id=payload.lm_profile_id,
+            pinned_worker_count=payload.pinned_worker_count,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 404 if message == "module not found" else 400
+        return JSONResponse(status_code=status_code, content={"error": message})
+    if endpoint is None:
+        return JSONResponse(status_code=404, content={"error": "endpoint not found"})
+    return endpoint
+
+
+@app.delete("/bundle-endpoints/{endpoint_id}")
+async def delete_bundle_endpoint_global(endpoint_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    deleted = await services.delete_bundle_endpoint_global(endpoint_id)
+    if not deleted:
+        return JSONResponse(status_code=404, content={"error": "endpoint not found"})
+    return {"id": endpoint_id, "deleted": True}
+
+
+@app.post("/bundle-endpoints/{endpoint_id}/regenerate-key")
+async def regenerate_bundle_endpoint_key_global(endpoint_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    endpoint = await services.regenerate_bundle_endpoint_key_global(endpoint_id)
+    if endpoint is None:
+        return JSONResponse(status_code=404, content={"error": "endpoint not found"})
+    return endpoint
+
+
+@app.post("/bundle-endpoints/{endpoint_id}/invoke")
+async def invoke_bundle_endpoint(endpoint_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    api_key = _read_endpoint_api_key(request)
+    if not api_key:
+        return JSONResponse(status_code=401, content={"error": "endpoint api key is required"})
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "request body must be a JSON object"})
+    if not isinstance(payload, dict) or not payload:
+        return JSONResponse(status_code=400, content={"error": "request body must be a non-empty JSON object"})
+    endpoint = await services.authenticate_bundle_endpoint(endpoint_id, api_key)
+    if endpoint is None:
+        return JSONResponse(status_code=401, content={"error": "invalid endpoint id or api key"})
+    if services.redis is None:
+        return JSONResponse(status_code=503, content={"error": "queue not initialized"})
+    redis_client = services.redis
+    invocation_id = str(__import__("uuid").uuid4())
+    channel = services._endpoint_invocation_channel(invocation_id)
+    pubsub = redis_client.pubsub()
+    await pubsub.subscribe(channel)
+    try:
+        await services.enqueue_endpoint_invocation(endpoint_id, payload, stream=False, invocation_id=invocation_id)
+        deadline = asyncio.get_running_loop().time() + 300.0
+        while asyncio.get_running_loop().time() < deadline:
+            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+            if message is None:
+                await asyncio.sleep(0.05)
+                continue
+            raw_data = message.get("data") if isinstance(message, dict) else None
+            if isinstance(raw_data, bytes):
+                raw_data = raw_data.decode("utf-8", errors="ignore")
+            event_payload = json.loads(raw_data) if isinstance(raw_data, str) else None
+            if not isinstance(event_payload, dict):
+                continue
+            event_name = str(event_payload.get("event") or "")
+            event_body = event_payload.get("payload") if isinstance(event_payload.get("payload"), dict) else {}
+            if event_name == "final":
+                return event_body
+            if event_name == "error":
+                return JSONResponse(status_code=500, content=event_body)
+        return JSONResponse(status_code=504, content={"error": "endpoint invocation timed out"})
+    except RuntimeError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    finally:
+        await pubsub.unsubscribe(channel)
+        await pubsub.close()
+
+
+@app.post("/bundle-endpoints/{endpoint_id}/stream")
+async def stream_bundle_endpoint(endpoint_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    api_key = _read_endpoint_api_key(request)
+    if not api_key:
+        return JSONResponse(status_code=401, content={"error": "endpoint api key is required"})
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "request body must be a JSON object"})
+    if not isinstance(payload, dict) or not payload:
+        return JSONResponse(status_code=400, content={"error": "request body must be a non-empty JSON object"})
+    endpoint = await services.authenticate_bundle_endpoint(endpoint_id, api_key)
+    if endpoint is None:
+        return JSONResponse(status_code=401, content={"error": "invalid endpoint id or api key"})
+    if services.redis is None:
+        return JSONResponse(status_code=503, content={"error": "queue not initialized"})
+    redis_client = services.redis
+
+    async def event_stream():
+        invocation_id = str(__import__("uuid").uuid4())
+        channel = services._endpoint_invocation_channel(invocation_id)
+        pubsub = redis_client.pubsub()
+        await pubsub.subscribe(channel)
+        try:
+            await services.enqueue_endpoint_invocation(endpoint_id, payload, stream=True, invocation_id=invocation_id)
+            while True:
+                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                if message is None:
+                    await asyncio.sleep(0.05)
+                    continue
+                raw_data = message.get("data") if isinstance(message, dict) else None
+                if isinstance(raw_data, bytes):
+                    raw_data = raw_data.decode("utf-8", errors="ignore")
+                event_payload = json.loads(raw_data) if isinstance(raw_data, str) else None
+                if not isinstance(event_payload, dict):
+                    continue
+                event_name = str(event_payload.get("event") or "")
+                raw_event_body = event_payload.get("payload")
+                event_body: dict[str, Any]
+                if isinstance(raw_event_body, dict):
+                    event_body = raw_event_body
+                else:
+                    event_body = {}
+                yield _format_sse_event(event_name, event_body)
+                if event_name in {"final", "error"}:
+                    break
+        except Exception as exc:
+            yield _format_sse_event("error", {"error": str(exc)})
+        finally:
+            await pubsub.unsubscribe(channel)
+            await pubsub.close()
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @app.post("/modules/{module_id}/validate")

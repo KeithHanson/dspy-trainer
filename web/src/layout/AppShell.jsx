@@ -4,9 +4,10 @@ import { Icon } from "../components/Icon";
 
 const PRIMARY_NAV = [
   { to: "/dashboard", label: "Overview", icon: "grid" },
-  { to: "/lm-profiles", label: "LM Profiles", icon: "settings" },
-  { to: "/bundles", label: "Module Bundles", icon: "box" },
-  { to: "/datasets", label: "Datasets", icon: "layers" },
+  { to: "/lm-profiles", label: "LM Profiles", icon: "settings", exact: false },
+  { to: "/bundles", label: "Module Bundles", icon: "box", exact: false },
+  { to: "/endpoints", label: "Endpoints", icon: "activity", exact: false },
+  { to: "/datasets", label: "Datasets", icon: "layers", exact: false },
   { to: "/plans", label: "Evaluation Plans", icon: "shield" },
   { to: "/runs", label: "Eval Runs", icon: "activity" },
   { to: "/optimization", label: "Optimization", icon: "search" },
@@ -18,7 +19,7 @@ const SECONDARY_NAV = [];
 function NavSection({ items, hasActiveRun, hasActiveOptimization }) {
   return items.map((item) => (
     <NavLink
-      end
+      end={item.exact !== false}
       key={item.to}
       className={({ isActive }) => (isActive ? "shell-nav-item shell-nav-item-active" : "shell-nav-item")}
       to={item.to}

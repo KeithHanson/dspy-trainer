@@ -15,6 +15,11 @@ class Settings(BaseSettings):
     queue_name: str = Field(default="dspy-trainer:jobs")
     worker_registry_prefix: str = Field(default="dspy-trainer:workers")
     total_workers: int = Field(default=8)
+    endpoint_worker_registry_prefix: str = Field(default="dspy-trainer:endpoint-workers")
+    total_endpoint_workers: int = Field(default=2)
+    endpoint_queue_prefix: str = Field(default="dspy-trainer:endpoint-queues")
+    endpoint_worker_assignment_prefix: str = Field(default="dspy-trainer:endpoint-worker-assignments")
+    endpoint_invocation_channel_prefix: str = Field(default="dspy-trainer:endpoint-invocations")
 
     postgres_dsn: str = Field(default="")
     checkout_root: str = Field(default="/tmp/dspy-trainer/checkouts")

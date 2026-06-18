@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -12,9 +13,64 @@ from app.services import ModuleSyncError, ReadinessStatus
 
 
 STORE: dict[str, dict] = {}
+ENDPOINTS: dict[str, dict] = {}
+
+
+class FakePubSub:
+    def __init__(self, redis):
+        self.redis = redis
+        self.channel = None
+
+    async def subscribe(self, channel):
+        self.channel = channel
+
+    async def get_message(self, ignore_subscribe_messages=True, timeout=1.0):
+        del ignore_subscribe_messages, timeout
+        if not self.channel:
+            return None
+        queued = self.redis.channels.get(self.channel, [])
+        if not queued:
+            return None
+        return {"data": json.dumps(queued.pop(0))}
+
+    async def unsubscribe(self, channel):
+        del channel
+
+    async def close(self):
+        return None
+
+
+class FakeRedis:
+    def __init__(self):
+        self.channels: dict[str, list[dict]] = {}
+
+    def pubsub(self):
+        return FakePubSub(self)
+
+    async def set(self, key, value, ex=None):
+        del key, value, ex
+
+    async def get(self, key):
+        del key
+        return None
+
+    async def delete(self, key):
+        del key
+
+    async def keys(self, pattern):
+        del pattern
+        return []
+
+    async def execute_command(self, *args):
+        del args
+        return None
+
+    async def publish(self, channel, payload):
+        self.channels.setdefault(channel, []).append(json.loads(payload))
 
 
 async def fake_connect(self):
+    self.redis = FakeRedis()
     return None
 
 
@@ -126,6 +182,151 @@ async def fake_list_modules(self):
     return list(STORE.values())
 
 
+async def fake_list_bundle_endpoints(self, module_id):
+    if module_id not in STORE:
+        return None
+    return [endpoint for endpoint in ENDPOINTS.values() if endpoint["module_import_id"] == module_id]
+
+
+async def fake_list_all_bundle_endpoints(self):
+    return list(ENDPOINTS.values())
+
+
+async def fake_get_bundle_endpoint(self, endpoint_id):
+    return ENDPOINTS.get(endpoint_id)
+
+
+async def fake_get_lm_profile(self, lm_profile_id):
+    if lm_profile_id == "lm-1":
+        return {
+            "id": "lm-1",
+            "name": "Primary LM",
+            "model": "openai/gpt-4o-mini",
+            "api_base": "http://litellm:4000",
+            "model_type": "responses",
+            "default_params": {},
+            "virtual_key": "vk-lm-1",
+        }
+    if lm_profile_id == "lm-2":
+        return {
+            "id": "lm-2",
+            "name": "Backup LM",
+            "model": "openai/gpt-4.1-mini",
+            "api_base": "http://litellm:4000",
+            "model_type": "responses",
+            "default_params": {},
+            "virtual_key": "vk-lm-2",
+        }
+    return None
+
+
+async def fake_create_bundle_endpoint(self, module_id, name, lm_profile_id=None, pinned_worker_count=1):
+    if module_id not in STORE:
+        return None
+    endpoint_id = f"endpoint-{len(ENDPOINTS) + 1}"
+    endpoint = {
+        "id": endpoint_id,
+        "module_import_id": module_id,
+        "lm_profile_id": lm_profile_id,
+        "pinned_worker_count": pinned_worker_count,
+        "name": name,
+        "key_preview": "abc123",
+        "api_key": f"bep-{endpoint_id}",
+        "created_at": None,
+        "updated_at": None,
+    }
+    ENDPOINTS[endpoint_id] = endpoint
+    return endpoint
+
+
+async def fake_create_bundle_endpoint_global(self, name, module_import_id, lm_profile_id=None, pinned_worker_count=1):
+    return await fake_create_bundle_endpoint(self, module_import_id, name, lm_profile_id, pinned_worker_count)
+
+
+async def fake_update_bundle_endpoint(self, module_id, endpoint_id, name, lm_profile_id=None, pinned_worker_count=None):
+    endpoint = ENDPOINTS.get(endpoint_id)
+    if endpoint is None or endpoint["module_import_id"] != module_id:
+        return None
+    endpoint["name"] = name
+    endpoint["lm_profile_id"] = lm_profile_id
+    if pinned_worker_count is not None:
+        endpoint["pinned_worker_count"] = pinned_worker_count
+    return endpoint
+
+
+async def fake_update_bundle_endpoint_global(self, endpoint_id, *, name=None, module_import_id=None, lm_profile_id=None, pinned_worker_count=None):
+    endpoint = ENDPOINTS.get(endpoint_id)
+    if endpoint is None:
+        return None
+    if module_import_id is not None:
+        if module_import_id not in STORE:
+            raise ValueError("module not found")
+        endpoint["module_import_id"] = module_import_id
+    if name is not None:
+        endpoint["name"] = name
+    if lm_profile_id is not None:
+        endpoint["lm_profile_id"] = lm_profile_id
+    if pinned_worker_count is not None:
+        endpoint["pinned_worker_count"] = pinned_worker_count
+    return endpoint
+
+
+async def fake_delete_bundle_endpoint(self, module_id, endpoint_id):
+    endpoint = ENDPOINTS.get(endpoint_id)
+    if endpoint is None or endpoint["module_import_id"] != module_id:
+        return False
+    del ENDPOINTS[endpoint_id]
+    return True
+
+
+async def fake_delete_bundle_endpoint_global(self, endpoint_id):
+    endpoint = ENDPOINTS.get(endpoint_id)
+    if endpoint is None:
+        return False
+    del ENDPOINTS[endpoint_id]
+    return True
+
+
+async def fake_regenerate_bundle_endpoint_key(self, module_id, endpoint_id):
+    endpoint = ENDPOINTS.get(endpoint_id)
+    if endpoint is None or endpoint["module_import_id"] != module_id:
+        return None
+    endpoint["api_key"] = f"rotated-{endpoint_id}"
+    endpoint["key_preview"] = "rot999"
+    return endpoint
+
+
+async def fake_regenerate_bundle_endpoint_key_global(self, endpoint_id):
+    endpoint = ENDPOINTS.get(endpoint_id)
+    if endpoint is None:
+        return None
+    endpoint["api_key"] = f"rotated-{endpoint_id}"
+    endpoint["key_preview"] = "rot999"
+    return endpoint
+
+
+async def fake_authenticate_bundle_endpoint(self, endpoint_id, api_key):
+    endpoint = ENDPOINTS.get(endpoint_id)
+    if endpoint is None or endpoint.get("api_key") != api_key:
+        return None
+    return endpoint
+
+
+async def fake_enqueue_endpoint_invocation(self, endpoint_id, input_payload, *, stream, invocation_id=None):
+    channel = self._endpoint_invocation_channel(invocation_id)
+    endpoint = ENDPOINTS.get(endpoint_id)
+    if endpoint is None:
+        raise RuntimeError("endpoint not found")
+    if stream:
+        self.redis.channels.setdefault(channel, []).append({"event": "delta", "payload": {"chunk": 1, "input": input_payload}})
+    self.redis.channels.setdefault(channel, []).append({"event": "final", "payload": {"echo": input_payload, "bundle": endpoint["name"], "done": stream}})
+    return invocation_id
+
+
+async def fake_reconcile_endpoint_worker_assignments(self):
+    return None
+
+
 async def fake_list_module_revisions(self, module_id):
     if module_id not in STORE:
         return []
@@ -231,6 +432,21 @@ def _patch_services(monkeypatch):
     monkeypatch.setattr(main_mod.AppServices, "set_module_source_ref", fake_set_module_source_ref)
     monkeypatch.setattr(main_mod.AppServices, "set_module_environment_config", fake_set_module_environment_config)
     monkeypatch.setattr(main_mod.AppServices, "get_module_runtime_environment", fake_get_module_runtime_environment)
+    monkeypatch.setattr(main_mod.AppServices, "list_bundle_endpoints", fake_list_bundle_endpoints)
+    monkeypatch.setattr(main_mod.AppServices, "list_all_bundle_endpoints", fake_list_all_bundle_endpoints)
+    monkeypatch.setattr(main_mod.AppServices, "get_bundle_endpoint", fake_get_bundle_endpoint)
+    monkeypatch.setattr(main_mod.AppServices, "get_lm_profile", fake_get_lm_profile)
+    monkeypatch.setattr(main_mod.AppServices, "create_bundle_endpoint", fake_create_bundle_endpoint)
+    monkeypatch.setattr(main_mod.AppServices, "create_bundle_endpoint_global", fake_create_bundle_endpoint_global)
+    monkeypatch.setattr(main_mod.AppServices, "update_bundle_endpoint", fake_update_bundle_endpoint)
+    monkeypatch.setattr(main_mod.AppServices, "update_bundle_endpoint_global", fake_update_bundle_endpoint_global)
+    monkeypatch.setattr(main_mod.AppServices, "delete_bundle_endpoint", fake_delete_bundle_endpoint)
+    monkeypatch.setattr(main_mod.AppServices, "delete_bundle_endpoint_global", fake_delete_bundle_endpoint_global)
+    monkeypatch.setattr(main_mod.AppServices, "regenerate_bundle_endpoint_key", fake_regenerate_bundle_endpoint_key)
+    monkeypatch.setattr(main_mod.AppServices, "regenerate_bundle_endpoint_key_global", fake_regenerate_bundle_endpoint_key_global)
+    monkeypatch.setattr(main_mod.AppServices, "authenticate_bundle_endpoint", fake_authenticate_bundle_endpoint)
+    monkeypatch.setattr(main_mod.AppServices, "enqueue_endpoint_invocation", fake_enqueue_endpoint_invocation)
+    monkeypatch.setattr(main_mod.AppServices, "reconcile_endpoint_worker_assignments", fake_reconcile_endpoint_worker_assignments)
 
 
 def test_module_import_and_status_flow(monkeypatch):
@@ -566,3 +782,103 @@ def test_sample_bundle_download(monkeypatch):
         assert response.headers["content-type"] == "application/zip"
         assert "attachment; filename=\"example-bundle.zip\"" in response.headers["content-disposition"]
         assert len(response.content) > 0
+
+
+def test_bundle_endpoint_crud_and_key_rotation(monkeypatch):
+    STORE.clear()
+    ENDPOINTS.clear()
+    _patch_services(monkeypatch)
+    STORE["mod-endpoint"] = {
+        "id": "mod-endpoint",
+        "status": "validated",
+        "validation_status": "passed",
+        "smoke_status": "passed",
+        "diagnostics": [],
+        "bundle_name": "agentic-chat",
+        "bundle_version": "0.1.0",
+        "source": "upload",
+        "source_ref": "/tmp/bundle",
+        "checkout_path": "/tmp/bundle",
+        "environment_entries": [],
+    }
+
+    with TestClient(main_mod.app) as client:
+        created = client.post("/bundle-endpoints", json={"name": "Public API", "module_import_id": "mod-endpoint", "lm_profile_id": "lm-1", "pinned_worker_count": 2})
+        assert created.status_code == 200
+        assert created.json()["api_key"] == "bep-endpoint-1"
+        assert created.json()["lm_profile_id"] == "lm-1"
+        assert created.json()["pinned_worker_count"] == 2
+
+        listed = client.get("/bundle-endpoints")
+        assert listed.status_code == 200
+        assert listed.json()[0]["name"] == "Public API"
+        assert listed.json()[0]["module_import_id"] == "mod-endpoint"
+
+        fetched = client.get("/bundle-endpoints/endpoint-1")
+        assert fetched.status_code == 200
+        assert fetched.json()["id"] == "endpoint-1"
+
+        updated = client.patch("/bundle-endpoints/endpoint-1", json={"name": "Customer stream", "module_import_id": "mod-endpoint", "lm_profile_id": "lm-1", "pinned_worker_count": 3})
+        assert updated.status_code == 200
+        assert updated.json()["name"] == "Customer stream"
+        assert updated.json()["pinned_worker_count"] == 3
+
+        rotated = client.post("/bundle-endpoints/endpoint-1/regenerate-key")
+        assert rotated.status_code == 200
+        assert rotated.json()["api_key"] == "rotated-endpoint-1"
+
+        deleted = client.delete("/bundle-endpoints/endpoint-1")
+        assert deleted.status_code == 200
+        assert deleted.json()["deleted"] is True
+
+
+def test_bundle_endpoint_sync_and_stream_invocation(monkeypatch):
+    STORE.clear()
+    ENDPOINTS.clear()
+    _patch_services(monkeypatch)
+    STORE["mod-endpoint"] = {
+        "id": "mod-endpoint",
+        "status": "validated",
+        "validation_status": "passed",
+        "smoke_status": "passed",
+        "diagnostics": [],
+        "bundle_name": "agentic-chat",
+        "bundle_version": "0.1.0",
+        "source": "upload",
+        "source_ref": "/tmp/bundle",
+        "checkout_path": "/tmp/bundle",
+        "environment_entries": [],
+    }
+    ENDPOINTS["endpoint-1"] = {
+        "id": "endpoint-1",
+        "module_import_id": "mod-endpoint",
+        "pinned_worker_count": 1,
+        "name": "Customer stream",
+        "key_preview": "abc123",
+        "api_key": "secret-key",
+        "created_at": None,
+        "updated_at": None,
+    }
+
+    with TestClient(main_mod.app) as client:
+        sync_response = client.post(
+            "/bundle-endpoints/endpoint-1/invoke",
+            json={"question": "hello"},
+            headers={"Authorization": "Bearer secret-key"},
+        )
+        assert sync_response.status_code == 200
+        assert sync_response.json()["echo"]["question"] == "hello"
+
+        with client.stream(
+            "POST",
+            "/bundle-endpoints/endpoint-1/stream",
+            json={"question": "hello"},
+            headers={"Authorization": "Bearer secret-key"},
+        ) as stream_response:
+            assert stream_response.status_code == 200
+            body = "\n".join(stream_response.iter_text())
+
+        assert "event: delta" in body
+        assert '"chunk": 1' in body
+        assert "event: final" in body
+        assert '"done": true' in body

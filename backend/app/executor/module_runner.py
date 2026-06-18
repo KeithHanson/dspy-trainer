@@ -316,6 +316,125 @@ def _load_program_state(program: Any, program_state_path: Path) -> None:
     program.load_state(state)
 
 
+def _prediction_to_payload(prediction: Any) -> dict[str, Any]:
+    if hasattr(prediction, "toDict"):
+        try:
+            payload = prediction.toDict()
+            if isinstance(payload, dict):
+                return payload
+        except Exception:
+            pass
+    if isinstance(prediction, dict):
+        return json.loads(json.dumps(prediction, default=str))
+    return {"value": str(prediction)}
+
+
+def _build_runtime_program(
+    bundle_path: str,
+    lm_profile: dict[str, Any] | None = None,
+) -> tuple[Any, Any]:
+    root, _, optimized_program_state, _, module_mod, _ = _load_bundle(bundle_path)
+    program = module_mod.build_program()
+    if optimized_program_state is not None:
+        _load_program_state(program, root / optimized_program_state)
+    if hasattr(module_mod, "build_lm"):
+        lm = module_mod.build_lm()
+    elif lm_profile is not None:
+        lm = _build_lm_from_profile(lm_profile)
+    else:
+        lm = None
+    if lm is not None:
+        _disable_lm_cache(lm)
+    return program, lm
+
+
+def _invoke_program(program: Any, input_payload: dict[str, Any], lm: Any) -> Any:
+    original_program_lm = None
+    had_program_lm_binding = False
+    if lm is not None and hasattr(program, "set_lm"):
+        try:
+            original_program_lm = getattr(program, "lm", None)
+            program.set_lm(lm)
+            had_program_lm_binding = True
+        except Exception:
+            pass
+    try:
+        if lm is not None:
+            with dspy.context(lm=lm):
+                return program(**input_payload)
+        return program(**input_payload)
+    finally:
+        if had_program_lm_binding:
+            try:
+                program.set_lm(original_program_lm)
+            except Exception:
+                pass
+
+
+def invoke_bundle(
+    bundle_path: str,
+    input_payload: dict[str, Any],
+    lm_profile: dict[str, Any] | None = None,
+    runtime_env: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    if not isinstance(input_payload, dict) or not input_payload:
+        raise RuntimeError("bundle invocation input must be a non-empty object")
+    with _temporary_environment(runtime_env):
+        program, lm = _build_runtime_program(bundle_path, lm_profile=lm_profile)
+        prediction = _invoke_program(program, input_payload, lm)
+    return _prediction_to_payload(prediction)
+
+
+def stream_bundle(
+    bundle_path: str,
+    input_payload: dict[str, Any],
+    emit_event: Callable[[dict[str, Any]], None],
+    lm_profile: dict[str, Any] | None = None,
+    runtime_env: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    if not isinstance(input_payload, dict) or not input_payload:
+        raise RuntimeError("bundle invocation input must be a non-empty object")
+    with _temporary_environment(runtime_env):
+        program, lm = _build_runtime_program(bundle_path, lm_profile=lm_profile)
+        stream_method = getattr(program, "emit", None)
+        if not callable(stream_method):
+            raise RuntimeError("bundle program must define emit(...) for SSE streaming")
+
+        signature = inspect.signature(stream_method)
+        accepts_var_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values())
+        if "emit" not in signature.parameters and not accepts_var_kwargs:
+            raise RuntimeError("bundle program emit(...) must accept an emit callback parameter")
+
+        def emit(payload: Any) -> None:
+            if isinstance(payload, dict):
+                emit_event(json.loads(json.dumps(payload, default=str)))
+                return
+            emit_event({"value": str(payload)})
+
+        original_program_lm = None
+        had_program_lm_binding = False
+        if lm is not None and hasattr(program, "set_lm"):
+            try:
+                original_program_lm = getattr(program, "lm", None)
+                program.set_lm(lm)
+                had_program_lm_binding = True
+            except Exception:
+                pass
+        try:
+            if lm is not None:
+                with dspy.context(lm=lm):
+                    result = stream_method(**input_payload, emit=emit)
+            else:
+                result = stream_method(**input_payload, emit=emit)
+        finally:
+            if had_program_lm_binding:
+                try:
+                    program.set_lm(original_program_lm)
+                except Exception:
+                    pass
+    return _prediction_to_payload(result)
+
+
 def _build_eval_example(item: dict[str, Any]) -> dspy.Example:
     input_payload = item.get("input", {})
     label_payload = item.get("label", {})
@@ -887,18 +1006,7 @@ def run_bundle_eval(
     runtime_env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     with _temporary_environment(runtime_env):
-        root, pass_threshold, optimized_program_state, _, module_mod, metric_mod = _load_bundle(bundle_path)
-
-        program = module_mod.build_program()
-        if optimized_program_state is not None:
-            _load_program_state(program, root / optimized_program_state)
-        if hasattr(module_mod, "build_lm"):
-            lm = module_mod.build_lm()
-        elif lm_profile is not None:
-            lm = _build_lm_from_profile(lm_profile)
-        else:
-            lm = None
-        if lm is not None:
-            _disable_lm_cache(lm)
+        _, pass_threshold, _, _, _, metric_mod = _load_bundle(bundle_path)
+        program, lm = _build_runtime_program(bundle_path, lm_profile=lm_profile)
         raw_metric_fn = metric_mod.judge_metric
         return _evaluate_program(program, raw_metric_fn, eval_inputs, pass_threshold, lm)

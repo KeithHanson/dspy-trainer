@@ -131,6 +131,15 @@ An **LM profile** configures model routing through LiteLLM:
 - API keys and virtual key aliases
 - Swap providers without changing bundle code
 
+### 🔌 Managed Endpoint
+
+A **managed endpoint** exposes a validated bundle to external callers with a rotatable API key:
+
+- Create, rename, delete, and rotate keys from the bundle detail page
+- `POST /bundle-endpoints/{id}/invoke` returns one JSON output payload
+- `POST /bundle-endpoints/{id}/stream` returns an SSE stream of incremental `delta` events followed by a `final` event
+- Streaming bundles must implement `emit(..., emit=<callback>)` on the built program and return a final prediction payload
+
 ---
 
 ## What is DSPy?
@@ -416,7 +425,7 @@ docker compose logs --tail=200 worker
 1. Add `GITHUB_PAT` to `.env`
 2. Restart services:
    ```bash
-   docker compose up -d --force-recreate backend worker
+   docker compose up -d --force-recreate backend worker endpoint-worker
    ```
 
 ### Optimization Writeback Fails
@@ -445,6 +454,7 @@ Key variables in `.env`:
 | `GIT_COMMIT_NAME` | Git author name for optimization commits | Recommended |
 | `GIT_COMMIT_EMAIL` | Git author email for optimization commits | Recommended |
 | `DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY` | Encrypts module environment entries stored in Postgres | Required for module env UI |
+| `DSPY_TRAINER_TOTAL_ENDPOINT_WORKERS` | Number of dedicated endpoint worker containers in Compose | Optional |
 | `DSPY_TRAINER_POSTGRES_DSN` | Postgres connection | ✅ (auto in Compose) |
 | `DSPY_TRAINER_REDIS_URL` | Redis connection | ✅ (auto in Compose) |
 | `LITELLM_MASTER_KEY` | LiteLLM proxy auth | ✅ (auto in Compose) |
@@ -469,6 +479,15 @@ LiteLLM runs as an internal proxy. Model routing is configured via **LM Profiles
 
 LM Profiles provision virtual keys in LiteLLM dynamically.
 
+### Managed Endpoint Workers
+
+Managed bundle endpoints do not execute inside the backend container. The backend authenticates, enqueues, and relays responses, while dedicated `endpoint-worker` containers perform bundle installation/bootstrap and invocation.
+
+- Set `DSPY_TRAINER_TOTAL_ENDPOINT_WORKERS` in `.env` to control the size of the endpoint-worker pool.
+- Each endpoint stores a `pinned_worker_count`.
+- Endpoint workers are assigned deterministically to endpoints based on those pinned counts.
+- Only workers assigned to a given endpoint consume that endpoint's invocation queue.
+
 ---
 
 ## API Documentation
@@ -480,6 +499,13 @@ The backend exposes a comprehensive REST API. Key endpoints:
 - `POST /modules/{id}/validate` - Validate bundle contract
 - `GET /modules/{id}/sync-status` - Check Git sync state
 - `POST /modules/{id}/sync` - Pull latest from GitHub
+- `GET /modules/{id}/endpoints` - List managed bundle endpoints
+- `POST /modules/{id}/endpoints` - Create a managed bundle endpoint
+- `PATCH /modules/{id}/endpoints/{endpointId}` - Rename an endpoint
+- `POST /modules/{id}/endpoints/{endpointId}/regenerate-key` - Rotate the endpoint key
+- `DELETE /modules/{id}/endpoints/{endpointId}` - Delete an endpoint
+- `POST /bundle-endpoints/{endpointId}/invoke` - Invoke a bundle synchronously with JSON output
+- `POST /bundle-endpoints/{endpointId}/stream` - Invoke a bundle over SSE with `delta` and `final` events
 
 **Datasets:**
 - `POST /evaluation-datasets` - Create dataset

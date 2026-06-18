@@ -3,6 +3,7 @@ import { AppShell } from "./layout/AppShell";
 import { DashboardPage } from "./dashboard/DashboardPage";
 import { BundlesPage } from "./bundles/BundlesPage";
 import { DatasetEditorPage, DatasetsPage } from "./datasets/DatasetsPage";
+import { EndpointEditorPage, EndpointsPage } from "./endpoints/EndpointsPage";
 import { PlansPage } from "./plans/PlansPage";
 import { RunsPage } from "./runs/RunsPage";
 import { LmProfileEditorPage, LmProfilesPage } from "./lmProfiles/LmProfilesPage";
@@ -20,6 +21,9 @@ export function App() {
         <Route path="/datasets" element={<DatasetsPage />} />
         <Route path="/datasets/new" element={<DatasetEditorPage />} />
         <Route path="/datasets/:datasetId/edit" element={<DatasetEditorPage />} />
+        <Route path="/endpoints" element={<EndpointsPage />} />
+        <Route path="/endpoints/new" element={<EndpointEditorPage />} />
+        <Route path="/endpoints/:endpointId/edit" element={<EndpointEditorPage />} />
         <Route path="/plans" element={<PlansPage />} />
         <Route path="/optimization/jobs" element={<OptimizationJobsPage />} />
         <Route path="/optimization" element={<OptimizationLaunchPage />} />

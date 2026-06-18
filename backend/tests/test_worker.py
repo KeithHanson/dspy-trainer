@@ -9,6 +9,7 @@ from typing import Any, cast
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from worker import process_job
+from endpoint_worker import process_endpoint_job
 
 
 class FakeRedis:
@@ -27,6 +28,7 @@ class FakeServices:
         self.agent_run_task_ids = []
         self.process_log_updates = []
         self.fail_agent_run = False
+        self.endpoint_invocations = []
 
     async def append_optimization_process_log(self, optimization_job_id, additions):
         self.process_log_updates.append((optimization_job_id, additions))
@@ -40,6 +42,9 @@ class FakeServices:
         if self.fail_agent_run:
             raise RuntimeError("boom")
         return {"id": task_id, "status": "succeeded"}
+
+    async def run_endpoint_invocation_job(self, invocation_id, endpoint_id, input_payload, worker_id, *, stream):
+        self.endpoint_invocations.append((invocation_id, endpoint_id, input_payload, worker_id, stream))
 
 
 def test_process_job_runs_optimization_job_payload():
@@ -91,5 +96,26 @@ def test_process_job_restores_listening_when_agent_run_task_fails():
     except RuntimeError:
         pass
 
+    assert json.loads(services.redis.calls[0][1])["status"] == "running"
+    assert json.loads(services.redis.calls[-1][1])["status"] == "listening"
+
+
+def test_process_endpoint_job_runs_endpoint_invocation_and_restores_listening():
+    services = FakeServices()
+    services.settings = SimpleNamespace(
+        worker_registry_prefix="dspy-trainer:workers",
+        endpoint_worker_registry_prefix="dspy-trainer:endpoint-workers",
+    )
+
+    asyncio.run(
+        process_endpoint_job(
+            cast(Any, services),
+            json.dumps({"type": "endpoint_invocation", "invocation_id": "inv-1", "input_payload": {"question": "hello"}, "stream": True}),
+            worker_id="endpoint-worker-1",
+            endpoint_id="endpoint-1",
+        )
+    )
+
+    assert services.endpoint_invocations == [("inv-1", "endpoint-1", {"question": "hello"}, "endpoint-worker-1", True)]
     assert json.loads(services.redis.calls[0][1])["status"] == "running"
     assert json.loads(services.redis.calls[-1][1])["status"] == "listening"

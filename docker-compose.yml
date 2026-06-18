@@ -88,6 +88,7 @@ services:
       DSPY_TRAINER_MLFLOW_TRACKING_URI: http://mlflow:5000
       DSPY_TRAINER_LITELLM_BASE_URL: http://litellm-proxy:4000
       DSPY_TRAINER_LITELLM_API_KEY: ${LITELLM_MASTER_KEY:-sk-local-dev-master-key}
+      DSPY_TRAINER_TOTAL_ENDPOINT_WORKERS: ${DSPY_TRAINER_TOTAL_ENDPOINT_WORKERS:-2}
       DSPY_TRAINER_GITHUB_PAT: ${GITHUB_PAT:-}
       DSPY_TRAINER_GIT_COMMIT_NAME: ${GIT_COMMIT_NAME:-DSPy Trainer}
       DSPY_TRAINER_GIT_COMMIT_EMAIL: ${GIT_COMMIT_EMAIL:-dspy-trainer@local}
@@ -130,6 +131,47 @@ services:
       DSPY_TRAINER_MLFLOW_TRACKING_URI: http://mlflow:5000
       DSPY_TRAINER_LITELLM_BASE_URL: http://litellm-proxy:4000
       DSPY_TRAINER_LITELLM_API_KEY: ${LITELLM_MASTER_KEY:-sk-local-dev-master-key}
+      DSPY_TRAINER_GITHUB_PAT: ${GITHUB_PAT:-}
+      DSPY_TRAINER_GIT_COMMIT_NAME: ${GIT_COMMIT_NAME:-DSPy Trainer}
+      DSPY_TRAINER_GIT_COMMIT_EMAIL: ${GIT_COMMIT_EMAIL:-dspy-trainer@local}
+      DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY: ${DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+      litellm-proxy:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    volumes:
+      - bundles_data:/tmp/dspy-trainer/bundles
+      - checkouts_data:/tmp/dspy-trainer/checkouts
+      - optimization_artifacts_data:/tmp/dspy-trainer/optimization_artifacts
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os, redis; redis.Redis.from_url(os.environ['DSPY_TRAINER_REDIS_URL']).ping()\""]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  endpoint-worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["python", "backend/endpoint_worker.py"]
+    deploy:
+      replicas: ${DSPY_TRAINER_TOTAL_ENDPOINT_WORKERS:-2}
+    environment:
+      DSPY_TRAINER_POSTGRES_DSN: postgresql://postgres:postgres@postgres:5432/dspy_trainer
+      DSPY_TRAINER_REDIS_URL: redis://redis:6379/0
+      DSPY_TRAINER_QUEUE_NAME: dspy-trainer:jobs
+      DSPY_TRAINER_MLFLOW_TRACKING_URI: http://mlflow:5000
+      DSPY_TRAINER_LITELLM_BASE_URL: http://litellm-proxy:4000
+      DSPY_TRAINER_LITELLM_API_KEY: ${LITELLM_MASTER_KEY:-sk-local-dev-master-key}
+      DSPY_TRAINER_TOTAL_ENDPOINT_WORKERS: ${DSPY_TRAINER_TOTAL_ENDPOINT_WORKERS:-2}
       DSPY_TRAINER_GITHUB_PAT: ${GITHUB_PAT:-}
       DSPY_TRAINER_GIT_COMMIT_NAME: ${GIT_COMMIT_NAME:-DSPy Trainer}
       DSPY_TRAINER_GIT_COMMIT_EMAIL: ${GIT_COMMIT_EMAIL:-dspy-trainer@local}

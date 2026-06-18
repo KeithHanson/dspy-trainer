@@ -9,7 +9,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.executor import module_runner
-from app.executor.module_runner import _capture_process_output, run_bundle_eval, run_bundle_optimization
+from app.executor.module_runner import _capture_process_output, invoke_bundle, run_bundle_eval, run_bundle_optimization, stream_bundle
 
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "module_bundles"
@@ -147,6 +147,58 @@ def test_run_bundle_eval_injects_runtime_environment(tmp_path):
     assert result["items"][0]["score"] == 1.0
     assert result["items"][0]["prediction"]["answer"] == "expected-value"
     assert os.getenv("SPECIAL_TOKEN") is None
+
+
+def test_invoke_bundle_returns_prediction_payload(tmp_path):
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "module.py").write_text(
+        "import dspy\n"
+        "class Program(dspy.Module):\n"
+        "  def forward(self, question: str):\n"
+        "    return dspy.Prediction(answer=question.upper())\n"
+        "def build_program():\n"
+        "  return Program()\n",
+        encoding="utf-8",
+    )
+    (bundle / "metric.py").write_text(
+        "def judge_metric(example, prediction):\n"
+        "  return {'score': 1.0, 'rationale': 'ok', 'flags': [], 'raw_response': {}}\n",
+        encoding="utf-8",
+    )
+
+    result = invoke_bundle(str(bundle), {"question": "hello"})
+
+    assert result == {"answer": "HELLO"}
+
+
+def test_stream_bundle_emits_chunks_and_final_payload(tmp_path):
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "module.py").write_text(
+        "import dspy\n"
+        "class Program(dspy.Module):\n"
+        "  def emit(self, question: str, emit):\n"
+        "    emit({'chunk': 1, 'text': question[:2]})\n"
+        "    emit({'chunk': 2, 'text': question[2:]})\n"
+        "    return dspy.Prediction(answer=question.upper())\n"
+        "  def forward(self, question: str):\n"
+        "    return dspy.Prediction(answer=question.upper())\n"
+        "def build_program():\n"
+        "  return Program()\n",
+        encoding="utf-8",
+    )
+    (bundle / "metric.py").write_text(
+        "def judge_metric(example, prediction):\n"
+        "  return {'score': 1.0, 'rationale': 'ok', 'flags': [], 'raw_response': {}}\n",
+        encoding="utf-8",
+    )
+    events: list[dict[str, object]] = []
+
+    result = stream_bundle(str(bundle), {"question": "hello"}, events.append)
+
+    assert events == [{"chunk": 1, "text": "he"}, {"chunk": 2, "text": "llo"}]
+    assert result == {"answer": "HELLO"}
 
 
 def test_capture_process_output_captures_named_dspy_logger():

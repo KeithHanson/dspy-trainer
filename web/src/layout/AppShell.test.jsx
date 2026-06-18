@@ -90,6 +90,21 @@ describe("AppShell", () => {
     vi.unstubAllGlobals();
   });
 
+  it("highlights endpoints nav item on nested editor routes", () => {
+    stubActivityFetch([]);
+    render(
+      <MemoryRouter initialEntries={["/endpoints/new"]}>
+        <AppShell>
+          <div>content</div>
+        </AppShell>
+      </MemoryRouter>,
+    );
+
+    const endpointsLink = screen.getByRole("link", { name: "Endpoints" });
+    expect(endpointsLink).toHaveClass("shell-nav-item-active");
+    vi.unstubAllGlobals();
+  });
+
   it("renders external utility links", () => {
     stubActivityFetch([]);
     render(

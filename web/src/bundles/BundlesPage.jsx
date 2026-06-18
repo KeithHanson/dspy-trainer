@@ -864,6 +864,7 @@ function BundleDetailPage({ moduleId, modulesUrl, onBack }) {
             {environmentError ? <p className="cap" style={{ marginTop: 8 }}>{environmentError}</p> : null}
           </section>
         ) : null}
+
       </div>
     </section>
   );
