@@ -135,7 +135,7 @@ button { font-family: inherit; }
 .dashboard-table tbody tr:hover { background: var(--surface); }
 .dashboard-two-up { display: grid; grid-template-columns: 1.4fr 1fr; gap: 14px; }
 .dashboard-alert { padding: 10px; border: 1px solid var(--border-soft); border-radius: var(--r); background: var(--surface); }
-.dashboard-quick { display: flex; flex-direction: column; gap: 2px; align-items: flex-start; text-align: left; border: 1px solid var(--border-soft); background: var(--surface); border-radius: var(--r); color: var(--text); padding: 10px; }
+.dashboard-quick { display: flex; flex-direction: column; gap: 2px; align-items: flex-start; text-align: left; border: 1px solid var(--border-soft); background: var(--surface); border-radius: var(--r); color: var(--text); padding: 10px; cursor: pointer; }
 .dashboard-zero { padding: 14px; color: var(--text-muted); }
 
 .bundles-wrap { max-width: 980px; }

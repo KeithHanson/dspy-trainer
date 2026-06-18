@@ -29,9 +29,10 @@ export const mockDashboardProvider = {
       ],
       quickStart: [
         { id: "lm-profile", title: "Setup an LM Profile", detail: "Connect your bundles to an LLM", to: "/lm-profiles/new" },
-        { id: "import", title: "Import your module", detail: "Connect a GitHub repo and branch", to: "/bundles?import=1" },
-        { id: "plan", title: "Create a new plan", detail: "Define question set and runs", to: "/plans?new=1" },
-        { id: "team", title: "Invite your team", detail: "Share results with reviewers", to: "/team" },
+        { id: "import", title: "Import your Bundle", detail: "Connect a GitHub repo and branch", to: "/bundles?import=1" },
+        { id: "dataset", title: "Create a Dataset for your Bundle", detail: "Author reusable evaluation records", to: "/datasets/new" },
+        { id: "plan", title: "Create a new Eval Plan", detail: "Define the dataset, model, and runs", to: "/plans?new=1" },
+        { id: "optimize", title: "Use your eval results to Optimize", detail: "Launch an optimization job from run results", to: "/optimization" },
       ],
     };
   },

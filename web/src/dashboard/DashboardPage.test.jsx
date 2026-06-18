@@ -60,6 +60,33 @@ describe("DashboardPage", () => {
     expect(await screen.findByText("No recent jobs")).toBeInTheDocument();
   });
 
+  it("renders the updated quick start sequence", async () => {
+    render(
+      <MemoryRouter>
+        <DashboardPage adapter={makeAdapter({
+          ...baseOverview,
+          quickStart: [
+            { id: "lm-profile", title: "Setup an LM Profile", detail: "Connect your bundles to an LLM", to: "/lm-profiles/new" },
+            { id: "import", title: "Import your Bundle", detail: "Connect a GitHub repo and branch", to: "/bundles?import=1" },
+            { id: "dataset", title: "Create a Dataset for your Bundle", detail: "Author reusable evaluation records", to: "/datasets/new" },
+            { id: "plan", title: "Create a new Eval Plan", detail: "Define the dataset, model, and runs", to: "/plans?new=1" },
+            { id: "optimize", title: "Use your eval results to Optimize", detail: "Launch an optimization job from run results", to: "/optimization" },
+          ],
+        })} />
+      </MemoryRouter>,
+    );
+
+    const buttons = await screen.findAllByRole("button");
+    const quickStartLabels = buttons.slice(-5).map((button) => button.textContent);
+    expect(quickStartLabels).toEqual([
+      expect.stringContaining("Setup an LM Profile"),
+      expect.stringContaining("Import your Bundle"),
+      expect.stringContaining("Create a Dataset for your Bundle"),
+      expect.stringContaining("Create a new Eval Plan"),
+      expect.stringContaining("Use your eval results to Optimize"),
+    ]);
+  });
+
   it("renders workers table in place of alerts", async () => {
     render(
       <MemoryRouter>
