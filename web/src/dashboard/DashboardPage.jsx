@@ -5,13 +5,6 @@ import { ErrorState } from "../components/states/ErrorState";
 import { LoadingState } from "../components/states/LoadingState";
 import { useDashboardOverview } from "./useDashboardOverview";
 
-function statusLabel(status) {
-  if (status === "running") return "Running";
-  if (status === "succeeded" || status === "complete") return "Complete";
-  if (status === "failed") return "Failed";
-  return "Queued";
-}
-
 function greetingForLocalTime() {
   const hour = new Date().getHours();
   if (hour < 12) return "Good Morning";
@@ -150,7 +143,7 @@ export function DashboardPage({ adapter, onOpenRun }) {
                     <tr key={job.id} onClick={() => openRun(job.id)}>
                       <td>{job.planName}</td>
                       <td>{job.bundleName}</td>
-                      <td>{statusLabel(job.status)}</td>
+                      <td><StatusPill status={job.status} /></td>
                       <td>{job.progress.done}/{job.progress.total}</td>
                       <td>{Math.round(job.passRate * 100)}%</td>
                       <td>{job.startedLabel}</td>
@@ -213,4 +206,16 @@ export function DashboardPage({ adapter, onOpenRun }) {
       </div>
     </section>
   );
+}
+
+function StatusPill({ status }) {
+  const normalized = String(status || "").toLowerCase();
+  const toneClass = normalized === "succeeded" || normalized === "complete"
+    ? "runs-status-pill-pass"
+    : normalized === "failed"
+      ? "runs-status-pill-fail"
+      : normalized === "running"
+        ? "runs-status-pill-run"
+        : "runs-status-pill-neutral";
+  return <span className={`plans-status ${toneClass}`}>{status || "unknown"}</span>;
 }

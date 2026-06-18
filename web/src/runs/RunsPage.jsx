@@ -23,6 +23,7 @@ export function RunsPage() {
   const [error, setError] = useState("");
   const [workersError, setWorkersError] = useState("");
   const [profileNames, setProfileNames] = useState({});
+  const [moduleNames, setModuleNames] = useState({});
 
   useEffect(() => {
     const loadProfiles = async () => {
@@ -47,6 +48,31 @@ export function RunsPage() {
       }
     };
     loadProfiles();
+  }, [apiBase]);
+
+  useEffect(() => {
+    const loadModules = async () => {
+      try {
+        const response = await fetch(`${apiBase}/modules`, { method: "GET" });
+        if (!response.ok) {
+          return;
+        }
+        const payload = await response.json();
+        if (!Array.isArray(payload)) {
+          return;
+        }
+        const next = {};
+        payload.forEach((module) => {
+          if (module?.id) {
+            next[module.id] = formatModuleName(module);
+          }
+        });
+        setModuleNames(next);
+      } catch {
+        setModuleNames({});
+      }
+    };
+    loadModules();
   }, [apiBase]);
 
   const deleteRunPlan = async (id) => {
@@ -195,7 +221,7 @@ export function RunsPage() {
                     <tr>
                       <th>Plan Name</th>
                       <th>LM Profile</th>
-                      <th>Plan ID</th>
+                      <th className="runs-module-col">Module Name</th>
                       <th>Run Status</th>
                       <th>Successful Runs</th>
                       <th>Errors</th>
@@ -206,11 +232,15 @@ export function RunsPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {plans.map((plan) => (
+                    {plans.map((plan) => {
+                      const moduleName = plan.module_import_id ? (moduleNames[plan.module_import_id] || plan.module_import_id) : "-";
+                      return (
                       <tr key={plan.id} className="runs-row-click" onClick={() => navigate(`/runs?plan=${encodeURIComponent(plan.id)}`)}>
                         <td>{plan.plan_name || "RunPlan"}</td>
                         <td className="cap">{plan.lm_profile_id ? (profileNames[plan.lm_profile_id] || plan.lm_profile_id) : "none"}</td>
-                        <td className="mono">{shortId(plan.id)}</td>
+                        <td className="runs-module-col">
+                          <span className="runs-module-cell" title={moduleName}>{moduleName}</span>
+                        </td>
                         <td><StatusPill status={plan.status} /></td>
                         <td className="mono">{plan.completed_tasks ?? 0}/{plan.total_tasks ?? 0}</td>
                         <td className="mono">{plan.failed_tasks ?? 0}/{plan.total_tasks ?? 0}</td>
@@ -246,7 +276,7 @@ export function RunsPage() {
                           ) : null}
                         </td>
                       </tr>
-                    ))}
+                    );})}
                   </tbody>
                 </table>
               </section>
@@ -632,6 +662,10 @@ function canDeleteRunPlan(status) {
 
 function shortId(value) {
   return typeof value === "string" ? value.slice(0, 8) : "-";
+}
+
+function formatModuleName(module) {
+  return module?.bundle_name || module?.current_revision?.bundle_name || module?.github_repo_url || module?.source_ref || module?.id || "-";
 }
 
 function formatTimeAgo(value) {

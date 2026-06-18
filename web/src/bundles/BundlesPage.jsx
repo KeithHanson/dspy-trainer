@@ -312,20 +312,31 @@ export function BundlesPage() {
 function SavedBundlesPanel({ modulesUrl }) {
   const navigate = useNavigate();
   const [savedBundles, setSavedBundles] = useState([]);
+  const [runHistoryByModule, setRunHistoryByModule] = useState({});
   const [isLoadingBundles, setIsLoadingBundles] = useState(false);
 
   const loadBundles = async () => {
     setIsLoadingBundles(true);
     try {
-      const response = await fetch(modulesUrl, { method: "GET" });
-      if (!response.ok) {
+      const [bundlesResponse, runsResponse] = await Promise.all([
+        fetch(modulesUrl, { method: "GET" }),
+        fetch(buildApiUrl("/agent-run-plans?limit=200&offset=0"), { method: "GET" }),
+      ]);
+      if (!bundlesResponse.ok) {
         throw new Error("Could not load bundles");
       }
-      const payload = await response.json();
+      const payload = await bundlesResponse.json();
       const bundles = Array.isArray(payload) ? payload : [];
       setSavedBundles(bundles);
+      if (runsResponse.ok) {
+        const runsPayload = await runsResponse.json();
+        setRunHistoryByModule(buildModuleRunHistory(Array.isArray(runsPayload) ? runsPayload : []));
+      } else {
+        setRunHistoryByModule({});
+      }
     } catch {
       setSavedBundles([]);
+      setRunHistoryByModule({});
     } finally {
       setIsLoadingBundles(false);
     }
@@ -354,11 +365,11 @@ function SavedBundlesPanel({ modulesUrl }) {
       ) : (
         <div className="col gap-2">
           {savedBundles.map((bundle) => (
-            <div key={bundle.id} className="bundles-saved-row">
+            <div key={bundle.id} className="bundles-saved-row bundles-saved-row-bundle">
               <div className="bundles-saved-icon center">
                 <Icon name="box" size={18} />
               </div>
-              <div className="bundles-row-btn">
+              <div className="bundles-row-btn bundles-row-btn-bundle">
                 <span className="t-sm">{bundle.bundle_name || bundle.github_repo_url || bundle.source_ref || bundle.id}</span>
                 <span className="cap"><span className="mono">{bundle.validation_status}</span> · {bundle.status}</span>
                 {bundle.bundle_version ? <span className="cap">v{bundle.bundle_version}</span> : null}
@@ -367,10 +378,13 @@ function SavedBundlesPanel({ modulesUrl }) {
                 {bundle.current_commit_sha ? <span className="cap mono">Commit {bundle.current_commit_sha.slice(0, 8)}</span> : null}
                 {bundle.created_at ? <span className="cap mono">Imported {formatDateTime(bundle.created_at)}</span> : null}
               </div>
-              <Button size="sm" onClick={() => {
-                navigate(`/bundles/${bundle.id}`);
-              }}>Open</Button>
-              <Button size="sm" className="bundles-delete-btn" onClick={() => deleteBundle(bundle.id)}>Delete</Button>
+              <BundleEvalSparkline bundle={bundle} history={runHistoryByModule[bundle.id] || []} />
+              <div className="bundles-saved-actions">
+                <Button size="sm" onClick={() => {
+                  navigate(`/bundles/${bundle.id}`);
+                }}>Open</Button>
+                <Button size="sm" className="bundles-delete-btn" onClick={() => deleteBundle(bundle.id)}>Delete</Button>
+              </div>
             </div>
           ))}
         </div>
@@ -378,6 +392,89 @@ function SavedBundlesPanel({ modulesUrl }) {
 
     </div>
   );
+}
+
+function BundleEvalSparkline({ bundle, history }) {
+  const scoredHistory = Array.isArray(history) ? history.filter((item) => Number.isFinite(item?.average_score)) : [];
+  if (!scoredHistory.length) {
+    return (
+      <div className="bundles-sparkline-card">
+        <span className="t-label">Eval trend</span>
+        <span className="cap">No evals yet</span>
+      </div>
+    );
+  }
+
+  const recentHistory = scoredHistory.slice(-12);
+  const latestScore = Number(recentHistory[recentHistory.length - 1].average_score);
+  const threshold = recentHistory.findLast((item) => Number.isFinite(item?.score_pass_threshold))?.score_pass_threshold;
+  const strokeClass = Number.isFinite(Number(threshold)) && latestScore < Number(threshold)
+    ? "bundles-sparkline-line-fail"
+    : "bundles-sparkline-line-pass";
+
+  return (
+    <div className="bundles-sparkline-card">
+      <div className="row between bundles-sparkline-head">
+        <span className="t-label">Eval trend</span>
+        <span className={`mono bundles-sparkline-score ${strokeClass}`}>{Math.round(latestScore * 100)}%</span>
+      </div>
+      <SparklineChart points={recentHistory} threshold={threshold} label={`Recent eval scores for ${bundle.bundle_name || bundle.id}`} strokeClass={strokeClass} />
+    </div>
+  );
+}
+
+function SparklineChart({ points, threshold, label, strokeClass }) {
+  const width = 170;
+  const height = 42;
+  const padding = 4;
+  const values = points.map((item) => clampScore(Number(item.average_score)));
+  const denom = Math.max(1, values.length - 1);
+  const coordinates = values.map((value, index) => {
+    const x = padding + ((width - padding * 2) * index) / denom;
+    const y = padding + (1 - value) * (height - padding * 2);
+    return [x, y];
+  });
+  const polylinePoints = coordinates.map(([x, y]) => `${x},${y}`).join(" ");
+  const thresholdValue = Number.isFinite(Number(threshold)) ? clampScore(Number(threshold)) : null;
+  const thresholdY = thresholdValue === null ? null : padding + (1 - thresholdValue) * (height - padding * 2);
+  const title = points.map((item) => `${formatDateTime(item.created_at)}: ${Math.round(clampScore(Number(item.average_score)) * 100)}%`).join("\n");
+
+  return (
+    <svg className="bundles-sparkline" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={label}>
+      <title>{title}</title>
+      {thresholdY !== null ? <line className="bundles-sparkline-threshold" x1={padding} y1={thresholdY} x2={width - padding} y2={thresholdY} /> : null}
+      <polyline className={`bundles-sparkline-line ${strokeClass}`} points={polylinePoints} />
+      {coordinates.map(([x, y], index) => (
+        <circle key={`${points[index].id || index}-${x}`} className={`bundles-sparkline-dot ${strokeClass}`} cx={x} cy={y} r="2.25" />
+      ))}
+    </svg>
+  );
+}
+
+function buildModuleRunHistory(plans) {
+  const grouped = {};
+  plans.forEach((plan) => {
+    if (!plan?.module_import_id) {
+      return;
+    }
+    if (!grouped[plan.module_import_id]) {
+      grouped[plan.module_import_id] = [];
+    }
+    grouped[plan.module_import_id].push(plan);
+  });
+  Object.keys(grouped).forEach((moduleId) => {
+    grouped[moduleId] = grouped[moduleId]
+      .slice()
+      .sort((left, right) => String(left.created_at || "").localeCompare(String(right.created_at || "")));
+  });
+  return grouped;
+}
+
+function clampScore(value) {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(1, value));
 }
 
 function BundleDetailPage({ moduleId, modulesUrl, onBack }) {

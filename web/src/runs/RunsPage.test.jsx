@@ -11,8 +11,14 @@ describe("RunsPage", () => {
         return Promise.resolve({
           ok: true,
           json: vi.fn().mockResolvedValue([
-            { id: "plan-1", status: "running", completed_tasks: 1, total_tasks: 6, failed_tasks: 0, created_at: "2026-01-01T00:00:00+00:00" },
+            { id: "plan-1", module_import_id: "mod-1", status: "running", completed_tasks: 1, total_tasks: 6, failed_tasks: 0, created_at: "2026-01-01T00:00:00+00:00" },
           ]),
+        });
+      }
+      if (String(url).endsWith("/modules") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([{ id: "mod-1", bundle_name: "Support Agent" }]),
         });
       }
       if (String(url).endsWith("/workers") && init?.method === "GET") {
@@ -45,6 +51,7 @@ describe("RunsPage", () => {
 
     expect(await screen.findByText("Runs")).toBeInTheDocument();
     expect(await screen.findByText("running")).toBeInTheDocument();
+    expect(await screen.findByText("Support Agent")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Cancel" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Delete" })).not.toBeInTheDocument();
     vi.unstubAllGlobals();
@@ -56,8 +63,14 @@ describe("RunsPage", () => {
         return Promise.resolve({
           ok: true,
           json: vi.fn().mockResolvedValue([
-            { id: "plan-1", status: "succeeded", completed_tasks: 6, total_tasks: 6, failed_tasks: 0, created_at: "2026-01-01T00:00:00+00:00" },
+            { id: "plan-1", module_import_id: "mod-1", status: "succeeded", completed_tasks: 6, total_tasks: 6, failed_tasks: 0, created_at: "2026-01-01T00:00:00+00:00" },
           ]),
+        });
+      }
+      if (String(url).endsWith("/modules") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([{ id: "mod-1", bundle_name: "Support Agent" }]),
         });
       }
       if (String(url).endsWith("/workers") && init?.method === "GET") {
@@ -92,8 +105,14 @@ describe("RunsPage", () => {
         return Promise.resolve({
           ok: true,
           json: vi.fn().mockResolvedValue([
-            { id: "plan-1", status: "draft", completed_tasks: 0, total_tasks: 0, failed_tasks: 0, created_at: "2026-01-01T00:00:00+00:00" },
+            { id: "plan-1", module_import_id: "mod-1", status: "draft", completed_tasks: 0, total_tasks: 0, failed_tasks: 0, created_at: "2026-01-01T00:00:00+00:00" },
           ]),
+        });
+      }
+      if (String(url).endsWith("/modules") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([{ id: "mod-1", bundle_name: "Support Agent" }]),
         });
       }
       if (String(url).endsWith("/workers") && init?.method === "GET") {
@@ -167,6 +186,12 @@ describe("RunsPage", () => {
           json: vi.fn().mockResolvedValue([{ id: "lm-1", name: "GPT-4o" }]),
         });
       }
+      if (String(url).endsWith("/modules") && init?.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([]),
+        });
+      }
       return Promise.reject(new Error(`Unexpected URL ${url}`));
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -219,6 +244,9 @@ describe("RunsPage", () => {
       if (String(url).endsWith("/workers") && init?.method === "GET") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ items: [], total_workers: 8, reported_workers: 0, available_workers: 0, busy_workers: 0 }) });
       }
+      if (String(url).endsWith("/modules") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
+      }
       if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "lm-1", name: "GPT-4o" }]) });
       }
@@ -244,9 +272,12 @@ describe("RunsPage", () => {
         return Promise.resolve({
           ok: true,
           json: vi.fn().mockResolvedValue([
-            { id: "plan-1", status: "running", completed_tasks: 1, total_tasks: 6, failed_tasks: 0, created_at: "2026-01-01T00:00:00+00:00" },
+            { id: "plan-1", module_import_id: "mod-1", status: "running", completed_tasks: 1, total_tasks: 6, failed_tasks: 0, created_at: "2026-01-01T00:00:00+00:00" },
           ]),
         });
+      }
+      if (String(url).endsWith("/modules") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "mod-1", bundle_name: "Support Agent" }]) });
       }
       if (String(url).endsWith("/workers") && init?.method === "GET") {
         return Promise.resolve({
@@ -304,6 +335,9 @@ describe("RunsPage", () => {
       }
       if (String(url).endsWith("/workers") && init?.method === "GET") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ items: [], total_workers: 8, reported_workers: 0, available_workers: 0, busy_workers: 0 }) });
+      }
+      if (String(url).endsWith("/modules") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
       }
       if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "lm-1", name: "GPT-4o" }]) });
@@ -382,6 +416,9 @@ describe("RunsPage", () => {
       if (String(url).endsWith("/workers") && init?.method === "GET") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ items: [], total_workers: 8, reported_workers: 0, available_workers: 0, busy_workers: 0 }) });
       }
+      if (String(url).endsWith("/modules") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
+      }
       if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "lm-1", name: "GPT-4o" }]) });
       }
@@ -432,6 +469,9 @@ describe("RunsPage", () => {
       if (String(url).endsWith("/workers") && init?.method === "GET") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ items: [], total_workers: 8, reported_workers: 0, available_workers: 0, busy_workers: 0 }) });
       }
+      if (String(url).endsWith("/modules") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
+      }
       if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "lm-1", name: "GPT-4o" }]) });
       }
@@ -457,9 +497,12 @@ describe("RunsPage", () => {
         return Promise.resolve({
           ok: true,
           json: vi.fn().mockResolvedValue([
-            { id: "plan-1", status: "succeeded", completed_tasks: 6, total_tasks: 6, failed_tasks: 0, created_at: "2026-01-01T00:00:00+00:00" },
+            { id: "plan-1", module_import_id: "mod-1", status: "succeeded", completed_tasks: 6, total_tasks: 6, failed_tasks: 0, created_at: "2026-01-01T00:00:00+00:00" },
           ]),
         });
+      }
+      if (String(url).endsWith("/modules") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([{ id: "mod-1", bundle_name: "Support Agent" }]) });
       }
       if (String(url).endsWith("/workers") && init?.method === "GET") {
         return Promise.resolve({
@@ -502,6 +545,9 @@ describe("RunsPage", () => {
     const fetchMock = vi.fn((url, init) => {
       if (String(url).includes("/agent-run-plans?") && init?.method === "GET") {
         return Promise.resolve({ ok: false, status: 503, json: vi.fn().mockResolvedValue({}) });
+      }
+      if (String(url).endsWith("/modules") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
       }
       if (String(url).endsWith("/workers") && init?.method === "GET") {
         return Promise.resolve({

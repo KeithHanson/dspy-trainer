@@ -104,4 +104,28 @@ describe("DashboardPage", () => {
     await userEvent.click(await screen.findByText("Refund checks"));
     expect(onOpenRun).toHaveBeenCalledWith("run-9");
   });
+
+  it("renders recent job status with the shared badge style", async () => {
+    render(
+      <MemoryRouter>
+        <DashboardPage adapter={makeAdapter({
+          ...baseOverview,
+          recentJobs: [
+            {
+              id: "run-9",
+              planName: "Refund checks",
+              bundleName: "policy-bot v4",
+              status: "running",
+              progress: { done: 2, total: 10 },
+              passRate: 0.5,
+              startedLabel: "1m ago",
+            },
+          ],
+        })} />
+      </MemoryRouter>,
+    );
+
+    const badge = await screen.findByText("running");
+    expect(badge).toHaveClass("plans-status", "runs-status-pill-run");
+  });
 });

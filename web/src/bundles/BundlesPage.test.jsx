@@ -22,6 +22,9 @@ describe("BundlesPage", () => {
       if (String(url).endsWith("/samples/module-bundle")) {
         return Promise.resolve({ ok: true, blob: vi.fn().mockResolvedValue(blob) });
       }
+      if (String(url).includes("/agent-run-plans?")) {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
+      }
       if (String(url).endsWith("/modules")) {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
       }
@@ -163,6 +166,9 @@ describe("BundlesPage", () => {
       if (String(url).endsWith("/ready")) {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ github: { configured: true } }) });
       }
+      if (String(url).includes("/agent-run-plans?")) {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
+      }
       if (String(url).endsWith("/modules/mod-2/sync-status")) {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ sync_status: "synced", current_commit_sha: "abc12345", upstream_commit_sha: "abc12345" }) });
       }
@@ -241,6 +247,9 @@ describe("BundlesPage", () => {
       if (String(url).endsWith("/modules/mod-3/revisions")) {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
       }
+      if (String(url).includes("/agent-run-plans?")) {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
+      }
       if (String(url).endsWith("/modules") && (!init || init.method === "GET")) {
         return Promise.resolve({
           ok: true,
@@ -287,6 +296,9 @@ describe("BundlesPage", () => {
     const fetchMock = vi.fn((url, init) => {
       if (String(url).endsWith("/ready")) {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ github: { configured: true } }) });
+      }
+      if (String(url).includes("/agent-run-plans?")) {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
       }
       if (String(url).endsWith("/modules") && (!init || init.method === "GET")) {
         return Promise.resolve({
@@ -399,6 +411,9 @@ describe("BundlesPage", () => {
       if (String(url).endsWith("/ready")) {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ github: { configured: true } }) });
       }
+      if (String(url).includes("/agent-run-plans?")) {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
+      }
       if (String(url).endsWith("/modules") && (!init || init.method === "GET")) {
         return Promise.resolve({
           ok: true,
@@ -485,6 +500,9 @@ describe("BundlesPage", () => {
       if (String(url).endsWith("/ready")) {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ github: { configured: true } }) });
       }
+      if (String(url).includes("/agent-run-plans?")) {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
+      }
       if (String(url).endsWith("/modules") && (!init || init.method === "GET")) {
         return Promise.resolve({
           ok: true,
@@ -542,6 +560,44 @@ describe("BundlesPage", () => {
     expect(await screen.findByDisplayValue("https://abatix-search.search.windows.net")).toBeInTheDocument();
     expect(await screen.findByDisplayValue("AZURE_SEARCH_INDEX")).toBeInTheDocument();
     expect(await screen.findByDisplayValue("ai-query-markdown-search")).toBeInTheDocument();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("renders an eval trend sparkline for saved bundles with scored runs", async () => {
+    const fetchMock = vi.fn((url, init) => {
+      if (String(url).includes("/agent-run-plans?") && (!init || init.method === "GET")) {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([
+            { id: "run-1", module_import_id: "mod-trend", average_score: 0.52, score_pass_threshold: 0.8, created_at: "2026-06-01T10:00:00+00:00" },
+            { id: "run-2", module_import_id: "mod-trend", average_score: 0.78, score_pass_threshold: 0.8, created_at: "2026-06-02T10:00:00+00:00" },
+            { id: "run-3", module_import_id: "mod-trend", average_score: 0.91, score_pass_threshold: 0.8, created_at: "2026-06-03T10:00:00+00:00" },
+          ]),
+        });
+      }
+      if (String(url).endsWith("/modules") && (!init || init.method === "GET")) {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([
+            {
+              id: "mod-trend",
+              bundle_name: "agentic-chat",
+              validation_status: "passed",
+              status: "validated",
+              diagnostics: [],
+            },
+          ]),
+        });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderBundlesApp();
+
+    expect(await screen.findByLabelText("Recent eval scores for agentic-chat")).toBeInTheDocument();
+    expect(await screen.findByText("91%")).toBeInTheDocument();
 
     vi.unstubAllGlobals();
   });

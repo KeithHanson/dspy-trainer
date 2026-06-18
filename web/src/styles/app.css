@@ -284,6 +284,7 @@ button { font-family: inherit; }
   gap: 2px;
   align-items: flex-start;
   flex: 1;
+  min-width: 0;
 }
 .bundles-saved-row {
   display: flex;
@@ -295,6 +296,14 @@ button { font-family: inherit; }
   border-radius: var(--r-lg);
   padding: 12px;
 }
+.bundles-saved-row-bundle {
+  display: grid;
+  grid-template-columns: 38px fit-content(320px) minmax(0, 1fr) auto;
+  gap: 14px;
+}
+.bundles-row-btn-bundle {
+  flex: initial;
+}
 .bundles-saved-icon {
   width: 38px;
   height: 38px;
@@ -304,6 +313,41 @@ button { font-family: inherit; }
   color: var(--accent);
   flex: none;
 }
+.bundles-saved-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.bundles-sparkline-card {
+  min-width: 0;
+  width: min(260px, 100%);
+  justify-self: center;
+  padding: 8px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  background: var(--panel-2);
+}
+.bundles-sparkline-head { margin-bottom: 6px; gap: 8px; }
+.bundles-sparkline {
+  display: block;
+  width: 100%;
+  height: 42px;
+}
+.bundles-sparkline-threshold {
+  stroke: color-mix(in oklch, var(--text-faint) 55%, transparent);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+.bundles-sparkline-line {
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.bundles-sparkline-line-pass { color: var(--accent); stroke: currentColor; }
+.bundles-sparkline-line-fail { color: #ffb4a8; stroke: currentColor; }
+.bundles-sparkline-dot { fill: currentColor; }
+.bundles-sparkline-score { font-size: 11px; }
 .bundles-delete-btn {
   margin-left: auto;
   margin-right: 6px;
@@ -782,6 +826,14 @@ button { font-family: inherit; }
 }
 .runs-row-click { cursor: pointer; }
 .runs-row-click:hover { background: var(--surface); }
+.runs-module-col { width: 180px; max-width: 180px; }
+.runs-module-cell {
+  display: block;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .runs-kpis {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -951,6 +1003,9 @@ button { font-family: inherit; }
 @media (max-width: 880px) {
   .bundles-head { flex-direction: column; gap: 12px; }
   .bundles-environment-row { grid-template-columns: 1fr; align-items: stretch; }
+  .bundles-saved-row-bundle { grid-template-columns: 38px minmax(0, 1fr); }
+  .bundles-sparkline-card { grid-column: 1 / -1; }
+  .bundles-saved-actions { grid-column: 1 / -1; justify-content: flex-end; }
 }
 
 .auth-loading, .auth-missing { min-height: 100vh; background: var(--bg-deep); padding: 24px; }
