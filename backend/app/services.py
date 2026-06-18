@@ -2586,7 +2586,10 @@ class AppServices:
     async def publish_endpoint_invocation_event(self, invocation_id: str, event: str, payload: dict[str, Any]) -> None:
         if self.redis is None:
             return
-        await self.redis.publish(self._endpoint_invocation_channel(invocation_id), json.dumps({"event": event, "payload": payload}))
+        await self.redis.publish(
+            self._endpoint_invocation_channel(invocation_id),
+            json.dumps({"event": event, "payload": _json_ready(payload)}),
+        )
 
     async def run_endpoint_invocation_job(
         self,

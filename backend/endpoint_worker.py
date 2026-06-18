@@ -77,6 +77,28 @@ async def process_endpoint_job(services: AppServices, raw_payload: str, worker_i
         await _heartbeat(services, worker_id, "listening", endpoint_id=endpoint_id)
 
 
+async def ensure_endpoint_assignment_ready(services: AppServices, worker_id: str, endpoint_id: str) -> bool:
+    endpoint = await services.get_bundle_endpoint(endpoint_id)
+    if endpoint is None:
+        logger.error("Assigned endpoint not found: %s", endpoint_id)
+        await _heartbeat(services, worker_id, "idle")
+        return False
+    module_state = await services.resolve_module_execution_state(str(endpoint["module_import_id"]))
+    if module_state is None:
+        logger.error("Assigned endpoint module not found: %s", endpoint_id)
+        await _heartbeat(services, worker_id, "idle")
+        return False
+    try:
+        await _heartbeat(services, worker_id, "preparing", endpoint_id=endpoint_id)
+        await services.ensure_bundle_requirements_installed(module_state["bundle_path"])
+        await _heartbeat(services, worker_id, "listening", endpoint_id=endpoint_id)
+        return True
+    except Exception:
+        logger.exception("Endpoint worker warmup failed for endpoint %s", endpoint_id)
+        await _heartbeat(services, worker_id, "failed", endpoint_id=endpoint_id)
+        return False
+
+
 async def run_endpoint_worker() -> None:
     settings = get_settings()
     services = AppServices(settings)
@@ -84,16 +106,25 @@ async def run_endpoint_worker() -> None:
     await services.connect()
     logger.info("Endpoint worker started")
     logger.info("Endpoint worker id: %s", worker_id)
+    assigned_endpoint_id = ""
     try:
         while True:
             await services.reconcile_endpoint_worker_assignments()
             assignment = await services.get_endpoint_worker_assignment(worker_id)
             endpoint_id = str(assignment.get("endpoint_id") or "").strip() if assignment else ""
             if not endpoint_id:
+                assigned_endpoint_id = ""
                 await _heartbeat(services, worker_id, "idle")
                 await asyncio.sleep(2)
                 continue
-            await _heartbeat(services, worker_id, "listening", endpoint_id=endpoint_id)
+            if endpoint_id != assigned_endpoint_id:
+                ready = await ensure_endpoint_assignment_ready(services, worker_id, endpoint_id)
+                if not ready:
+                    await asyncio.sleep(2)
+                    continue
+                assigned_endpoint_id = endpoint_id
+            else:
+                await _heartbeat(services, worker_id, "listening", endpoint_id=endpoint_id)
             try:
                 result = await services.redis.execute_command("BRPOP", services._endpoint_queue_name(endpoint_id), 5) if services.redis else None
             except RedisTimeoutError:

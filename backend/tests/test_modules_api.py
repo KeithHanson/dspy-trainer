@@ -82,6 +82,19 @@ async def fake_readiness(self):
     return ReadinessStatus(postgres=True, redis=True, mlflow=True, litellm=True)
 
 
+async def fake_list_endpoint_workers(self):
+    return {
+        "items": [
+            {"worker_id": "endpoint-worker-1", "status": "listening", "endpoint_id": "endpoint-1", "task_id": None, "last_seen": None, "kind": "endpoint"},
+            {"worker_id": "endpoint-worker-2", "status": "running", "endpoint_id": "endpoint-1", "task_id": "inv-1", "last_seen": None, "kind": "endpoint"},
+        ],
+        "total_workers": 2,
+        "reported_workers": 2,
+        "available_workers": 1,
+        "busy_workers": 1,
+    }
+
+
 async def fake_create_module_import(self, source, source_ref, version_hash, **kwargs):
     module_id = "mod-1"
     STORE[module_id] = {
@@ -417,6 +430,7 @@ def _patch_services(monkeypatch):
     monkeypatch.setattr(main_mod.AppServices, "connect", fake_connect)
     monkeypatch.setattr(main_mod.AppServices, "disconnect", fake_disconnect)
     monkeypatch.setattr(main_mod.AppServices, "readiness", fake_readiness)
+    monkeypatch.setattr(main_mod.AppServices, "list_endpoint_workers", fake_list_endpoint_workers)
     monkeypatch.setattr(main_mod.AppServices, "create_module_import", fake_create_module_import)
     monkeypatch.setattr(main_mod.AppServices, "set_validation_status", fake_set_validation_status)
     monkeypatch.setattr(main_mod.AppServices, "set_smoke_status", fake_set_smoke_status)
@@ -882,3 +896,17 @@ def test_bundle_endpoint_sync_and_stream_invocation(monkeypatch):
         assert '"chunk": 1' in body
         assert "event: final" in body
         assert '"done": true' in body
+
+
+def test_endpoint_workers_listing(monkeypatch):
+    STORE.clear()
+    ENDPOINTS.clear()
+    _patch_services(monkeypatch)
+
+    with TestClient(main_mod.app) as client:
+        response = client.get("/endpoint-workers")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total_workers"] == 2
+    assert payload["items"][0]["worker_id"] == "endpoint-worker-1"

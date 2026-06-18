@@ -80,6 +80,14 @@ class _Pool:
         return _Acquire(self.state)
 
 
+class _RedisPublisher:
+    def __init__(self):
+        self.messages: list[tuple[str, str]] = []
+
+    async def publish(self, channel, payload):
+        self.messages.append((channel, payload))
+
+
 def test_set_module_bundle_metadata_updates_saved_bundle_toml(tmp_path):
     bundle_root = tmp_path / "bundle"
     bundle_root.mkdir()
@@ -420,3 +428,22 @@ def test_json_ready_serializes_decimal_values():
         "table_rows": [{"revenue": "3577181.22"}],
         "raw_output": {"value": "31.13"},
     }
+
+
+def test_publish_endpoint_invocation_event_serializes_decimal_payloads():
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+    publisher = _RedisPublisher()
+    setattr(services, "redis", publisher)
+
+    asyncio.run(
+        services.publish_endpoint_invocation_event(
+            "inv-1",
+            "final",
+            {"table_rows": [{"sales": Decimal("655129.55")}]},
+        )
+    )
+
+    assert len(publisher.messages) == 1
+    channel, payload = publisher.messages[0]
+    assert channel.endswith("inv-1")
+    assert '"655129.55"' in payload

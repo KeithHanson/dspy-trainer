@@ -6,7 +6,7 @@ const PRIMARY_NAV = [
   { to: "/dashboard", label: "Overview", icon: "grid" },
   { to: "/lm-profiles", label: "LM Profiles", icon: "settings", exact: false },
   { to: "/bundles", label: "Module Bundles", icon: "box", exact: false },
-  { to: "/endpoints", label: "Endpoints", icon: "activity", exact: false },
+  { to: "/endpoints", label: "Endpoints", icon: "endpoints", exact: false },
   { to: "/datasets", label: "Datasets", icon: "layers", exact: false },
   { to: "/plans", label: "Evaluation Plans", icon: "shield" },
   { to: "/runs", label: "Eval Runs", icon: "activity" },

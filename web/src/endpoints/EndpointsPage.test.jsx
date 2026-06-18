@@ -12,6 +12,12 @@ describe("EndpointsPage", () => {
           { id: "ep-1", name: "Customer API", module_import_id: "mod-1", module_bundle_name: "agentic-chat", pinned_worker_count: 2, key_preview: "abc123" },
         ]) });
       }
+      if (String(url).endsWith("/endpoint-workers") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ items: [
+          { worker_id: "endpoint-worker-1", endpoint_id: "ep-1", status: "listening" },
+          { worker_id: "endpoint-worker-2", endpoint_id: "ep-1", status: "running" },
+        ] }) });
+      }
       if (String(url).endsWith("/bundle-endpoints/ep-1") && init?.method === "DELETE") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ id: "ep-1", deleted: true }) });
       }
@@ -25,12 +31,18 @@ describe("EndpointsPage", () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByText("Customer API")).toBeInTheDocument();
-    const endpointCard = screen.getByText("Customer API").closest("article");
+    expect((await screen.findAllByText("Customer API")).length).toBeGreaterThan(0);
+    const endpointCard = screen.getAllByText("Customer API")[0].closest("article");
     expect(endpointCard).toBeTruthy();
     expect(within(endpointCard).getByText(/agentic-chat/)).toBeInTheDocument();
     expect(within(endpointCard).getByText(/Pinned workers 2/)).toBeInTheDocument();
     expect(within(endpointCard).getByRole("button", { name: "Copy curl" })).toBeInTheDocument();
+    expect(screen.getByText("Endpoint workers")).toBeInTheDocument();
+    expect(screen.getByText(/1 ready of 2 total/)).toBeInTheDocument();
+    expect(screen.getByText("endpoint-worker-1")).toBeInTheDocument();
+    expect(screen.getByText("endpoint-worker-2")).toBeInTheDocument();
+    expect(screen.getByText("Ready for assigned endpoint traffic")).toBeInTheDocument();
+    expect(screen.getByText("Busy")).toBeInTheDocument();
     await userEvent.click(within(endpointCard).getByRole("button", { name: "Delete" }));
     expect(await screen.findByText("No endpoints yet")).toBeInTheDocument();
   });
@@ -43,6 +55,9 @@ describe("EndpointsPage", () => {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([
           { id: "ep-1", name: "Customer API", module_import_id: "mod-1", module_bundle_name: "agentic-chat", pinned_worker_count: 2, key_preview: "abc123" },
         ]) });
+      }
+      if (String(url).endsWith("/endpoint-workers") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ items: [] }) });
       }
       return Promise.reject(new Error(`Unexpected URL ${url}`));
     });
@@ -65,6 +80,9 @@ describe("EndpointsPage", () => {
       if (String(url).endsWith("/bundle-endpoints") && init?.method === "GET") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
       }
+      if (String(url).endsWith("/endpoint-workers") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ items: [] }) });
+      }
       return Promise.reject(new Error(`Unexpected URL ${url}`));
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -76,6 +94,7 @@ describe("EndpointsPage", () => {
     );
 
     expect(await screen.findByText("No endpoints yet")).toBeInTheDocument();
+    expect(screen.getByText("No endpoint workers reported yet.")).toBeInTheDocument();
   });
 
   it("creates a new endpoint from the editor page", async () => {

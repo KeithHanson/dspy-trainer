@@ -54,25 +54,135 @@ function buildStreamCurlCommand(apiBase, endpointId, apiKey) {
   ].join(" \\\n");
 }
 
+function EndpointWorkerStatusPill({ status }) {
+  const normalized = String(status || "").toLowerCase();
+  const toneClass = normalized === "listening" || normalized === "idle"
+    ? "runs-status-pill-pass"
+    : normalized === "failed"
+      ? "runs-status-pill-fail"
+      : normalized === "running" || normalized === "preparing"
+        ? "runs-status-pill-run"
+        : "runs-status-pill-neutral";
+  return <span className={`plans-status ${toneClass}`}>{status || "unknown"}</span>;
+}
+
+function describeEndpointWorkerState(status, taskId, endpointId) {
+  if (status === "listening") return endpointId ? "Ready for assigned endpoint traffic" : "Ready";
+  if (status === "idle") return "Waiting for an endpoint assignment";
+  if (status === "preparing") return "Installing bundle dependencies";
+  if (status === "running") return taskId ? "Processing endpoint invocation" : "Busy";
+  if (status === "failed") return "Warmup or execution failed";
+  return "Heartbeat reported";
+}
+
+function formatWorkerLastSeen(value) {
+  if (!value) {
+    return "unknown";
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return "unknown";
+  }
+  return parsed.toLocaleString();
+}
+
+function EndpointWorkersSection({ endpointWorkers, endpoints }) {
+  const workers = Array.isArray(endpointWorkers) ? endpointWorkers : [];
+  const totalWorkers = workers.length;
+  const readyWorkers = workers.filter((worker) => worker?.status === "listening").length;
+  const busyWorkers = workers.filter((worker) => worker?.status === "running").length;
+  const preparingWorkers = workers.filter((worker) => worker?.status === "preparing").length;
+  const failedWorkers = workers.filter((worker) => worker?.status === "failed").length;
+  const endpointNameById = new Map((Array.isArray(endpoints) ? endpoints : []).map((endpoint) => [endpoint.id, endpoint.name || endpoint.id]));
+
+  return (
+    <section className="panel card-pad runs-workers-section">
+      <div className="row between" style={{ gap: 12, marginBottom: 10, alignItems: "flex-start" }}>
+        <div>
+          <h3 className="t-h2" style={{ marginBottom: 6 }}>Endpoint workers</h3>
+          <p className="muted t-sm">
+            {readyWorkers} ready of {totalWorkers} total
+            {busyWorkers ? ` · ${busyWorkers} busy` : ""}
+            {preparingWorkers ? ` · ${preparingWorkers} preparing` : ""}
+            {failedWorkers ? ` · ${failedWorkers} failed` : ""}
+          </p>
+        </div>
+      </div>
+      {!workers.length ? (
+        <div className="dashboard-zero">No endpoint workers reported yet.</div>
+      ) : (
+        <div className="runs-workers-grid">
+          {workers.map((worker) => {
+            const endpointLabel = worker.endpoint_id ? (endpointNameById.get(worker.endpoint_id) || worker.endpoint_id) : "Unassigned";
+            return (
+              <article key={worker.worker_id} className="runs-worker-card">
+                <div className="row between" style={{ gap: 10, alignItems: "center" }}>
+                  <div className="col gap-1" style={{ minWidth: 0 }}>
+                    <div className="mono cap" style={{ overflowWrap: "anywhere" }}>{worker.worker_id}</div>
+                    <div className="muted t-xs">Last seen {formatWorkerLastSeen(worker.last_seen)}</div>
+                  </div>
+                  <EndpointWorkerStatusPill status={worker.status} />
+                </div>
+                <dl className="runs-worker-meta">
+                  <div>
+                    <dt>Endpoint</dt>
+                    <dd style={{ overflowWrap: "anywhere" }}>{endpointLabel}</dd>
+                  </div>
+                  <div>
+                    <dt>Task</dt>
+                    <dd className="mono">{worker.task_id || "Idle"}</dd>
+                  </div>
+                  <div>
+                    <dt>State</dt>
+                    <dd>{describeEndpointWorkerState(worker.status, worker.task_id, worker.endpoint_id)}</dd>
+                  </div>
+                  <div>
+                    <dt>Assignment</dt>
+                    <dd>{worker.endpoint_id ? "Pinned" : "Available"}</dd>
+                  </div>
+                </dl>
+              </article>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function EndpointsPage() {
   const navigate = useNavigate();
   const apiBase = useMemo(() => (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, ""), []);
   const [endpoints, setEndpoints] = useState([]);
+  const [endpointWorkers, setEndpointWorkers] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
   const [deletingId, setDeletingId] = useState("");
   const [copiedEndpointId, setCopiedEndpointId] = useState("");
 
+  const loadEndpointWorkers = async () => {
+    try {
+      const response = await fetch(`${apiBase}/endpoint-workers`, { method: "GET" });
+      if (!response.ok) {
+        throw new Error(`Could not load endpoint workers (${response.status})`);
+      }
+      const payload = await response.json();
+      setEndpointWorkers(Array.isArray(payload?.items) ? payload.items : []);
+    } catch {
+      setEndpointWorkers([]);
+    }
+  };
+
   const loadEndpoints = async () => {
     setIsLoading(true);
     setError("");
     try {
-      const response = await fetch(`${apiBase}/bundle-endpoints`, { method: "GET" });
-      if (!response.ok) {
-        throw new Error(`Could not load endpoints (${response.status})`);
+      const endpointsResponse = await fetch(`${apiBase}/bundle-endpoints`, { method: "GET" });
+      if (!endpointsResponse.ok) {
+        throw new Error(`Could not load endpoints (${endpointsResponse.status})`);
       }
-      const payload = await response.json();
-      setEndpoints(Array.isArray(payload) ? payload : []);
+      const endpointsPayload = await endpointsResponse.json();
+      setEndpoints(Array.isArray(endpointsPayload) ? endpointsPayload : []);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load endpoints");
     } finally {
@@ -83,6 +193,12 @@ export function EndpointsPage() {
   useEffect(() => {
     loadEndpoints();
   }, []);
+
+  useEffect(() => {
+    loadEndpointWorkers();
+    const interval = setInterval(loadEndpointWorkers, 5000);
+    return () => clearInterval(interval);
+  }, [apiBase]);
 
   const deleteEndpoint = async (endpointId) => {
     setDeletingId(endpointId);
@@ -163,6 +279,7 @@ export function EndpointsPage() {
             <EmptyState title="No endpoints yet" description="Create an endpoint to expose a bundle over synchronous JSON or SSE streaming." />
           )
         ) : null}
+        {!isLoading && !error ? <EndpointWorkersSection endpointWorkers={endpointWorkers} endpoints={endpoints} /> : null}
       </div>
     </section>
   );

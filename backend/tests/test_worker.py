@@ -9,7 +9,7 @@ from typing import Any, cast
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from worker import process_job
-from endpoint_worker import process_endpoint_job
+from endpoint_worker import ensure_endpoint_assignment_ready, process_endpoint_job
 
 
 class FakeRedis:
@@ -29,6 +29,7 @@ class FakeServices:
         self.process_log_updates = []
         self.fail_agent_run = False
         self.endpoint_invocations = []
+        self.bundle_requirement_installs = []
 
     async def append_optimization_process_log(self, optimization_job_id, additions):
         self.process_log_updates.append((optimization_job_id, additions))
@@ -45,6 +46,15 @@ class FakeServices:
 
     async def run_endpoint_invocation_job(self, invocation_id, endpoint_id, input_payload, worker_id, *, stream):
         self.endpoint_invocations.append((invocation_id, endpoint_id, input_payload, worker_id, stream))
+
+    async def get_bundle_endpoint(self, endpoint_id):
+        return {"id": endpoint_id, "module_import_id": "mod-1"}
+
+    async def resolve_module_execution_state(self, module_id):
+        return {"module_id": module_id, "bundle_path": "/tmp/bundle"}
+
+    async def ensure_bundle_requirements_installed(self, bundle_path):
+        self.bundle_requirement_installs.append(bundle_path)
 
 
 def test_process_job_runs_optimization_job_payload():
@@ -118,4 +128,16 @@ def test_process_endpoint_job_runs_endpoint_invocation_and_restores_listening():
 
     assert services.endpoint_invocations == [("inv-1", "endpoint-1", {"question": "hello"}, "endpoint-worker-1", True)]
     assert json.loads(services.redis.calls[0][1])["status"] == "running"
+    assert json.loads(services.redis.calls[-1][1])["status"] == "listening"
+
+
+def test_ensure_endpoint_assignment_ready_preinstalls_dependencies_and_marks_listening():
+    services = FakeServices()
+    services.settings = SimpleNamespace(endpoint_worker_registry_prefix="dspy-trainer:endpoint-workers")
+
+    ready = asyncio.run(ensure_endpoint_assignment_ready(cast(Any, services), "endpoint-worker-1", "endpoint-1"))
+
+    assert ready is True
+    assert services.bundle_requirement_installs == ["/tmp/bundle"]
+    assert json.loads(services.redis.calls[0][1])["status"] == "preparing"
     assert json.loads(services.redis.calls[-1][1])["status"] == "listening"

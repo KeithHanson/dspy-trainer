@@ -280,6 +280,12 @@ async def list_workers(request: Request):
     return await services.list_workers()
 
 
+@app.get("/endpoint-workers")
+async def list_endpoint_workers(request: Request):
+    services: AppServices = request.app.state.services
+    return await services.list_endpoint_workers()
+
+
 @app.get("/samples/module-bundle")
 async def download_module_bundle_sample():
     if not SAMPLE_BUNDLE_DIR.exists() or not SAMPLE_BUNDLE_DIR.is_dir():
