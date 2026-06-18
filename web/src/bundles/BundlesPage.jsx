@@ -261,7 +261,7 @@ export function BundlesPage() {
     <section className="page">
       <div className="page-body bundles-wrap">
         <header className="row between bundles-head">
-          <div className="col gap-1">
+          <div className="col gap-1 bundles-head-copy">
             <h1 className="t-display" style={{ fontSize: 22 }}>Module Bundles</h1>
             <p className="muted t-sm">GitHub-backed DSPy bundles with <span className="mono">module.py</span>, <span className="mono">metric.py</span>, and <span className="mono">bundle.toml</span> at the repo root or an imported subfolder.</p>
           </div>

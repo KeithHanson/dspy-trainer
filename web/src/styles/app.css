@@ -140,6 +140,7 @@ button { font-family: inherit; }
 
 .bundles-wrap { max-width: 980px; }
 .bundles-head { align-items: flex-start; margin-bottom: 18px; }
+.bundles-head-copy { max-width: min(560px, 100%); }
 .bundles-section { margin-bottom: 14px; }
 .datasets-wrap { max-width: 980px; }
 .datasets-head { align-items: flex-start; margin-bottom: 18px; }
@@ -303,6 +304,7 @@ button { font-family: inherit; }
 }
 .bundles-row-btn-bundle {
   flex: initial;
+  max-width: min(480px, 100%);
 }
 .bundles-saved-icon {
   width: 38px;
@@ -813,6 +815,12 @@ button { font-family: inherit; }
 .lm-profiles-actions {
   margin-left: auto;
   align-self: flex-start;
+}
+.endpoints-list-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: min(480px, 100%);
 }
 .lm-profiles-model-line {
   margin-top: 6px;

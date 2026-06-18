@@ -266,11 +266,13 @@ export function EndpointsPage() {
                         </Button>
                       </div>
                     </div>
-                    <span className="cap mono">Bundle {endpoint.module_bundle_name || endpoint.module_import_id || "unknown"}</span>
-                    <span className="cap mono">Pinned workers {endpoint.pinned_worker_count || 1}</span>
-                    <span className="cap mono">Sync POST {buildApiUrl(`/bundle-endpoints/${endpoint.id}/invoke`)}</span>
-                    <span className="cap mono">SSE POST {buildApiUrl(`/bundle-endpoints/${endpoint.id}/stream`)}</span>
-                    <span className="cap mono">Key preview ...{endpoint.key_preview || "unknown"}</span>
+                    <div className="endpoints-list-copy">
+                      <span className="cap mono">Bundle {endpoint.module_bundle_name || endpoint.module_import_id || "unknown"}</span>
+                      <span className="cap mono">Pinned workers {endpoint.pinned_worker_count || 1}</span>
+                      <span className="cap mono">Sync POST {buildApiUrl(`/bundle-endpoints/${endpoint.id}/invoke`)}</span>
+                      <span className="cap mono">SSE POST {buildApiUrl(`/bundle-endpoints/${endpoint.id}/stream`)}</span>
+                      <span className="cap mono">Key preview ...{endpoint.key_preview || "unknown"}</span>
+                    </div>
                   </div>
                 </article>
               ))}
