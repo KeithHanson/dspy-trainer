@@ -32,16 +32,17 @@ services:
   mlflow:
     image: ghcr.io/mlflow/mlflow:latest
     container_name: dspy-trainer-mlflow
-    command: >-
-      mlflow server
-      --host 0.0.0.0
-      --port 5000
-      --allowed-hosts mlflow,mlflow:5000,localhost,localhost:5000,localhost:5001,127.0.0.1,127.0.0.1:5000,127.0.0.1:5001
-      --backend-store-uri sqlite:///mlflow.db
-      --default-artifact-root /mlflow/artifacts
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["/bin/sh", "/opt/mlflow/start.sh"]
+    environment:
+      MLFLOW_BACKEND_SCHEMA: mlflow
+      MLFLOW_BACKEND_STORE_URI: postgresql+psycopg2://postgres:postgres@postgres:5432/dspy_trainer?options=-csearch_path%3Dmlflow
     ports:
       - "5001:5000"
     volumes:
+      - ./ops/mlflow/start.sh:/opt/mlflow/start.sh:ro
       - mlflow_artifacts:/mlflow/artifacts
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000', timeout=3)"]

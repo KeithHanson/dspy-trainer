@@ -151,6 +151,8 @@ describe("RunsPage", () => {
             id: "plan-1",
             status: "running",
             lm_profile_id: "lm-1",
+            mlflow_experiment_id: "42",
+            mlflow_parent_run_id: "run-mlf-1",
             completed_tasks: 1,
             total_tasks: 6,
             failed_tasks: 0,
@@ -208,6 +210,7 @@ describe("RunsPage", () => {
     expect(averageScoreLabel).toBeInTheDocument();
     expect(averageScoreLabel.closest(".runs-kpi")?.textContent).toContain("-");
     expect(await screen.findByText("Workers")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Open MLflow eval run" })).toHaveAttribute("href", "http://localhost:5001/#/experiments/42/runs/run-mlf-1/evaluations");
     expect(screen.getByRole("button", { name: "Cancel run" })).toBeInTheDocument();
     expect((await screen.findAllByText("running")).length).toBeGreaterThan(0);
     vi.unstubAllGlobals();

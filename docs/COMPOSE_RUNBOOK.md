@@ -21,7 +21,7 @@ Current shell note:
 
 Named volumes:
 - `postgres_data` for PostgreSQL data
-- `mlflow_artifacts` for MLflow artifacts
+- `mlflow_artifacts` for MLflow artifacts (MLflow metadata is stored in the Postgres `mlflow` schema)
 - `bundles_data` shared between `backend` and `worker` at `/tmp/dspy-trainer/bundles` for uploaded module bundles
 - `optimization_artifacts_data` shared between `backend` and `worker` at `/tmp/dspy-trainer/optimization_artifacts` so succeeded optimization artifacts can be materialized into new bundles
 

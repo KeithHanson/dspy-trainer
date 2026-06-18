@@ -352,7 +352,7 @@ export function RunsPage() {
                 <p className="cap" style={{ marginTop: 8 }}>
                   <a
                     className="runs-mlflow-link"
-                    href={`${(import.meta.env.VITE_MLFLOW_BASE_URL || "http://localhost:5001").replace(/\/$/, "")}/#/experiments/${encodeURIComponent(runPlan.mlflow_experiment_id || "0")}/runs/${encodeURIComponent(runPlan.mlflow_parent_run_id)}`}
+                    href={`${(import.meta.env.VITE_MLFLOW_BASE_URL || "http://localhost:5001").replace(/\/$/, "")}/#/experiments/${encodeURIComponent(runPlan.mlflow_experiment_id || "0")}/runs/${encodeURIComponent(runPlan.mlflow_parent_run_id)}/evaluations`}
                     target="_blank"
                     rel="noreferrer"
                   >

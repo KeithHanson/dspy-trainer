@@ -183,7 +183,7 @@ DSPy handles execution, optimization, and prompt engineering for you.
 - **Worker**: Execution engine (async job processing)
 - **Postgres**: Primary app store
 - **Redis**: Queue + worker coordination
-- **MLflow**: Experiment tracking
+- **MLflow**: Experiment tracking with metadata stored in a dedicated Postgres `mlflow` schema and artifacts on a Docker volume
 - **LiteLLM**: Unified LLM gateway
 
 For current stack operations and service expectations, see [`docs/COMPOSE_RUNBOOK.md`](docs/COMPOSE_RUNBOOK.md).
