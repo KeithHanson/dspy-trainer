@@ -39,6 +39,7 @@ services:
     environment:
       MLFLOW_BACKEND_SCHEMA: mlflow
       MLFLOW_BACKEND_STORE_URI: postgresql+psycopg2://postgres:postgres@postgres:5432/dspy_trainer?options=-csearch_path%3Dmlflow
+      MLFLOW_WEB_WORKERS: ${MLFLOW_WEB_WORKERS:-4}
     ports:
       - "5001:5000"
     volumes:

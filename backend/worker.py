@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import suppress
 import json
 import logging
 import os
@@ -27,6 +28,12 @@ async def _heartbeat(services: AppServices, worker_id: str, status: str, task_id
     await services.redis.set(key, json.dumps(payload), ex=15)
 
 
+async def _heartbeat_loop(services: AppServices, worker_id: str, status: str, task_id: str | None = None) -> None:
+    while True:
+        await _heartbeat(services, worker_id, status, task_id)
+        await asyncio.sleep(5)
+
+
 async def process_job(services: AppServices, raw_payload: str, worker_id: str) -> None:
     try:
         payload = json.loads(raw_payload)
@@ -39,10 +46,18 @@ async def process_job(services: AppServices, raw_payload: str, worker_id: str) -
         if not task_id:
             logger.error("Missing task_id in agent_run_task payload")
             return
-        await _heartbeat(services, worker_id, "running", str(task_id))
-        result = await services.run_agent_run_task(str(task_id), worker_id=worker_id)
-        await _heartbeat(services, worker_id, "listening")
-        logger.info("Processed agent run task: %s", result)
+        heartbeat_task = None
+        try:
+            await _heartbeat(services, worker_id, "running", str(task_id))
+            heartbeat_task = asyncio.create_task(_heartbeat_loop(services, worker_id, "running", str(task_id)))
+            result = await services.run_agent_run_task(str(task_id), worker_id=worker_id)
+            logger.info("Processed agent run task: %s", result)
+        finally:
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await heartbeat_task
+            await _heartbeat(services, worker_id, "listening")
         return
 
     if job_type == "optimization_job":
@@ -58,10 +73,18 @@ async def process_job(services: AppServices, raw_payload: str, worker_id: str) -
                 "status=worker_picked_up",
             ],
         )
-        await _heartbeat(services, worker_id, "running", str(job_id))
-        result = await services.run_optimization_job(str(job_id))
-        await _heartbeat(services, worker_id, "listening")
-        logger.info("Processed optimization job: %s", result)
+        heartbeat_task = None
+        try:
+            await _heartbeat(services, worker_id, "running", str(job_id))
+            heartbeat_task = asyncio.create_task(_heartbeat_loop(services, worker_id, "running", str(job_id)))
+            result = await services.run_optimization_job(str(job_id))
+            logger.info("Processed optimization job: %s", result)
+        finally:
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await heartbeat_task
+            await _heartbeat(services, worker_id, "listening")
 
 
 async def run_worker() -> None:
@@ -82,7 +105,10 @@ async def run_worker() -> None:
             if result is None:
                 continue
             _, raw_payload = result
-            await process_job(services, raw_payload, worker_id)
+            try:
+                await process_job(services, raw_payload, worker_id)
+            except Exception:
+                logger.exception("Worker job processing failed")
     finally:
         await services.disconnect()
 

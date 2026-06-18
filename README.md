@@ -41,6 +41,8 @@ docker compose build --pull
 docker compose up -d --remove-orphans
 ```
 
+If MLflow trace or run requests time out under load, increase `MLFLOW_WEB_WORKERS` in `.env` before restarting the stack.
+
 ### 3. Access the Platform
 
 | Service | URL |

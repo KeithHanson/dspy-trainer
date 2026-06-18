@@ -63,7 +63,7 @@ def _recent_trace_ids(tracking_uri: str, experiment_id: str, max_results: int = 
         return set()
     client = MlflowClient(tracking_uri=tracking_uri)
     try:
-        traces = client.search_traces(experiment_ids=[experiment_id], max_results=max_results)
+        traces = client.search_traces(experiment_ids=[experiment_id], max_results=max_results, include_spans=False)
     except Exception:
         return set()
     return {t.info.trace_id for t in traces if getattr(t, "info", None) is not None and t.info.trace_id}
@@ -101,6 +101,7 @@ def _list_parent_run_traces(tracking_uri: str, experiment_id: str, parent_run_id
             experiment_ids=[experiment_id],
             filter_string=f"run_id = '{parent_run_id}'",
             max_results=500,
+            include_spans=False,
         )
     except Exception:
         return []

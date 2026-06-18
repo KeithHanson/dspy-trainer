@@ -601,4 +601,47 @@ describe("BundlesPage", () => {
 
     vi.unstubAllGlobals();
   });
+
+  it("syncs a bundle from the list and shows a success notice", async () => {
+    const fetchMock = vi.fn((url, init) => {
+      if (String(url).includes("/agent-run-plans?") && (!init || init.method === "GET")) {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
+      }
+      if (String(url).endsWith("/modules") && (!init || init.method === "GET")) {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue([
+            {
+              id: "mod-sync-list",
+              bundle_name: "agentic-chat",
+              validation_status: "passed",
+              status: "validated",
+              diagnostics: [],
+            },
+          ]),
+        });
+      }
+      if (String(url).endsWith("/modules/mod-sync-list/sync") && init?.method === "POST") {
+        return Promise.resolve({
+          ok: true,
+          json: vi.fn().mockResolvedValue({
+            module_id: "mod-sync-list",
+            sync_status: "synced",
+            synced: true,
+          }),
+        });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderBundlesApp();
+
+    await userEvent.click(await screen.findByRole("button", { name: "Sync" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/modules\/mod-sync-list\/sync$/), expect.objectContaining({ method: "POST" })));
+    expect(await screen.findByText("agentic-chat synced successfully.")).toBeInTheDocument();
+
+    vi.unstubAllGlobals();
+  });
 });

@@ -7,7 +7,7 @@ const PRIMARY_NAV = [
   { to: "/lm-profiles", label: "LM Profiles", icon: "settings" },
   { to: "/bundles", label: "Module Bundles", icon: "box" },
   { to: "/datasets", label: "Datasets", icon: "layers" },
-  { to: "/plans", label: "Evaluation Plans", icon: "layers" },
+  { to: "/plans", label: "Evaluation Plans", icon: "shield" },
   { to: "/runs", label: "Eval Runs", icon: "activity" },
   { to: "/optimization", label: "Optimization", icon: "search" },
   { to: "/optimization/jobs", label: "Optimization Jobs", icon: "activity" },

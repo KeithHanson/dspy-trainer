@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -15,6 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
+from types import SimpleNamespace
 import tomllib
 import traceback
 from typing import Any
@@ -82,6 +84,77 @@ def _normalize_module_environment_entries(entries: Any) -> list[dict[str, Any]]:
 
 def _json_ready(value: Any) -> Any:
     return json.loads(json.dumps(value, default=str))
+
+
+def _run_agent_run_task_eval_process(payload: dict[str, Any], result_queue: Any) -> None:
+    try:
+        parent_run_id = str(payload.get("parent_run_id") or "")
+        experiment_id = str(payload.get("experiment_id") or "")
+        tracking_uri = str(payload.get("tracking_uri") or "")
+        eval_inputs = payload["eval_inputs"]
+        bundle_path = str(payload["bundle_path"])
+        lm_profile = payload.get("lm_profile")
+        runtime_env = payload.get("runtime_env")
+
+        if parent_run_id:
+            from app.executor.eval import _configure_dspy_mlflow_autolog
+            from app.executor.eval import _link_traces_to_parent_run
+            from app.executor.eval import _recent_trace_ids
+            from app.executor.eval import _run_bundle_eval_with_mlflow_parent
+
+            trace_ids_before: set[str] = set()
+            if tracking_uri and experiment_id:
+                trace_ids_before = _recent_trace_ids(tracking_uri, experiment_id)
+            if tracking_uri:
+                _configure_dspy_mlflow_autolog(
+                    SimpleNamespace(settings=SimpleNamespace(mlflow_tracking_uri=tracking_uri)),
+                    str(payload.get("project_id") or ""),
+                )
+            result = _run_bundle_eval_with_mlflow_parent(
+                bundle_path=bundle_path,
+                eval_inputs=eval_inputs,
+                num_threads=1,
+                parent_run_id=parent_run_id,
+                lm_profile=lm_profile,
+                runtime_env=runtime_env,
+            )
+            if tracking_uri and experiment_id:
+                trace_ids_after = _recent_trace_ids(tracking_uri, experiment_id)
+                _link_traces_to_parent_run(
+                    tracking_uri=tracking_uri,
+                    parent_run_id=parent_run_id,
+                    trace_ids=trace_ids_after - trace_ids_before,
+                )
+        else:
+            from app.executor.module_runner import run_bundle_eval
+
+            result = run_bundle_eval(
+                bundle_path=bundle_path,
+                eval_inputs=eval_inputs,
+                num_threads=1,
+                lm_profile=lm_profile,
+                runtime_env=runtime_env,
+            )
+        item = result["items"][0]
+        result_queue.put(
+            {
+                "ok": True,
+                "item": {
+                    "score": float(item["score"]),
+                    "passed": bool(item.get("passed", False)),
+                    "rationale": str(item["rationale"]),
+                    "prediction_payload": _json_ready(item["prediction"]),
+                },
+            }
+        )
+    except Exception as exc:
+        result_queue.put(
+            {
+                "ok": False,
+                "error": str(exc),
+                "traceback": traceback.format_exc(),
+            }
+        )
 
 
 def _default_sync_status(
@@ -327,7 +400,11 @@ class AppServices:
         payload = json.loads(decrypted)
         return _normalize_module_environment_entries(payload)
 
-    async def ensure_bundle_requirements_installed(self, bundle_path: str) -> None:
+    async def ensure_bundle_requirements_installed(
+        self,
+        bundle_path: str,
+        cancel_check: Callable[[], Awaitable[bool]] | None = None,
+    ) -> None:
         root = Path(bundle_path).expanduser().resolve()
         requirements_path = root / "requirements.txt"
         bundle_toml_path = root / "bundle.toml"
@@ -380,23 +457,47 @@ class AppServices:
                 requirements_path,
             )
 
-            def run_install() -> None:
-                for command in system_dependency_commands:
-                    completed = subprocess.run(
-                        ["/bin/sh", "-lc", command],
+            async def run_command(argv: list[str], *, use_shell: bool = False) -> None:
+                if cancel_check is not None and await cancel_check():
+                    raise RuntimeError("eval run canceled by operator")
+                if use_shell:
+                    process = await asyncio.create_subprocess_shell(
+                        argv[0],
                         cwd=str(root),
-                        check=False,
-                        capture_output=True,
-                        text=True,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
                     )
-                    if completed.returncode != 0:
-                        stderr = (completed.stderr or "").strip()
-                        stdout = (completed.stdout or "").strip()
-                        detail = stderr or stdout or "system dependency command failed"
-                        raise RuntimeError(f"failed to install bundle system dependencies: {detail}")
+                else:
+                    process = await asyncio.create_subprocess_exec(
+                        *argv,
+                        cwd=str(root),
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                while process.returncode is None:
+                    if cancel_check is not None and await cancel_check():
+                        process.terminate()
+                        try:
+                            await asyncio.wait_for(process.wait(), timeout=5)
+                        except asyncio.TimeoutError:
+                            process.kill()
+                            await process.wait()
+                        raise RuntimeError("eval run canceled by operator")
+                    try:
+                        await asyncio.wait_for(process.wait(), timeout=0.25)
+                    except asyncio.TimeoutError:
+                        continue
+                stdout, stderr = await process.communicate()
+                if process.returncode != 0:
+                    detail = (stderr.decode("utf-8", errors="ignore").strip() or stdout.decode("utf-8", errors="ignore").strip() or "command failed")
+                    raise RuntimeError(detail)
+
+            try:
+                for command in system_dependency_commands:
+                    await run_command([command], use_shell=True)
 
                 if requirements_bytes:
-                    completed = subprocess.run(
+                    await run_command(
                         [
                             sys.executable,
                             "-m",
@@ -405,20 +506,8 @@ class AppServices:
                             "--disable-pip-version-check",
                             "-r",
                             str(requirements_path),
-                        ],
-                        cwd=str(root),
-                        check=False,
-                        capture_output=True,
-                        text=True,
+                        ]
                     )
-                    if completed.returncode != 0:
-                        stderr = (completed.stderr or "").strip()
-                        stdout = (completed.stdout or "").strip()
-                        detail = stderr or stdout or "pip install failed"
-                        raise RuntimeError(f"failed to install bundle requirements: {detail}")
-
-            try:
-                await asyncio.to_thread(run_install)
             except Exception:
                 logger.exception(
                     "bundle_requirements_install_failed bundle_path=%s requirements_path=%s",
@@ -3339,7 +3428,18 @@ class AppServices:
                         raise RuntimeError("helper lm profile not found")
                     emit(f"helper_lm_profile_id={job['helper_lm_profile_id']}")
 
-                await self.ensure_bundle_requirements_installed(str(job["bundle_path"]))
+                async def optimization_cancel_check() -> bool:
+                    return await self._get_optimization_job_status(optimization_job_id) == "canceled"
+
+                try:
+                    await self.ensure_bundle_requirements_installed(
+                        str(job["bundle_path"]),
+                        cancel_check=optimization_cancel_check,
+                    )
+                except RuntimeError as exc:
+                    if str(exc) == "eval run canceled by operator":
+                        raise OptimizationJobCanceled("optimization job canceled by operator") from exc
+                    raise
 
                 artifact_root = Path("/tmp/dspy-trainer/optimization_artifacts") / optimization_job_id
                 emit(f"artifact_dir={artifact_root}")
@@ -4787,7 +4887,7 @@ class AppServices:
                     """
                     update agent_run_tasks
                     set status='canceled', error=$2, updated_at=$3
-                    where plan_id=$1 and status in ('pending','queued')
+                    where plan_id=$1 and status in ('pending','queued','running')
                     """,
                     plan_id,
                     "eval run canceled by operator",
@@ -4797,6 +4897,55 @@ class AppServices:
             return await self.get_agent_run_plan(plan_id)
         await self._reconcile_agent_run_plan(plan_id)
         return await self.get_agent_run_plan(plan_id)
+
+    async def _get_agent_run_plan_status(self, plan_id: str) -> str | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            value = await conn.fetchval("select status from agent_run_plans where id = $1", plan_id)
+        return str(value) if value is not None else None
+
+    async def _get_optimization_job_status(self, optimization_job_id: str) -> str | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            value = await conn.fetchval("select status from optimization_jobs where id = $1", optimization_job_id)
+        return str(value) if value is not None else None
+
+    def _start_agent_run_eval_process(self, payload: dict[str, Any]) -> tuple[Any, Any]:
+        ctx = multiprocessing.get_context("spawn")
+        result_queue = ctx.Queue()
+        process = ctx.Process(target=_run_agent_run_task_eval_process, args=(payload, result_queue))
+        process.start()
+        return process, result_queue
+
+    async def _await_agent_run_eval_process(self, plan_id: str, process: Any, result_queue: Any) -> dict[str, Any]:
+        while True:
+            try:
+                return result_queue.get_nowait()
+            except Empty:
+                pass
+            if not process.is_alive():
+                break
+            if await self._get_agent_run_plan_status(plan_id) == "canceled":
+                process.terminate()
+                process.join(timeout=5)
+                if process.is_alive():
+                    process.kill()
+                    process.join(timeout=5)
+                return {"canceled": True}
+            await asyncio.sleep(0.25)
+        try:
+            return result_queue.get_nowait()
+        except Empty:
+            pass
+        if await self._get_agent_run_plan_status(plan_id) == "canceled":
+            return {"canceled": True}
+        return {
+            "ok": False,
+            "error": "eval worker exited without result",
+            "traceback": "",
+        }
 
     async def enqueue_agent_run_plan(self, plan_id: str) -> dict[str, Any] | None:
         if self.postgres_pool is None:
@@ -5031,7 +5180,10 @@ class AppServices:
                 task["plan_id"],
                 now,
             )
-        await self.ensure_bundle_requirements_installed(str(task["bundle_path"]))
+        async def cancel_check() -> bool:
+            return await self._get_agent_run_plan_status(str(task["plan_id"])) == "canceled"
+
+        await self.ensure_bundle_requirements_installed(str(task["bundle_path"]), cancel_check=cancel_check)
         try:
             eval_inputs = [
                 {
@@ -5056,71 +5208,22 @@ class AppServices:
                     "lm_class_path": task["lm_class_path"],
                     "virtual_key": task["lm_virtual_key"],
                 }
-            if parent_run_id:
-                from app.executor.eval import _configure_dspy_mlflow_autolog
-                from app.executor.eval import _link_traces_to_parent_run
-                from app.executor.eval import _recent_trace_ids
-                from app.executor.eval import _run_bundle_eval_with_mlflow_parent
-
-                if tracking_uri and experiment_id:
-                    trace_ids_before = _recent_trace_ids(tracking_uri, experiment_id)
-                _configure_dspy_mlflow_autolog(self, str(task["project_id"]))
-                result = _run_bundle_eval_with_mlflow_parent(
-                    bundle_path=str(task["bundle_path"]),
-                    eval_inputs=eval_inputs,
-                    num_threads=1,
-                    parent_run_id=parent_run_id,
-                    lm_profile=lm_profile,
-                    runtime_env=runtime_env,
-                )
-                if tracking_uri and experiment_id:
-                    trace_ids_after = _recent_trace_ids(tracking_uri, experiment_id)
-                    _link_traces_to_parent_run(
-                        tracking_uri=tracking_uri,
-                        parent_run_id=parent_run_id,
-                        trace_ids=trace_ids_after - trace_ids_before,
-                    )
-            else:
-                from app.executor.module_runner import run_bundle_eval
-
-                result = run_bundle_eval(
-                    bundle_path=str(task["bundle_path"]),
-                    eval_inputs=eval_inputs,
-                    num_threads=1,
-                    lm_profile=lm_profile,
-                    runtime_env=runtime_env,
-                )
-            item = result["items"][0]
-            score = float(item["score"])
-            log_lines.append("status=succeeded")
-            log_lines.append(f"score={score:.4f}")
-
-            if parent_run_id and experiment_id and tracking_uri:
-                try:
-                    from app.executor.eval import _list_parent_run_traces
-                    from app.executor.eval import _match_trace_id_for_item
-
-                    parent_traces = _list_parent_run_traces(
-                        tracking_uri=tracking_uri,
-                        experiment_id=experiment_id,
-                        parent_run_id=parent_run_id,
-                    )
-                    used_trace_ids: set[str] = set()
-                    if trace_ids_before:
-                        used_trace_ids = {str(tid) for tid in trace_ids_before}
-                    _match_trace_id_for_item(
-                        item_input=self._json_dict(task["input_payload"]),
-                        traces=parent_traces,
-                        used=used_trace_ids,
-                    )
-                except Exception:
-                    pass
-
-            async with self.postgres_pool.acquire() as conn:
-                plan_status = await conn.fetchval("select status from agent_run_plans where id = $1", str(task["plan_id"]))
-                if plan_status == "canceled":
-                    log_lines.append("status=canceled")
-                    log_lines.append("reason=eval run canceled by operator")
+            child_payload = {
+                "bundle_path": str(task["bundle_path"]),
+                "eval_inputs": eval_inputs,
+                "runtime_env": runtime_env,
+                "parent_run_id": parent_run_id,
+                "experiment_id": experiment_id,
+                "tracking_uri": tracking_uri,
+                "project_id": str(task["project_id"]),
+                "lm_profile": lm_profile,
+            }
+            process, result_queue = self._start_agent_run_eval_process(child_payload)
+            child_result = await self._await_agent_run_eval_process(str(task["plan_id"]), process, result_queue)
+            if child_result.get("canceled"):
+                log_lines.append("status=canceled")
+                log_lines.append("reason=eval run canceled by operator")
+                async with self.postgres_pool.acquire() as conn:
                     await conn.execute(
                         "update agent_run_tasks set status='canceled', error=$2, worker_log=$3, updated_at=$4 where id=$1",
                         task_id,
@@ -5128,25 +5231,46 @@ class AppServices:
                         "\n".join(log_lines),
                         datetime.now(timezone.utc),
                     )
-                else:
-                    prediction_payload = _json_ready(item["prediction"])
-                    await conn.execute(
-                        """
-                        update agent_run_tasks
-                        set status='succeeded', prediction_payload=$2::jsonb, score=$3, eval_pass=$4, rationale=$5, error=null, worker_log=$6, updated_at=$7
-                        where id=$1
-                        """,
-                        task_id,
-                        __import__("json").dumps(prediction_payload),
-                        score,
-                        bool(item.get("passed", False)),
-                        str(item["rationale"]),
-                        "\n".join(log_lines),
-                        datetime.now(timezone.utc),
-                    )
+            elif not child_result.get("ok"):
+                raise RuntimeError(str(child_result.get("error") or "eval worker failed"))
+            else:
+                item = child_result["item"]
+                score = float(item["score"])
+                log_lines.append("status=succeeded")
+                log_lines.append(f"score={score:.4f}")
+
+                async with self.postgres_pool.acquire() as conn:
+                    plan_status = await conn.fetchval("select status from agent_run_plans where id = $1", str(task["plan_id"]))
+                    if plan_status == "canceled":
+                        log_lines.append("status=canceled")
+                        log_lines.append("reason=eval run canceled by operator")
+                        await conn.execute(
+                            "update agent_run_tasks set status='canceled', error=$2, worker_log=$3, updated_at=$4 where id=$1",
+                            task_id,
+                            "eval run canceled by operator",
+                            "\n".join(log_lines),
+                            datetime.now(timezone.utc),
+                        )
+                    else:
+                        await conn.execute(
+                            """
+                            update agent_run_tasks
+                            set status='succeeded', prediction_payload=$2::jsonb, score=$3, eval_pass=$4, rationale=$5, error=null, worker_log=$6, updated_at=$7
+                            where id=$1
+                            """,
+                            task_id,
+                            __import__("json").dumps(item["prediction_payload"]),
+                            score,
+                            bool(item.get("passed", False)),
+                            str(item["rationale"]),
+                            "\n".join(log_lines),
+                            datetime.now(timezone.utc),
+                        )
         except Exception as exc:
             log_lines.append("status=failed")
             log_lines.append("traceback:")
+            if isinstance(exc, RuntimeError) and str(exc) == "eval worker failed":
+                log_lines.append("eval worker failed")
             log_lines.append(traceback.format_exc())
             async with self.postgres_pool.acquire() as conn:
                 plan_status = await conn.fetchval("select status from agent_run_plans where id = $1", str(task["plan_id"]))

@@ -314,6 +314,8 @@ function SavedBundlesPanel({ modulesUrl }) {
   const [savedBundles, setSavedBundles] = useState([]);
   const [runHistoryByModule, setRunHistoryByModule] = useState({});
   const [isLoadingBundles, setIsLoadingBundles] = useState(false);
+  const [syncingBundleId, setSyncingBundleId] = useState("");
+  const [syncNotice, setSyncNotice] = useState(null);
 
   const loadBundles = async () => {
     setIsLoadingBundles(true);
@@ -350,6 +352,37 @@ function SavedBundlesPanel({ modulesUrl }) {
     await loadBundles();
   };
 
+  const syncBundle = async (bundle) => {
+    if (!bundle?.id) {
+      return;
+    }
+    setSyncingBundleId(bundle.id);
+    setSyncNotice(null);
+    try {
+      const response = await fetch(`${modulesUrl}/${bundle.id}/sync`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload?.error || `Could not sync bundle (${response.status})`);
+      }
+      await loadBundles();
+      setSyncNotice({
+        tone: "success",
+        message: `${bundle.bundle_name || bundle.id} synced successfully.`,
+      });
+    } catch (error) {
+      setSyncNotice({
+        tone: "error",
+        message: error instanceof Error ? error.message : "Could not sync bundle",
+      });
+    } finally {
+      setSyncingBundleId("");
+    }
+  };
+
   useEffect(() => {
     loadBundles();
   }, []);
@@ -360,6 +393,8 @@ function SavedBundlesPanel({ modulesUrl }) {
         <h3 className="t-h2">Saved bundles</h3>
         <Button size="sm" onClick={loadBundles} disabled={isLoadingBundles}>{isLoadingBundles ? "Refreshing..." : "Refresh"}</Button>
       </div>
+      {syncNotice?.tone === "success" ? <div className="bundles-success-banner" role="status" style={{ marginBottom: 10 }}>{syncNotice.message}</div> : null}
+      {syncNotice?.tone === "error" ? <div className="plans-validation-alert" role="alert" style={{ marginBottom: 10 }}><p className="plans-validation-copy">{syncNotice.message}</p></div> : null}
       {!savedBundles.length ? (
         <EmptyState title="No bundles saved yet" description="Import a GitHub repository to create your first tracked bundle." />
       ) : (
@@ -380,6 +415,9 @@ function SavedBundlesPanel({ modulesUrl }) {
               </div>
               <BundleEvalSparkline bundle={bundle} history={runHistoryByModule[bundle.id] || []} />
               <div className="bundles-saved-actions">
+                <Button size="sm" variant="primary" onClick={() => syncBundle(bundle)} disabled={syncingBundleId === bundle.id}>
+                  {syncingBundleId === bundle.id ? "Syncing..." : "Sync"}
+                </Button>
                 <Button size="sm" onClick={() => {
                   navigate(`/bundles/${bundle.id}`);
                 }}>Open</Button>

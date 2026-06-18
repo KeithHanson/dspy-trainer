@@ -78,7 +78,7 @@ class _FakeConn:
         if "set status='running'" in query:
             self.state["job"]["status"] = "running"
             self.state["job"]["execution_log"] = params[2]
-            self.state["job"]["run_started_at"] = params[1].isoformat()
+            self.state["job"]["run_started_at"] = params[1]
         elif "set status='succeeded'" in query:
             self.state["job"]["status"] = "succeeded"
             self.state["job"]["execution_log"] = params[1]
@@ -93,16 +93,33 @@ class _FakeConn:
             self.state["job"]["resulting_bundle_commit_sha"] = params[10]
             self.state["job"]["resulting_bundle_version"] = params[11]
             self.state["job"]["resulting_bundle_branch"] = params[12]
-            self.state["job"]["finished_at"] = params[13].isoformat()
+            self.state["job"]["finished_at"] = params[13]
         elif "set status='failed'" in query:
             self.state["job"]["status"] = "failed"
             self.state["job"]["failure_reason"] = params[1]
             self.state["job"]["execution_log"] = params[2]
+            self.state["job"]["finished_at"] = params[3]
         elif "set status='canceled'" in query:
             self.state["job"]["status"] = "canceled"
             self.state["job"]["failure_reason"] = params[1]
             self.state["job"]["execution_log"] = params[2]
+            self.state["job"]["finished_at"] = params[3]
         return "UPDATE 1"
+
+    async def fetchrow(self, query, *params):
+        normalized = " ".join(query.strip().lower().split())
+        if "from optimization_jobs where id = $1" in normalized:
+            return dict(self.state["job"])
+        return None
+
+    async def fetchval(self, query, *params):
+        normalized = " ".join(query.strip().lower().split())
+        if "select status from optimization_jobs where id = $1" in normalized:
+            return self.state["job"].get("status")
+        return None
+
+    async def fetch(self, query, *params):
+        return []
 
 
 class _FakeAcquire:
@@ -326,6 +343,11 @@ class _PersistentDbConn:
             return 1 if params[0] in self.state.get("agent_run_plans", {}) else None
         if "select count(*) from agent_run_tasks where plan_id = $1" in normalized:
             return len(self.state.get("agent_run_tasks", {}).get(str(params[0]), []))
+        if "select status from optimization_jobs where id = $1" in normalized:
+            job = self.state.get("optimization_jobs", {}).get(str(params[0])) or self.state.get("job")
+            if isinstance(job, dict):
+                return job.get("status")
+            return None
         return None
 
 
@@ -632,7 +654,7 @@ def test_run_optimization_job_persists_artifact_and_summaries(monkeypatch):
         return None
     requirement_installs: list[str] = []
 
-    async def fake_ensure_bundle_requirements_installed(bundle_path):
+    async def fake_ensure_bundle_requirements_installed(bundle_path, cancel_check=None):
         requirement_installs.append(bundle_path)
 
     monkeypatch.setattr(services, "append_optimization_process_log", fake_append_optimization_process_log)
@@ -1121,6 +1143,8 @@ def test_run_optimization_job_marks_canceled_when_subprocess_is_terminated(monke
         "job": {
             "id": "opt-cancel",
             "status": "running",
+            "project_id": "proj-1",
+            "module_import_id": "mod-1",
             "bundle_path": str(FIXTURES / "valid_bundle"),
             "strategy": "bootstrap_fewshot",
             "dataset_id": None,
@@ -1133,6 +1157,7 @@ def test_run_optimization_job_marks_canceled_when_subprocess_is_terminated(monke
             ],
             "val_inputs": [],
             "num_threads": 1,
+            "source_run_plan_id": "plan-cancel",
             "artifact_path": None,
             "artifact_metadata": {},
             "telemetry_summary": {},
@@ -1159,6 +1184,63 @@ def test_run_optimization_job_marks_canceled_when_subprocess_is_terminated(monke
     monkeypatch.setattr(services, "append_optimization_process_log", fake_append_optimization_process_log)
 
     result = asyncio.run(services.run_optimization_job("opt-cancel"))
+
+    assert result is not None
+    assert result["status"] == "canceled"
+    assert "status=canceled" in result["execution_log"]
+    assert result["failure_reason"] == "optimization job canceled by operator"
+
+
+def test_run_optimization_job_marks_canceled_when_requirements_install_sees_cancel(monkeypatch):
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+    state = {
+        "job": {
+            "id": "opt-cancel-install",
+            "status": "running",
+            "project_id": "proj-1",
+            "module_import_id": "mod-1",
+            "bundle_path": str(FIXTURES / "valid_bundle"),
+            "strategy": "bootstrap_fewshot",
+            "dataset_id": None,
+            "validation_dataset_id": None,
+            "execution_lm_profile_id": None,
+            "helper_lm_profile_id": None,
+            "normalized_config": {"dspy_config": {}},
+            "train_inputs": [
+                {"input": {"question": "France capital?"}, "label": {"expected": "Paris"}, "prediction": {"answer": "Paris"}}
+            ],
+            "val_inputs": [],
+            "num_threads": 1,
+            "source_run_plan_id": "plan-cancel-install",
+            "artifact_path": None,
+            "artifact_metadata": {},
+            "telemetry_summary": {},
+            "comparison_summary": {},
+            "failure_reason": None,
+            "run_started_at": None,
+            "finished_at": None,
+        }
+    }
+    setattr(services, "postgres_pool", FakePool(state))
+
+    async def fake_get_optimization_job(job_id):
+        assert job_id == "opt-cancel-install"
+        return dict(state["job"])
+
+    async def fake_ensure_bundle_requirements_installed(bundle_path, cancel_check=None):
+        assert cancel_check is not None
+        state["job"]["status"] = "canceled"
+        if await cancel_check():
+            raise RuntimeError("eval run canceled by operator")
+
+    async def fake_append_optimization_process_log(job_id, additions):
+        return None
+
+    monkeypatch.setattr(services, "get_optimization_job", fake_get_optimization_job)
+    monkeypatch.setattr(services, "ensure_bundle_requirements_installed", fake_ensure_bundle_requirements_installed)
+    monkeypatch.setattr(services, "append_optimization_process_log", fake_append_optimization_process_log)
+
+    result = asyncio.run(services.run_optimization_job("opt-cancel-install"))
 
     assert result is not None
     assert result["status"] == "canceled"
