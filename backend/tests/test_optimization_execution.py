@@ -141,6 +141,35 @@ class FakePool:
         return _FakeAcquire(self.state)
 
 
+class _RecordingConn:
+    def __init__(self):
+        self.queries: list[str] = []
+
+    async def execute(self, query, *params):
+        del params
+        self.queries.append(" ".join(query.strip().split()))
+        return "OK"
+
+
+class _RecordingAcquire:
+    def __init__(self, conn):
+        self.conn = conn
+
+    async def __aenter__(self):
+        return self.conn
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _RecordingPool:
+    def __init__(self):
+        self.conn = _RecordingConn()
+
+    def acquire(self):
+        return _RecordingAcquire(self.conn)
+
+
 class _PersistentDbConn:
     def __init__(self, state):
         self.state = state
@@ -368,6 +397,25 @@ class _PersistentDbPool:
 
     def acquire(self):
         return _PersistentDbAcquire(self.state)
+
+
+def test_init_db_creates_tables_before_foreign_key_dependents():
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+    recording_pool = _RecordingPool()
+    setattr(services, "postgres_pool", recording_pool)
+
+    asyncio.run(services.init_db())
+
+    queries = recording_pool.conn.queries
+    lm_profiles_idx = next(i for i, query in enumerate(queries) if "create table if not exists lm_profiles" in query)
+    bundle_endpoints_idx = next(i for i, query in enumerate(queries) if "create table if not exists bundle_endpoints" in query)
+    evaluation_plans_idx = next(i for i, query in enumerate(queries) if "create table if not exists evaluation_plans" in query)
+    agent_run_plans_idx = next(i for i, query in enumerate(queries) if "create table if not exists agent_run_plans" in query)
+    optimization_jobs_idx = next(i for i, query in enumerate(queries) if "create table if not exists optimization_jobs" in query)
+
+    assert lm_profiles_idx < bundle_endpoints_idx
+    assert evaluation_plans_idx < optimization_jobs_idx
+    assert agent_run_plans_idx < optimization_jobs_idx
 
 
 def test_run_bundle_optimization_bootstrap_fewshot_saves_artifact_and_demo_summary(monkeypatch, tmp_path):

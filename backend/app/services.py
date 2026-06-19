@@ -1005,6 +1005,27 @@ class AppServices:
             )
             await conn.execute(
                 """
+                create table if not exists lm_profiles (
+                  id text primary key,
+                  name text not null,
+                  model text not null,
+                  api_base text not null,
+                  model_type text not null default 'responses',
+                  default_params jsonb not null default '{}'::jsonb,
+                  lm_class_path text,
+                  archived_at timestamptz,
+                  created_at timestamptz not null,
+                  updated_at timestamptz not null
+                );
+                """
+            )
+            await conn.execute("alter table lm_profiles add column if not exists model_type text not null default 'responses';")
+            await conn.execute("alter table lm_profiles add column if not exists default_params jsonb not null default '{}'::jsonb;")
+            await conn.execute("alter table lm_profiles add column if not exists lm_class_path text;")
+            await conn.execute("alter table lm_profiles add column if not exists archived_at timestamptz;")
+            await conn.execute("alter table lm_profiles add column if not exists virtual_key text;")
+            await conn.execute(
+                """
                 create table if not exists bundle_endpoints (
                   id text primary key,
                   module_import_id text not null references module_imports(id) on delete cascade,
@@ -1055,94 +1076,6 @@ class AppServices:
             await conn.execute("alter table optimization_datasets add column if not exists optimizer_contract text not null default 'dspy_example_v1';")
             await conn.execute("alter table optimization_datasets add column if not exists provenance_summary jsonb not null default '{}'::jsonb;")
             await conn.execute("alter table optimization_datasets add column if not exists notes text;")
-            await conn.execute(
-                """
-                create table if not exists optimization_jobs (
-                  id text primary key,
-                  status text not null,
-                  project_id text not null,
-                  module_import_id text not null references module_imports(id) on delete restrict,
-                  bundle_path text not null,
-                  bundle_revision_id text,
-                  bundle_commit_sha text,
-                  bundle_version text,
-                  resulting_bundle_revision_id text,
-                  resulting_bundle_commit_sha text,
-                  resulting_bundle_version text,
-                  strategy text not null default 'bootstrap_fewshot',
-                  objective text not null default 'optimize_demo_quality',
-                  dataset_id text references optimization_datasets(id) on delete set null,
-                  validation_dataset_id text references optimization_datasets(id) on delete set null,
-                  execution_lm_profile_id text,
-                  helper_lm_profile_id text,
-                  request_config jsonb not null default '{}'::jsonb,
-                  normalized_config jsonb not null default '{}'::jsonb,
-                  train_inputs jsonb not null default '[]'::jsonb,
-                  val_inputs jsonb not null default '[]'::jsonb,
-                  num_threads int not null default 1,
-                  source_run_plan_id text,
-                  generated_module_import_id text references module_imports(id) on delete set null,
-                  optimized_evaluation_plan_id text references evaluation_plans(id) on delete set null,
-                  optimized_eval_run_plan_id text references agent_run_plans(id) on delete set null,
-                  execution_log text,
-                  artifact_path text,
-                  artifact_metadata jsonb not null default '{}'::jsonb,
-                  telemetry_summary jsonb not null default '{}'::jsonb,
-                  comparison_summary jsonb not null default '{}'::jsonb,
-                  failure_reason text,
-                  run_started_at timestamptz,
-                  finished_at timestamptz,
-                  created_at timestamptz not null,
-                  updated_at timestamptz not null
-                );
-                """
-            )
-            await conn.execute("alter table optimization_jobs add column if not exists strategy text not null default 'bootstrap_fewshot';")
-            await conn.execute("alter table optimization_jobs add column if not exists bundle_revision_id text;")
-            await conn.execute("alter table optimization_jobs add column if not exists bundle_commit_sha text;")
-            await conn.execute("alter table optimization_jobs add column if not exists bundle_version text;")
-            await conn.execute("alter table optimization_jobs add column if not exists resulting_bundle_revision_id text;")
-            await conn.execute("alter table optimization_jobs add column if not exists resulting_bundle_commit_sha text;")
-            await conn.execute("alter table optimization_jobs add column if not exists resulting_bundle_version text;")
-            await conn.execute("alter table optimization_jobs add column if not exists resulting_bundle_branch text;")
-            await conn.execute("alter table optimization_jobs add column if not exists objective text not null default 'optimize_demo_quality';")
-            await conn.execute("alter table optimization_jobs add column if not exists dataset_id text references optimization_datasets(id) on delete set null;")
-            await conn.execute("alter table optimization_jobs add column if not exists validation_dataset_id text references optimization_datasets(id) on delete set null;")
-            await conn.execute("alter table optimization_jobs add column if not exists execution_lm_profile_id text;")
-            await conn.execute("alter table optimization_jobs add column if not exists helper_lm_profile_id text;")
-            await conn.execute("alter table optimization_jobs add column if not exists source_run_plan_id text;")
-            await conn.execute("alter table optimization_jobs add column if not exists generated_module_import_id text references module_imports(id) on delete set null;")
-            await conn.execute("alter table optimization_jobs add column if not exists optimized_evaluation_plan_id text references evaluation_plans(id) on delete set null;")
-            await conn.execute("alter table optimization_jobs add column if not exists optimized_eval_run_plan_id text references agent_run_plans(id) on delete set null;")
-            await conn.execute("alter table optimization_jobs add column if not exists execution_log text;")
-            await conn.execute("alter table optimization_jobs add column if not exists request_config jsonb not null default '{}'::jsonb;")
-            await conn.execute("alter table optimization_jobs add column if not exists normalized_config jsonb not null default '{}'::jsonb;")
-            await conn.execute("alter table optimization_jobs add column if not exists artifact_metadata jsonb not null default '{}'::jsonb;")
-            await conn.execute("alter table optimization_jobs add column if not exists telemetry_summary jsonb not null default '{}'::jsonb;")
-            await conn.execute("alter table optimization_jobs add column if not exists comparison_summary jsonb not null default '{}'::jsonb;")
-            await conn.execute("alter table optimization_jobs add column if not exists run_started_at timestamptz;")
-            await conn.execute("alter table optimization_jobs add column if not exists finished_at timestamptz;")
-            await conn.execute(
-                """
-                create table if not exists lm_profiles (
-                  id text primary key,
-                  name text not null,
-                  model text not null,
-                  api_base text not null,
-                  model_type text not null default 'responses',
-                  default_params jsonb not null default '{}'::jsonb,
-                  lm_class_path text,
-                  archived_at timestamptz,
-                  created_at timestamptz not null,
-                  updated_at timestamptz not null
-                );
-                """
-            )
-            await conn.execute("alter table lm_profiles add column if not exists model_type text not null default 'responses';")
-            await conn.execute("alter table lm_profiles add column if not exists default_params jsonb not null default '{}'::jsonb;")
-            await conn.execute("alter table lm_profiles add column if not exists lm_class_path text;")
-            await conn.execute("alter table lm_profiles add column if not exists archived_at timestamptz;")
-            await conn.execute("alter table lm_profiles add column if not exists virtual_key text;")
             await conn.execute(
                 """
                 create table if not exists evaluation_datasets (
@@ -1248,6 +1181,73 @@ class AppServices:
             )
             await conn.execute("alter table agent_run_tasks add column if not exists worker_log text;")
             await conn.execute("alter table agent_run_tasks add column if not exists eval_pass boolean;")
+            await conn.execute(
+                """
+                create table if not exists optimization_jobs (
+                  id text primary key,
+                  status text not null,
+                  project_id text not null,
+                  module_import_id text not null references module_imports(id) on delete restrict,
+                  bundle_path text not null,
+                  bundle_revision_id text,
+                  bundle_commit_sha text,
+                  bundle_version text,
+                  resulting_bundle_revision_id text,
+                  resulting_bundle_commit_sha text,
+                  resulting_bundle_version text,
+                  strategy text not null default 'bootstrap_fewshot',
+                  objective text not null default 'optimize_demo_quality',
+                  dataset_id text references optimization_datasets(id) on delete set null,
+                  validation_dataset_id text references optimization_datasets(id) on delete set null,
+                  execution_lm_profile_id text,
+                  helper_lm_profile_id text,
+                  request_config jsonb not null default '{}'::jsonb,
+                  normalized_config jsonb not null default '{}'::jsonb,
+                  train_inputs jsonb not null default '[]'::jsonb,
+                  val_inputs jsonb not null default '[]'::jsonb,
+                  num_threads int not null default 1,
+                  source_run_plan_id text,
+                  generated_module_import_id text references module_imports(id) on delete set null,
+                  optimized_evaluation_plan_id text references evaluation_plans(id) on delete set null,
+                  optimized_eval_run_plan_id text references agent_run_plans(id) on delete set null,
+                  execution_log text,
+                  artifact_path text,
+                  artifact_metadata jsonb not null default '{}'::jsonb,
+                  telemetry_summary jsonb not null default '{}'::jsonb,
+                  comparison_summary jsonb not null default '{}'::jsonb,
+                  failure_reason text,
+                  run_started_at timestamptz,
+                  finished_at timestamptz,
+                  created_at timestamptz not null,
+                  updated_at timestamptz not null
+                );
+                """
+            )
+            await conn.execute("alter table optimization_jobs add column if not exists strategy text not null default 'bootstrap_fewshot';")
+            await conn.execute("alter table optimization_jobs add column if not exists bundle_revision_id text;")
+            await conn.execute("alter table optimization_jobs add column if not exists bundle_commit_sha text;")
+            await conn.execute("alter table optimization_jobs add column if not exists bundle_version text;")
+            await conn.execute("alter table optimization_jobs add column if not exists resulting_bundle_revision_id text;")
+            await conn.execute("alter table optimization_jobs add column if not exists resulting_bundle_commit_sha text;")
+            await conn.execute("alter table optimization_jobs add column if not exists resulting_bundle_version text;")
+            await conn.execute("alter table optimization_jobs add column if not exists resulting_bundle_branch text;")
+            await conn.execute("alter table optimization_jobs add column if not exists objective text not null default 'optimize_demo_quality';")
+            await conn.execute("alter table optimization_jobs add column if not exists dataset_id text references optimization_datasets(id) on delete set null;")
+            await conn.execute("alter table optimization_jobs add column if not exists validation_dataset_id text references optimization_datasets(id) on delete set null;")
+            await conn.execute("alter table optimization_jobs add column if not exists execution_lm_profile_id text;")
+            await conn.execute("alter table optimization_jobs add column if not exists helper_lm_profile_id text;")
+            await conn.execute("alter table optimization_jobs add column if not exists source_run_plan_id text;")
+            await conn.execute("alter table optimization_jobs add column if not exists generated_module_import_id text references module_imports(id) on delete set null;")
+            await conn.execute("alter table optimization_jobs add column if not exists optimized_evaluation_plan_id text references evaluation_plans(id) on delete set null;")
+            await conn.execute("alter table optimization_jobs add column if not exists optimized_eval_run_plan_id text references agent_run_plans(id) on delete set null;")
+            await conn.execute("alter table optimization_jobs add column if not exists execution_log text;")
+            await conn.execute("alter table optimization_jobs add column if not exists request_config jsonb not null default '{}'::jsonb;")
+            await conn.execute("alter table optimization_jobs add column if not exists normalized_config jsonb not null default '{}'::jsonb;")
+            await conn.execute("alter table optimization_jobs add column if not exists artifact_metadata jsonb not null default '{}'::jsonb;")
+            await conn.execute("alter table optimization_jobs add column if not exists telemetry_summary jsonb not null default '{}'::jsonb;")
+            await conn.execute("alter table optimization_jobs add column if not exists comparison_summary jsonb not null default '{}'::jsonb;")
+            await conn.execute("alter table optimization_jobs add column if not exists run_started_at timestamptz;")
+            await conn.execute("alter table optimization_jobs add column if not exists finished_at timestamptz;")
 
     async def _create_bundle_revision(
         self,
