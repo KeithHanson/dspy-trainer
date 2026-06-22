@@ -9,6 +9,8 @@ from app.validator import validate_bundle
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "module_bundles"
 SAMPLE_BUNDLE = Path(__file__).resolve().parents[1] / "sample_bundles" / "example-bundle"
+IT_TRIAGE_SAMPLE_BUNDLE = Path(__file__).resolve().parents[1] / "sample_bundles" / "it-ticket-triage-bundle"
+EVENT_EXTRACTION_SAMPLE_BUNDLE = Path(__file__).resolve().parents[1] / "sample_bundles" / "event-extraction-bundle"
 
 
 def _diag_codes(report) -> set[str]:
@@ -70,6 +72,32 @@ def test_validator_accepts_downloadable_sample_bundle():
         ],
         "input_template": {"message": ""},
         "label_template": {"expected_r_count": ""},
+    }
+
+
+def test_validator_accepts_it_ticket_triage_sample_bundle():
+    report = validate_bundle(str(IT_TRIAGE_SAMPLE_BUNDLE))
+    assert report.passed is True
+    assert report.diagnostics == []
+    assert report.metadata["evaluation_contract"]["input_template"] == {
+        "ticket_title": "",
+        "ticket_body": "",
+    }
+    assert report.metadata["evaluation_contract"]["label_template"] == {
+        "expected_priority": "",
+        "expected_category": "",
+        "response_expectations": "",
+    }
+
+
+def test_validator_accepts_event_extraction_sample_bundle():
+    report = validate_bundle(str(EVENT_EXTRACTION_SAMPLE_BUNDLE))
+    assert report.passed is True
+    assert report.diagnostics == []
+    assert report.metadata["evaluation_contract"]["input_template"] == {"email": ""}
+    assert report.metadata["evaluation_contract"]["label_template"] == {
+        "expected_event_name": "",
+        "expected_date": "",
     }
 
 

@@ -1,0 +1,21 @@
+name = "event-extraction-agent"
+version = "0.1.0"
+score_pass_threshold = 0.8
+dspy_version = ">=2.5,<3.0"
+
+[runtime]
+system_dependency_commands = []
+
+[evaluation.input]
+fields = [
+  { key = "email", label = "Email body", required = true, multiline = true },
+]
+
+[evaluation.label]
+fields = [
+  { key = "expected_event_name", label = "Expected event name", required = true, multiline = false },
+  { key = "expected_date", label = "Expected date", required = true, multiline = false },
+]
+
+[optimization]
+target_output_fields = ["event_name", "date"]

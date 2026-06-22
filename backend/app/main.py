@@ -43,7 +43,28 @@ app.add_middleware(
 )
 
 
-SAMPLE_BUNDLE_DIR = Path(__file__).resolve().parents[1] / "sample_bundles" / "example-bundle"
+SAMPLE_BUNDLES_DIR = Path(__file__).resolve().parents[1] / "sample_bundles"
+SAMPLE_BUNDLES = (
+    {
+        "slug": "r-counter",
+        "directory": "example-bundle",
+        "name": "Count the Rs",
+        "description": "Deterministic starter that counts r/R characters in a message.",
+    },
+    {
+        "slug": "it-ticket-triage",
+        "directory": "it-ticket-triage-bundle",
+        "name": "IT ticket triage",
+        "description": "LLM-powered ticket triage that predicts priority, category, and a polite reply.",
+    },
+    {
+        "slug": "event-extraction",
+        "directory": "event-extraction-bundle",
+        "name": "Event extraction",
+        "description": "DSPy Predict example that extracts an event name and date from email text.",
+    },
+)
+DEFAULT_SAMPLE_BUNDLE_SLUG = "r-counter"
 
 
 def _read_endpoint_api_key(request: Request) -> str:
@@ -59,6 +80,22 @@ def _format_sse_event(event: str, payload: dict[str, Any]) -> str:
 
 def _iter_sample_bundle_files(bundle_dir: Path) -> list[Path]:
     return sorted(path for path in bundle_dir.rglob("*") if path.is_file())
+
+
+def _sample_bundle_entry(slug: str | None) -> dict[str, str] | None:
+    requested_slug = str(slug or DEFAULT_SAMPLE_BUNDLE_SLUG).strip() or DEFAULT_SAMPLE_BUNDLE_SLUG
+    for entry in SAMPLE_BUNDLES:
+        if entry["slug"] == requested_slug:
+            return entry
+    return None
+
+
+def _sample_bundle_directory(entry: dict[str, str]) -> Path:
+    return SAMPLE_BUNDLES_DIR / entry["directory"]
+
+
+def _sample_bundle_download_filename(entry: dict[str, str]) -> str:
+    return f'{entry["slug"]}.zip'
 
 
 class ModuleImportRequest(BaseModel):
@@ -286,18 +323,36 @@ async def list_endpoint_workers(request: Request):
     return await services.list_endpoint_workers()
 
 
+@app.get("/samples/module-bundles")
+async def list_module_bundle_samples():
+    return [
+        {
+            "slug": entry["slug"],
+            "name": entry["name"],
+            "description": entry["description"],
+            "download_url": f'/samples/module-bundle?sample={entry["slug"]}',
+        }
+        for entry in SAMPLE_BUNDLES
+    ]
+
+
 @app.get("/samples/module-bundle")
-async def download_module_bundle_sample():
-    if not SAMPLE_BUNDLE_DIR.exists() or not SAMPLE_BUNDLE_DIR.is_dir():
+async def download_module_bundle_sample(sample: str = DEFAULT_SAMPLE_BUNDLE_SLUG):
+    entry = _sample_bundle_entry(sample)
+    if entry is None:
+        return JSONResponse(status_code=404, content={"error": "sample bundle not found"})
+
+    bundle_dir = _sample_bundle_directory(entry)
+    if not bundle_dir.exists() or not bundle_dir.is_dir():
         return JSONResponse(status_code=500, content={"error": "sample bundle directory is missing"})
 
     bundle = BytesIO()
     with ZipFile(bundle, mode="w", compression=ZIP_DEFLATED) as archive:
-        root_name = SAMPLE_BUNDLE_DIR.name
-        for file_path in _iter_sample_bundle_files(SAMPLE_BUNDLE_DIR):
-            archive_name = f"{root_name}/{file_path.relative_to(SAMPLE_BUNDLE_DIR).as_posix()}"
+        root_name = bundle_dir.name
+        for file_path in _iter_sample_bundle_files(bundle_dir):
+            archive_name = f"{root_name}/{file_path.relative_to(bundle_dir).as_posix()}"
             archive.write(file_path, arcname=archive_name)
-    headers = {"Content-Disposition": 'attachment; filename="example-bundle.zip"'}
+    headers = {"Content-Disposition": f'attachment; filename="{_sample_bundle_download_filename(entry)}"'}
     return Response(content=bundle.getvalue(), media_type="application/zip", headers=headers)
 
 

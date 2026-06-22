@@ -1,0 +1,23 @@
+name = "it-ticket-triage-agent"
+version = "0.1.0"
+score_pass_threshold = 0.8
+dspy_version = ">=2.5,<3.0"
+
+[runtime]
+system_dependency_commands = []
+
+[evaluation.input]
+fields = [
+  { key = "ticket_title", label = "Ticket title", required = true, multiline = false },
+  { key = "ticket_body", label = "Ticket body", required = true, multiline = true },
+]
+
+[evaluation.label]
+fields = [
+  { key = "expected_priority", label = "Expected priority", required = true, multiline = false },
+  { key = "expected_category", label = "Expected category", required = true, multiline = false },
+  { key = "response_expectations", label = "Response expectations", required = true, multiline = true },
+]
+
+[optimization]
+target_output_fields = ["priority", "category", "reply"]

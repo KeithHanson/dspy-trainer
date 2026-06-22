@@ -170,6 +170,30 @@ const BUNDLE_FILE_TEMPLATES = {
   "bundle.toml": VALIDATION_CHECKS.find((check) => check.id === "bundle_toml_file")?.snippet || "# bundle.toml not available",
 };
 
+const SAMPLE_BUNDLES = [
+  {
+    slug: "r-counter",
+    name: "Count the Rs",
+    description: "Deterministic starter that counts r/R characters in a message.",
+  },
+  {
+    slug: "it-ticket-triage",
+    name: "IT ticket triage",
+    description: "LLM-powered ticket triage with priority, category, and a polite reply.",
+  },
+  {
+    slug: "event-extraction",
+    name: "Event extraction",
+    description: "DSPy Predict example that extracts an event name and date from email text.",
+  },
+];
+
+function readDownloadFilename(response, fallback) {
+  const header = response.headers?.get?.("content-disposition") || "";
+  const match = header.match(/filename="([^"]+)"/i);
+  return match?.[1] || fallback;
+}
+
 function parseEnvironmentPaste(text) {
   const entries = [];
   const lines = String(text || "").split(/\r?\n/);
@@ -224,10 +248,12 @@ export function BundlesPage() {
   const { moduleId } = useParams();
   const [isDownloading, setIsDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState("");
+  const [selectedSampleBundleSlug, setSelectedSampleBundleSlug] = useState(SAMPLE_BUNDLES[0].slug);
   const showImportIntent = searchParams.get("import") === "1";
 
   const sampleUrl = useMemo(() => buildApiUrl("/samples/module-bundle"), []);
   const validateUrl = useMemo(() => buildApiUrl("/modules"), []);
+  const selectedSampleBundle = SAMPLE_BUNDLES.find((bundle) => bundle.slug === selectedSampleBundleSlug) || SAMPLE_BUNDLES[0];
 
   if (moduleId) {
     return <BundleDetailPage moduleId={moduleId} modulesUrl={validateUrl} onBack={() => navigate("/bundles")} />;
@@ -237,7 +263,7 @@ export function BundlesPage() {
     setIsDownloading(true);
     setDownloadError("");
     try {
-      const response = await fetch(sampleUrl, { method: "GET" });
+      const response = await fetch(`${sampleUrl}?sample=${encodeURIComponent(selectedSampleBundle.slug)}`, { method: "GET" });
       if (!response.ok) {
         throw new Error(`Sample download failed (${response.status})`);
       }
@@ -245,7 +271,7 @@ export function BundlesPage() {
       const objectUrl = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = objectUrl;
-      link.download = "example-bundle.zip";
+      link.download = readDownloadFilename(response, `${selectedSampleBundle.slug}.zip`);
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -266,12 +292,25 @@ export function BundlesPage() {
             <p className="muted t-sm">GitHub-backed DSPy bundles with <span className="mono">module.py</span>, <span className="mono">metric.py</span>, and <span className="mono">bundle.toml</span> at the repo root or an imported subfolder.</p>
           </div>
           <div className="row gap-2">
+            <select
+              aria-label="Sample bundle"
+              className="bundles-input"
+              style={{ minWidth: 210 }}
+              value={selectedSampleBundleSlug}
+              onChange={(event) => setSelectedSampleBundleSlug(event.target.value)}
+            >
+              {SAMPLE_BUNDLES.map((bundle) => (
+                <option key={bundle.slug} value={bundle.slug}>{bundle.name}</option>
+              ))}
+            </select>
             <Button onClick={handleDownload} disabled={isDownloading}>
-              {isDownloading ? "Downloading..." : "Download example"}
+              {isDownloading ? "Downloading..." : "Download sample"}
             </Button>
             <Button variant="primary" onClick={() => navigate("/bundles?import=1")}>Import from GitHub</Button>
           </div>
         </header>
+
+        {!showImportIntent ? <p className="muted t-sm" style={{ marginTop: -8, marginBottom: 12 }}>{selectedSampleBundle.description}</p> : null}
 
         {downloadError ? <ErrorState title="Download failed" description={downloadError} /> : null}
 
@@ -297,7 +336,7 @@ export function BundlesPage() {
                 ))}
               </ol>
               <p className="cap" style={{ marginTop: 12 }}>
-                New here? Download the example bundle, customize it locally, then push it to a GitHub repo before importing.
+                New here? Choose a sample bundle from the download menu, customize it locally, then push it to a GitHub repo before importing.
               </p>
             </section>
 

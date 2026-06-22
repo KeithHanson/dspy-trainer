@@ -54,7 +54,7 @@ If MLflow trace or run requests time out under load, increase `MLFLOW_WEB_WORKER
 
 ### 4. Your First Eval
 
-1. **Download** the sample bundle from the Bundles page
+1. **Download** a sample bundle from the Bundles page dropdown
 2. **Push** it to a GitHub repository
 3. **Import** the repository into DSPy Trainer
 4. **Create** an LM Profile for your model
@@ -208,7 +208,13 @@ For current stack operations and service expectations, see [`docs/COMPOSE_RUNBOO
 
 ### Minimum Required Files
 
-The downloadable example bundle included with DSPy Trainer is a simple `r`-counting agent so operators can validate the import and eval flow with predictable output.
+DSPy Trainer ships with multiple downloadable sample bundles, including:
+
+- a deterministic `r`-counting agent
+- an IT ticket triage agent with an LLM-as-judge metric
+- an event extraction agent inspired by the DSPy website example
+
+These samples are exposed from the Bundles page download dropdown so operators can validate the import and eval flow with different bundle patterns.
 
 Required files at the selected bundle root:
 
@@ -303,9 +309,13 @@ cd your-bundle/
 python run_agent.py ...
 ```
 
-`run_agent.py` is not required by DSPy Trainer. The sample bundle includes it as a convenience script only.
+`run_agent.py` is not required by DSPy Trainer. The sample bundles include it as a convenience script only.
 
-**Example**: See [`backend/sample_bundles/example-bundle/`](backend/sample_bundles/example-bundle/)
+**Examples**:
+
+- [`backend/sample_bundles/example-bundle/`](backend/sample_bundles/example-bundle/)
+- [`backend/sample_bundles/it-ticket-triage-bundle/`](backend/sample_bundles/it-ticket-triage-bundle/)
+- [`backend/sample_bundles/event-extraction-bundle/`](backend/sample_bundles/event-extraction-bundle/)
 
 ---
 
@@ -603,7 +613,8 @@ If you change backend runtime behavior that affects running containers, rebuild 
 The backend exposes a comprehensive REST API. Key endpoints:
 
 **Bundles:**
-- `GET /samples/module-bundle` - Download the reference sample bundle zip
+- `GET /samples/module-bundles` - List downloadable sample bundles
+- `GET /samples/module-bundle` - Download a sample bundle zip, optionally with `?sample=<slug>`
 - `POST /modules/import` - Import GitHub bundle
 - `POST /modules/{id}/validate` - Validate bundle contract
 - `POST /modules/{id}/smoke-test` - Run a one-off bundle smoke test

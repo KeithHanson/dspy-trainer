@@ -790,13 +790,18 @@ def test_smoke_test_rerun_overwrites_status(monkeypatch):
         assert diagnostics["diagnostics"][0]["code"] == "bundle_eval_completed"
 
 
-def test_sample_bundle_download(monkeypatch):
+def test_sample_bundle_catalog_and_download(monkeypatch):
     _patch_services(monkeypatch)
     with TestClient(main_mod.app) as client:
+        catalog = client.get("/samples/module-bundles")
+        assert catalog.status_code == 200
+        payload = catalog.json()
+        assert [item["slug"] for item in payload] == ["r-counter", "it-ticket-triage", "event-extraction"]
+
         response = client.get("/samples/module-bundle")
         assert response.status_code == 200
         assert response.headers["content-type"] == "application/zip"
-        assert "attachment; filename=\"example-bundle.zip\"" in response.headers["content-disposition"]
+        assert "attachment; filename=\"r-counter.zip\"" in response.headers["content-disposition"]
         assert len(response.content) > 0
         archive = zipfile.ZipFile(io.BytesIO(response.content))
         names = set(archive.namelist())
@@ -806,6 +811,20 @@ def test_sample_bundle_download(monkeypatch):
     assert "example-bundle/bundle.toml" in names
     assert "example-bundle/README.md" in names
     assert "example-bundle/run_agent.py" in names
+
+
+def test_specific_sample_bundle_download(monkeypatch):
+    _patch_services(monkeypatch)
+    with TestClient(main_mod.app) as client:
+        response = client.get("/samples/module-bundle?sample=event-extraction")
+        assert response.status_code == 200
+        assert "attachment; filename=\"event-extraction.zip\"" in response.headers["content-disposition"]
+        archive = zipfile.ZipFile(io.BytesIO(response.content))
+        names = set(archive.namelist())
+
+    assert "event-extraction-bundle/module.py" in names
+    assert "event-extraction-bundle/metric.py" in names
+    assert "event-extraction-bundle/bundle.toml" in names
 
 
 def test_bundle_endpoint_crud_and_key_rotation(monkeypatch):

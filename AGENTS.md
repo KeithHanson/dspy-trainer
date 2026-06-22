@@ -11,7 +11,7 @@ This section MUST remain up to date after you complete a task.
 - `README.md`: Project overview and high-level goals.
 - `.env.sample`: Source of truth for required environment variables.
 - `docs/COMPOSE_RUNBOOK.md`: Current compose bootstrap, health checks, and day-2 operations.
-- `backend/sample_bundles/example-bundle/`: Downloadable reference bundle exposed in the UI.
+- `backend/sample_bundles/`: Downloadable reference bundles exposed in the UI.
 
 ## Using Serena tools and Exploring the code base
 

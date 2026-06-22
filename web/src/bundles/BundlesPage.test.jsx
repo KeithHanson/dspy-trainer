@@ -19,8 +19,12 @@ describe("BundlesPage", () => {
   it("downloads the example bundle starter", async () => {
     const blob = new Blob(["zip"], { type: "application/zip" });
     const fetchMock = vi.fn((url) => {
-      if (String(url).endsWith("/samples/module-bundle")) {
-        return Promise.resolve({ ok: true, blob: vi.fn().mockResolvedValue(blob) });
+      if (String(url).includes("/samples/module-bundle?sample=it-ticket-triage")) {
+        return Promise.resolve({
+          ok: true,
+          headers: { get: vi.fn().mockReturnValue('attachment; filename="it-ticket-triage.zip"') },
+          blob: vi.fn().mockResolvedValue(blob),
+        });
       }
       if (String(url).includes("/agent-run-plans?")) {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
@@ -44,9 +48,10 @@ describe("BundlesPage", () => {
 
     renderBundlesApp();
 
-    await userEvent.click(screen.getByRole("button", { name: "Download example" }));
+    await userEvent.selectOptions(screen.getByLabelText("Sample bundle"), "it-ticket-triage");
+    await userEvent.click(screen.getByRole("button", { name: "Download sample" }));
 
-    expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/samples\/module-bundle$/), { method: "GET" });
+    expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/samples\/module-bundle\?sample=it-ticket-triage$/), { method: "GET" });
     expect(urlMock).toHaveBeenCalledTimes(1);
     expect(anchorClick).toHaveBeenCalledTimes(1);
     expect(revokeMock).toHaveBeenCalledWith("blob:test");
