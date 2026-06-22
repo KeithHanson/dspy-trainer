@@ -8,6 +8,7 @@ from app.validator import validate_bundle
 
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "module_bundles"
+SAMPLE_BUNDLE = Path(__file__).resolve().parents[1] / "sample_bundles" / "example-bundle"
 
 
 def _diag_codes(report) -> set[str]:
@@ -42,6 +43,34 @@ def test_validator_accepts_valid_bundle():
         "label_template": {"expected": ""},
     }
     assert report.metadata["optimization"] == {"target_output_fields": None}
+
+
+def test_validator_accepts_downloadable_sample_bundle():
+    report = validate_bundle(str(SAMPLE_BUNDLE))
+    assert report.passed is True
+    assert report.diagnostics == []
+    assert report.metadata["evaluation_contract"] == {
+        "input_fields": [
+            {
+                "key": "message",
+                "label": "Message",
+                "description": None,
+                "required": True,
+                "multiline": True,
+            }
+        ],
+        "label_fields": [
+            {
+                "key": "expected_r_count",
+                "label": "Expected r/R count",
+                "description": None,
+                "required": True,
+                "multiline": False,
+            }
+        ],
+        "input_template": {"message": ""},
+        "label_template": {"expected_r_count": ""},
+    }
 
 
 def test_validator_accepts_optimization_target_output_fields(tmp_path):

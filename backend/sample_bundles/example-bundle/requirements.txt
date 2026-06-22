@@ -1,2 +1,1 @@
-boto
-python-dotenv
+dspy-ai>=2.5,<3.0

@@ -205,6 +205,8 @@ For current stack operations and service expectations, see [`docs/COMPOSE_RUNBOO
 
 ### Minimum Required Files
 
+The downloadable example bundle included with DSPy Trainer is a simple `r`-counting agent so operators can validate the import and eval flow with predictable output.
+
 **`module.py`**
 ```python
 import dspy

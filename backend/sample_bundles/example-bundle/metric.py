@@ -1,48 +1,19 @@
-import dspy
-
-
-class JudgeSignature(dspy.Signature):
-    """Evaluate agent output against label-provided judge instructions."""
-
-    question = dspy.InputField()
-    judge_instructions = dspy.InputField()
-    predicted_category = dspy.InputField()
-    predicted_priority = dspy.InputField()
-    predicted_reply = dspy.InputField()
-
-    score = dspy.OutputField(desc="Float 0.0 to 1.0")
-    rationale = dspy.OutputField(desc="One short sentence")
-    flags_csv = dspy.OutputField(desc="Comma-separated failure flags, or none")
-
-
 def judge_metric(example, prediction, trace=None):
-    judge_instructions = example.label["judge_instructions"].strip()
-    question = example.question
-    category = prediction.category.strip().lower()
-    priority = prediction.priority.strip().lower()
-    reply = prediction.reply.strip()
-
-    judge = dspy.Predict(JudgeSignature)
-    verdict = judge(
-        question=question,
-        judge_instructions=judge_instructions,
-        predicted_category=category,
-        predicted_priority=priority,
-        predicted_reply=reply,
-    )
-
-    score = max(0.0, min(1.0, float(verdict.score)))
-    flags_raw = verdict.flags_csv.strip()
-    failed_flags = [] if flags_raw.lower() in {"", "none", "n/a", "na"} else [item.strip() for item in flags_raw.split(",") if item.strip()]
+    expected = int(example.label["expected_r_count"])
+    actual = int(getattr(prediction, "r_count", 0))
+    passed = actual == expected
 
     return {
-        "score": score,
-        "rationale": verdict.rationale.strip(),
-        "flags": failed_flags,
+        "score": 1.0 if passed else 0.0,
+        "rationale": (
+            f"Count matched expected value {expected}."
+            if passed
+            else f"Expected {expected} r/R characters but got {actual}."
+        ),
+        "flags": [] if passed else ["wrong_r_count"],
         "raw_response": {
-            "judge_instructions": judge_instructions,
-            "predicted_category": category,
-            "predicted_priority": priority,
-            "predicted_reply": reply,
+            "message": example.message,
+            "expected_r_count": expected,
+            "actual_r_count": actual,
         },
     }

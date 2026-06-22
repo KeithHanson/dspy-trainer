@@ -1,5 +1,7 @@
+import io
 import json
 import sys
+import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -796,6 +798,14 @@ def test_sample_bundle_download(monkeypatch):
         assert response.headers["content-type"] == "application/zip"
         assert "attachment; filename=\"example-bundle.zip\"" in response.headers["content-disposition"]
         assert len(response.content) > 0
+        archive = zipfile.ZipFile(io.BytesIO(response.content))
+        names = set(archive.namelist())
+
+    assert "example-bundle/module.py" in names
+    assert "example-bundle/metric.py" in names
+    assert "example-bundle/bundle.toml" in names
+    assert "example-bundle/README.md" in names
+    assert "example-bundle/run_agent.py" in names
 
 
 def test_bundle_endpoint_crud_and_key_rotation(monkeypatch):

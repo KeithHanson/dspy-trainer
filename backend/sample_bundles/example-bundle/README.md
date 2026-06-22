@@ -1,6 +1,9 @@
 # Example DSPy Bundle
 
-This sample bundle includes the minimum required files:
+This downloadable sample bundle demonstrates a tiny DSPy agent that counts how
+many `r` or `R` characters appear in any message.
+
+It includes the minimum required files:
 
 - `module.py`
 - `metric.py`
@@ -8,34 +11,33 @@ This sample bundle includes the minimum required files:
 - `requirements.txt`
 - `run_agent.py`
 
-Use it as a baseline, update the signature and metric contract for your use case,
-then push it to GitHub and import the repo in the web app for validation.
+Use it as a baseline, then replace the signature, module logic, and metric with
+your own task before pushing the bundle to GitHub and importing it in the app.
 
 ## Local feedback loop
 
-Before you evaluate or optimize, you can run the sample agent locally from the command line:
+Run the sample agent locally:
 
 ```bash
-python run_agent.py \
-  --question "Customer says their refund never arrived and they already emailed twice." \
-  --model openai/gpt-4o-mini
+python run_agent.py --message "RIVER ROAD RR"
 ```
 
-The script prints the raw prediction result returned by the program. For the sample bundle that will usually look like:
+Expected output:
 
 ```json
 {
-  "category": "billing",
-  "priority": "high",
-  "reply": "..."
+  "r_count": 5
 }
 ```
 
-You can also set credentials through environment variables instead of flags:
+The included metric expects evaluation rows shaped like this:
 
-- `DSPY_MODEL` or `OPENAI_MODEL`
-- `DSPY_API_BASE` or `OPENAI_API_BASE`
-- `DSPY_API_KEY` or `OPENAI_API_KEY`
+```json
+{
+  "input": {"message": "strawberry"},
+  "label": {"expected_r_count": 3}
+}
+```
 
 ## Optional system dependency commands
 
