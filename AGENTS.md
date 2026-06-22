@@ -10,6 +10,8 @@ This section MUST remain up to date after you complete a task.
 - `.beads/`: Local beads issue database, hooks, and interaction history.
 - `README.md`: Project overview and high-level goals.
 - `.env.sample`: Source of truth for required environment variables.
+- `docs/COMPOSE_RUNBOOK.md`: Current compose bootstrap, health checks, and day-2 operations.
+- `backend/sample_bundles/example-bundle/`: Downloadable reference bundle exposed in the UI.
 
 ## Using Serena tools and Exploring the code base
 
@@ -17,7 +19,7 @@ Serena is an extremely helpful suite of tools for working with code.
 
 It provides several other tools that should aid you when getting up to speed on the codebase or when completing a feature.
 
-Start out by running the tool initial_instructions and onboarding. 
+If this is your first time in the project, start with `serena_onboarding`, then read relevant memories before exploring code. On later visits, prefer Serena memories plus Serena LSP/navigation tools before broad raw searches.
 
 ### Serena Memories
 
@@ -288,7 +290,7 @@ Note: `bd sync` is known broken in this repo. Do not run it. Use available `bd` 
 - ❌ Do NOT use external issue trackers
 - ❌ Do NOT duplicate tracking systems
 
-For more details, see README.md and docs/QUICKSTART.md.
+For more details, see `README.md` and `docs/COMPOSE_RUNBOOK.md`.
 
 ## Landing the Plane (Session Completion)
 

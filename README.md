@@ -75,9 +75,11 @@ A **bundle** is a GitHub repository (or subfolder) containing your DSPy program:
 ```
 my-bundle/
 ├── module.py          # DSPy program with build_program()
-├── metric.py          # Judge function with judge_metric(example, prediction)
+├── metric.py          # Judge function with judge_metric(example, prediction, trace=None)
 ├── bundle.toml        # Metadata and configuration
-└── requirements.txt   # Optional: Python dependencies
+├── requirements.txt   # Optional: Python dependencies
+├── program.json       # Optional optimized program state referenced by bundle.toml
+└── run_agent.py       # Optional local helper script for manual testing
 ```
 
 **Key points:**
@@ -85,6 +87,7 @@ my-bundle/
 - Validated before first run
 - Can declare optimized program state for loading
 - Can optionally narrow optimization targets via `optimization.target_output_fields`
+- Can optionally declare system package install commands via `runtime.system_dependency_commands`
 
 ### 📊 Dataset
 
@@ -207,6 +210,18 @@ For current stack operations and service expectations, see [`docs/COMPOSE_RUNBOO
 
 The downloadable example bundle included with DSPy Trainer is a simple `r`-counting agent so operators can validate the import and eval flow with predictable output.
 
+Required files at the selected bundle root:
+
+- `module.py`
+- `metric.py`
+- `bundle.toml`
+
+Optional files commonly used by bundles:
+
+- `requirements.txt`
+- `program.json` or another file referenced by `optimized_program_state`
+- `run_agent.py`
+
 **`module.py`**
 ```python
 import dspy
@@ -226,20 +241,32 @@ def build_program():
     return YourProgram()
 ```
 
+`module.py` must satisfy the validator/runtime contract:
+
+- Define at least one DSPy `Signature`
+- Define at least one `dspy.Module` subclass
+- Export top-level `build_program()`
+
 **`metric.py`**
 ```python
 def judge_metric(example, prediction, trace=None):
-    # Your scoring logic here. Labels can contain judge-side guidance for an LLM judge.
-    instructions = example.label["judge_instructions"]
-    score = 1.0 if instructions and prediction.answer else 0.0
+    expected = example.label["expected"]
+    matched = prediction.answer == expected
     
     return {
-        "score": score,
-        "rationale": "Match" if score > 0 else "Mismatch",
-        "flags": [],
-        "raw_response": {}
+        "score": 1.0 if matched else 0.0,
+        "rationale": "exact_match" if matched else "mismatch",
+        "flags": [] if matched else ["answer_mismatch"],
+        "raw_response": {"expected": expected, "got": prediction.answer}
     }
 ```
+
+`metric.py` contract:
+
+- Must export top-level `judge_metric(example, prediction)`
+- A third optional `trace=None` parameter is allowed for compatibility
+- Runtime currently requires the exact return keys: `score`, `rationale`, `flags`, `raw_response`
+- `score` must be numeric, `rationale` must be a string, and `flags` must be `list[str]`
 
 **`bundle.toml`**
 ```toml
@@ -254,20 +281,29 @@ fields = [{ key = "question", label = "Question", required = true, multiline = t
 [evaluation.label]
 fields = [{ key = "expected", label = "Expected", required = true, multiline = true }]
 
+[runtime]
+system_dependency_commands = []
+
 [optimization]
 target_output_fields = ["answer"]
 ```
 
 `optimization.target_output_fields` is optional. When provided, DSPy Trainer uses only those predictor output fields as optimization targets instead of reusing every key present in prior prediction payloads. This is useful for bundles whose predictions include debug traces or other bulky internal fields that should still be judged during evals but should not be optimized directly.
 
+Other supported `bundle.toml` fields:
+
+- `optimized_program_state = "program.json"` loads a saved program state before eval/invoke/optimization
+- `runtime.system_dependency_commands = ["..."]` runs shell commands before `requirements.txt` installation
+- `evaluation.input.fields` and `evaluation.label.fields` define the dataset contract used by the UI and API
+
 ### Testing Locally
 
 ```bash
 cd your-bundle/
-python run_agent.py --question "Your test question here"
+python run_agent.py ...
 ```
 
-The sample bundle includes `run_agent.py` for local development. Copy it to your bundle and customize as needed.
+`run_agent.py` is not required by DSPy Trainer. The sample bundle includes it as a convenience script only.
 
 **Example**: See [`backend/sample_bundles/example-bundle/`](backend/sample_bundles/example-bundle/)
 
@@ -279,8 +315,9 @@ The sample bundle includes `run_agent.py` for local development. Copy it to your
 
 When you import a bundle, DSPy Trainer:
 
-- ✅ Verifies `module.py` has `build_program()`
-- ✅ Verifies `metric.py` has `judge_metric(example, prediction)`
+- ✅ Verifies the bundle root contains `module.py`, `metric.py`, and `bundle.toml`
+- ✅ Verifies `module.py` defines at least one DSPy `Signature`, a `dspy.Module` subclass, and `build_program()`
+- ✅ Verifies `metric.py` defines `judge_metric(example, prediction)`
 - ✅ Checks `bundle.toml` structure
 - ✅ Validates required fields
 - ✅ Tracks Git commit SHA for provenance
@@ -293,7 +330,7 @@ When you run an eval plan:
 2. Installs `requirements.txt` if present (cached)
 3. Builds program via `build_program()`
 4. Runs program on each dataset item
-5. Calls `judge_metric()` with prediction
+5. Calls `judge_metric()` with the built example and prediction
 6. Records score, rationale, flags, and raw outputs
 7. Updates MLflow with correlated telemetry
 
@@ -334,6 +371,15 @@ Optimization writeback:
 
 ### Bundle Hooks
 
+Supported bundle hooks and override points:
+
+**Required in `module.py`:**
+
+```python
+def build_program():
+    return YourProgram()
+```
+
 **Optional in `module.py`:**
 
 ```python
@@ -341,6 +387,25 @@ def build_lm():
     """Override LM construction if bundle needs custom LM setup"""
     return dspy.LM(model="...", api_key="...")
 ```
+
+Notes:
+
+- If `build_lm()` exists, DSPy Trainer prefers it over any selected LM Profile for eval/invoke/optimization execution.
+- `build_lm()` must not require positional arguments.
+
+**Optional on the built program instance for managed endpoint streaming:**
+
+```python
+class YourProgram(dspy.Module):
+    def emit(self, question: str, emit):
+        emit({"chunk": 1, "text": question[:2]})
+        return dspy.Prediction(answer=question.upper())
+```
+
+Notes:
+
+- Required only for `POST /bundle-endpoints/{id}/stream`
+- The method must accept an `emit` callback parameter and return the final prediction payload
 
 **Optional on program instance:**
 
@@ -354,6 +419,12 @@ class YourProgram(dspy.Module):
         """Load optimized state from bundle.toml"""
         self.predictor.demos = state["demos"]
 ```
+
+Notes:
+
+- If `bundle.toml` declares `optimized_program_state`, the built program must implement `load_state(state)`.
+- Optimization writeback persists `program.dump_state()` when available. If `dump_state()` is absent, the saved state file will be an empty JSON object.
+- Optimization also assumes `program.named_predictors()` exposes predictor output fields.
 
 ### Optimization Strategies
 
@@ -492,13 +563,50 @@ Managed bundle endpoints do not execute inside the backend container. The backen
 
 ---
 
+## Developer Process
+
+This repository uses `bd` (beads) for task tracking.
+
+1. Check available work with `bd ready --json`
+2. Claim the bead before editing code
+3. Make the smallest correct change
+4. Add or update tests for behavior changes
+5. Run the relevant quality gates
+6. Commit and push before ending the session
+
+Useful verification commands:
+
+```bash
+# backend
+python -m pytest backend/tests
+
+# targeted backend tests
+python -m pytest backend/tests/test_bundle_validator.py backend/tests/test_modules_api.py
+
+# frontend
+cd web
+npm test
+npm run build
+
+# compose health
+docker compose ps
+curl -fsS http://localhost:8000/ready
+curl -fsS http://localhost:3000/health
+```
+
+If you change backend runtime behavior that affects running containers, rebuild or recreate the affected services before handoff.
+
+---
+
 ## API Documentation
 
 The backend exposes a comprehensive REST API. Key endpoints:
 
 **Bundles:**
+- `GET /samples/module-bundle` - Download the reference sample bundle zip
 - `POST /modules/import` - Import GitHub bundle
 - `POST /modules/{id}/validate` - Validate bundle contract
+- `POST /modules/{id}/smoke-test` - Run a one-off bundle smoke test
 - `GET /modules/{id}/sync-status` - Check Git sync state
 - `POST /modules/{id}/sync` - Pull latest from GitHub
 - `GET /modules/{id}/endpoints` - List managed bundle endpoints
@@ -512,11 +620,12 @@ The backend exposes a comprehensive REST API. Key endpoints:
 **Datasets:**
 - `POST /evaluation-datasets` - Create dataset
 - `GET /evaluation-datasets` - List datasets
-- `PATCH /evaluation-datasets/{id}/items` - Update dataset items
+- `PATCH /evaluation-datasets/{id}` - Update dataset items and metadata
 
 **Evaluation:**
 - `POST /evaluation-plans` - Create reusable eval plan
-- `POST /evaluation-plans/{id}/run` - Launch eval from plan
+- `POST /agent-run-plans` - Create an agent run plan
+- `POST /agent-run-plans/{id}/enqueue` - Launch a created agent run plan
 - `GET /agent-run-plans/{id}` - Get run status/results
 
 **Optimization:**
