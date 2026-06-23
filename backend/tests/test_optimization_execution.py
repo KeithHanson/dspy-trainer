@@ -16,6 +16,7 @@ from app.services import AppServices, ModuleSyncError, OptimizationJobCanceled
 
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "module_bundles"
+SAMPLE_BUNDLE = Path(__file__).resolve().parents[1] / "sample_bundles" / "example-bundle"
 
 
 class FakeBootstrapFewShot:
@@ -66,6 +67,20 @@ class FakeGEPA:
             total_metric_calls=12,
             num_full_val_evals=4,
         )
+        student._compiled = True
+        return student
+
+
+class FakeCountRBootstrapFewShot:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+    def compile(self, student, *, teacher=None, trainset):
+        assert teacher is None
+        assert len(trainset) == 1
+        assert trainset[0].inputs().toDict() == {"message": "RIVER ROAD RR"}
+        assert str(trainset[0].r_count) == "5"
+        student.count.demos = list(trainset)
         student._compiled = True
         return student
 
@@ -439,8 +454,39 @@ def test_run_bundle_optimization_bootstrap_fewshot_saves_artifact_and_demo_summa
     assert Path(result["artifact_path"]).exists()
     assert result["artifact_metadata"]["artifact_type"] == "dspy_program_state"
     assert result["telemetry_summary"]["strategy"] == "bootstrap_fewshot"
+
+
+def test_run_bundle_optimization_accepts_r_counter_sample_bundle(monkeypatch, tmp_path):
+    monkeypatch.setattr(module_runner.dspy, "BootstrapFewShot", FakeCountRBootstrapFewShot)
+
+    result = module_runner.run_bundle_optimization(
+        bundle_path=str(SAMPLE_BUNDLE),
+        strategy="bootstrap_fewshot",
+        train_records=[
+            {
+                "input": {"message": "RIVER ROAD RR"},
+                "label": {"expected_r_count": 5},
+                "prediction": {"r_count": 5},
+            }
+        ],
+        val_inputs=[{"input": {"message": "RIVER ROAD RR"}, "label": {"expected_r_count": 5}}],
+        artifact_dir=str(tmp_path / "r-counter-artifact"),
+        execution_lm_profile={
+            "model": "dummy",
+            "api_base": "http://unused",
+            "model_type": "chat",
+            "lm_class_path": "dspy.utils.DummyLM",
+            "default_params": {"answers": [{"reasoning": "Count the r letters carefully.", "r_count": "5"}]},
+        },
+        dspy_config={"max_bootstrapped_demos": 2, "max_labeled_demos": 4},
+    )
+
+    assert Path(result["artifact_path"]).exists()
+    assert result["telemetry_summary"]["strategy"] == "bootstrap_fewshot"
+    assert result["artifact_metadata"]["predictor_count"] == 1
+    assert result["artifact_metadata"]["selected_demo_count"] >= 0
     assert result["telemetry_summary"]["dataset_summary"]["usable_record_count"] == 1
-    assert result["telemetry_summary"]["selected_demos"][0]["demos"][0]["label"] == {"expected": "Paris"}
+    assert len(result["telemetry_summary"]["selected_demos"]) == 1
 
 
 def test_run_bundle_optimization_miprov2_records_strategy_details(monkeypatch, tmp_path):

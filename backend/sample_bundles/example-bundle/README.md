@@ -16,13 +16,15 @@ your own task before pushing the bundle to GitHub and importing it in the app.
 
 ## Local feedback loop
 
-Run the sample agent locally:
+Run the sample agent locally with a model that can follow simple counting instructions:
 
 ```bash
-python run_agent.py --message "RIVER ROAD RR"
+python run_agent.py \
+  --message "RIVER ROAD RR" \
+  --model openai/gpt-4o-mini
 ```
 
-Expected output:
+Expected output shape:
 
 ```json
 {
@@ -38,6 +40,8 @@ The included metric expects evaluation rows shaped like this:
   "label": {"expected_r_count": 3}
 }
 ```
+
+This sample is intentionally implemented with a DSPy predictor so you can use it for evals and optimization jobs, not only validation.
 
 ## Optional system dependency commands
 

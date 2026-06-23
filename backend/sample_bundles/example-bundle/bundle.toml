@@ -11,3 +11,6 @@ fields = [{ key = "message", label = "Message", required = true, multiline = tru
 
 [evaluation.label]
 fields = [{ key = "expected_r_count", label = "Expected r/R count", required = true, multiline = false }]
+
+[optimization]
+target_output_fields = ["r_count"]

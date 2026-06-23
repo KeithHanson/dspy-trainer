@@ -9,9 +9,12 @@ class CountRSignature(dspy.Signature):
 
 
 class CountRAgent(dspy.Module):
+    def __init__(self):
+        super().__init__()
+        self.count = dspy.ChainOfThought(CountRSignature)
+
     def forward(self, message: str):
-        total = sum(1 for char in str(message) if char.lower() == "r")
-        return dspy.Prediction(r_count=total)
+        return self.count(message=message)
 
 
 def build_program():
