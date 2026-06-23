@@ -3860,6 +3860,7 @@ class AppServices:
         log_lines = self._merge_process_log(existing_log, []).splitlines()
         pending_log_updates: Queue[str] = Queue()
         flush_stop = asyncio.Event()
+        flush_wakeup = asyncio.Event()
 
         def emit(message: str, *, persist: bool = True) -> None:
             if not message:
@@ -3868,6 +3869,7 @@ class AppServices:
             logger.info("[optimization:%s] %s", optimization_job_id, message)
             if persist:
                 pending_log_updates.put(message)
+                flush_wakeup.set()
 
         async def flush_process_log() -> None:
             while not flush_stop.is_set() or not pending_log_updates.empty():
@@ -3878,9 +3880,13 @@ class AppServices:
                     except Empty:
                         break
                 if additions:
+                    flush_wakeup.clear()
                     await self.append_optimization_process_log(optimization_job_id, additions)
                     continue
-                await asyncio.sleep(0.25)
+                flush_wakeup.clear()
+                if flush_stop.is_set() and pending_log_updates.empty():
+                    break
+                await flush_wakeup.wait()
 
         emit(f"worker_started_at={datetime.now(timezone.utc).isoformat()}", persist=False)
         emit(f"strategy={job.get('strategy') or 'unknown'}", persist=False)
@@ -4117,6 +4123,7 @@ class AppServices:
             if optimized_eval_run_plan_id:
                 emit(f"optimized_eval_score_pct={optimization_result['comparison_summary'].get('optimized_score_pct')}")
             flush_stop.set()
+            flush_wakeup.set()
             await flush_task
             now2 = datetime.now(timezone.utc)
             async with self.postgres_pool.acquire() as conn:
@@ -4160,6 +4167,7 @@ class AppServices:
             emit("status=canceled")
             emit(f"error={exc}")
             flush_stop.set()
+            flush_wakeup.set()
             await flush_task
             now3 = datetime.now(timezone.utc)
             async with self.postgres_pool.acquire() as conn:
@@ -4178,6 +4186,7 @@ class AppServices:
                 emit(line)
             emit("traceback_end")
             flush_stop.set()
+            flush_wakeup.set()
             await flush_task
             now3 = datetime.now(timezone.utc)
             async with self.postgres_pool.acquire() as conn:
