@@ -248,22 +248,20 @@ export function BundlesPage() {
   const { moduleId } = useParams();
   const [isDownloading, setIsDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState("");
-  const [selectedSampleBundleSlug, setSelectedSampleBundleSlug] = useState(SAMPLE_BUNDLES[0].slug);
   const showImportIntent = searchParams.get("import") === "1";
 
   const sampleUrl = useMemo(() => buildApiUrl("/samples/module-bundle"), []);
   const validateUrl = useMemo(() => buildApiUrl("/modules"), []);
-  const selectedSampleBundle = SAMPLE_BUNDLES.find((bundle) => bundle.slug === selectedSampleBundleSlug) || SAMPLE_BUNDLES[0];
 
   if (moduleId) {
     return <BundleDetailPage moduleId={moduleId} modulesUrl={validateUrl} onBack={() => navigate("/bundles")} />;
   }
 
-  const handleDownload = async () => {
+  const handleDownload = async (bundle) => {
     setIsDownloading(true);
     setDownloadError("");
     try {
-      const response = await fetch(`${sampleUrl}?sample=${encodeURIComponent(selectedSampleBundle.slug)}`, { method: "GET" });
+      const response = await fetch(`${sampleUrl}?sample=${encodeURIComponent(bundle.slug)}`, { method: "GET" });
       if (!response.ok) {
         throw new Error(`Sample download failed (${response.status})`);
       }
@@ -271,7 +269,7 @@ export function BundlesPage() {
       const objectUrl = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = objectUrl;
-      link.download = readDownloadFilename(response, `${selectedSampleBundle.slug}.zip`);
+      link.download = readDownloadFilename(response, `${bundle.slug}.zip`);
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -292,25 +290,29 @@ export function BundlesPage() {
             <p className="muted t-sm">GitHub-backed DSPy bundles with <span className="mono">module.py</span>, <span className="mono">metric.py</span>, and <span className="mono">bundle.toml</span> at the repo root or an imported subfolder.</p>
           </div>
           <div className="row gap-2">
-            <select
-              aria-label="Sample bundle"
-              className="bundles-input"
-              style={{ minWidth: 210 }}
-              value={selectedSampleBundleSlug}
-              onChange={(event) => setSelectedSampleBundleSlug(event.target.value)}
-            >
-              {SAMPLE_BUNDLES.map((bundle) => (
-                <option key={bundle.slug} value={bundle.slug}>{bundle.name}</option>
-              ))}
-            </select>
-            <Button onClick={handleDownload} disabled={isDownloading}>
-              {isDownloading ? "Downloading..." : "Download sample"}
-            </Button>
+            <details className="bundles-sample-menu">
+              <summary className="btn bundles-sample-menu-trigger">
+                <span>{isDownloading ? "Downloading..." : "Download sample"}</span>
+                <Icon name="chevD" size={14} />
+              </summary>
+              <div className="bundles-sample-menu-popover panel">
+                {SAMPLE_BUNDLES.map((bundle) => (
+                  <button
+                    key={bundle.slug}
+                    type="button"
+                    className="bundles-sample-menu-item"
+                    onClick={() => handleDownload(bundle)}
+                    disabled={isDownloading}
+                  >
+                    <strong>{bundle.name}</strong>
+                    <span>{bundle.description}</span>
+                  </button>
+                ))}
+              </div>
+            </details>
             <Button variant="primary" onClick={() => navigate("/bundles?import=1")}>Import from GitHub</Button>
           </div>
         </header>
-
-        {!showImportIntent ? <p className="muted t-sm" style={{ marginTop: -8, marginBottom: 12 }}>{selectedSampleBundle.description}</p> : null}
 
         {downloadError ? <ErrorState title="Download failed" description={downloadError} /> : null}
 

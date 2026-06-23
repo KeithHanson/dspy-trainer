@@ -48,8 +48,8 @@ describe("BundlesPage", () => {
 
     renderBundlesApp();
 
-    await userEvent.selectOptions(screen.getByLabelText("Sample bundle"), "it-ticket-triage");
-    await userEvent.click(screen.getByRole("button", { name: "Download sample" }));
+    await userEvent.click(screen.getByText("Download sample"));
+    await userEvent.click(screen.getByRole("button", { name: /IT ticket triage/i }));
 
     expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/samples\/module-bundle\?sample=it-ticket-triage$/), { method: "GET" });
     expect(urlMock).toHaveBeenCalledTimes(1);
