@@ -1733,6 +1733,8 @@ def test_materialize_optimized_bundle_updates_existing_checkout(tmp_path, monkey
     assert 'version = "2.0.0"' in bundle_toml
     assert 'optimized_program_state = "program.json"' in bundle_toml
     assert 'source_optimization_job_id = "opt-123"' in bundle_toml
+    assert any(call[0] == ["git", "add", "."] for call in git_calls)
+    assert not any(call[0] == ["git", "add", "bundle.toml"] for call in git_calls)
     assert any(call[0][0] == "git" and "commit" in call[0] and "-m" in call[0] for call in git_calls)
     assert any(call[0][:4] == ["git", "push", "origin", "optimization-opt"] for call in git_calls)
 

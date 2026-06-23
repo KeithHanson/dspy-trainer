@@ -1329,7 +1329,6 @@ class AppServices:
                 raise RuntimeError(
                     f"checkout is on branch '{current_branch.strip()}' but expected '{expected_branch.strip()}' for direct writeback"
                 )
-        await self._run_git_command(["git", "add", "bundle.toml"], cwd=checkout_path)
         await self._run_git_command(["git", "add", "."], cwd=checkout_path)
         await self._run_git_command(
             [
