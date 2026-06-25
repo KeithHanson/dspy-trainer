@@ -202,18 +202,22 @@ def test_stream_bundle_emits_chunks_and_final_payload(tmp_path):
 
 
 def test_capture_process_output_captures_named_dspy_logger():
+    root_logger = logging.getLogger()
     logger = logging.getLogger("dspy.teleprompt.gepa.gepa")
+    original_root_level = root_logger.level
     original_handlers = list(logger.handlers)
     original_propagate = logger.propagate
     original_level = logger.level
     logger.handlers = []
     logger.propagate = False
-    logger.setLevel(logging.INFO)
+    root_logger.setLevel(logging.WARNING)
+    logger.setLevel(logging.NOTSET)
     captured: list[str] = []
     try:
         with _capture_process_output(captured.append):
             logger.info("Iteration 44: Selected program 0 score: 0.7777777777777778")
     finally:
+        root_logger.setLevel(original_root_level)
         logger.handlers = original_handlers
         logger.propagate = original_propagate
         logger.setLevel(original_level)

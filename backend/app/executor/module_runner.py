@@ -109,13 +109,19 @@ def _capture_process_output(log_event: Callable[[str], None] | None):
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%Y/%m/%d %H:%M:%S"))
     root_logger = logging.getLogger()
     attached_loggers: list[logging.Logger] = [root_logger]
+    original_levels: dict[logging.Logger, int] = {root_logger: root_logger.level}
     root_logger.addHandler(handler)
+    if root_logger.getEffectiveLevel() > logging.INFO:
+        root_logger.setLevel(logging.INFO)
     for logger_name, logger_obj in logging.Logger.manager.loggerDict.items():
         if not isinstance(logger_obj, logging.Logger):
             continue
-        if logger_name.startswith("dspy"):
+        if logger_name.startswith(("dspy", "gepa")):
             logger_obj.addHandler(handler)
             attached_loggers.append(logger_obj)
+            original_levels[logger_obj] = logger_obj.level
+            if logger_obj.getEffectiveLevel() > logging.INFO:
+                logger_obj.setLevel(logging.INFO)
     try:
         with redirect_stdout(stdout_writer), redirect_stderr(stderr_writer):
             yield
@@ -125,6 +131,8 @@ def _capture_process_output(log_event: Callable[[str], None] | None):
                 logger_obj.removeHandler(handler)
             except Exception:
                 pass
+            if logger_obj in original_levels:
+                logger_obj.setLevel(original_levels[logger_obj])
         handler.flush()
         stdout_writer.finish()
         stderr_writer.finish()
