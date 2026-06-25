@@ -1,8 +1,7 @@
-from contextlib import asynccontextmanager
-from io import BytesIO
 import asyncio
 import json
-import os
+from contextlib import asynccontextmanager
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -12,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.config import get_settings
+from app.config import get_cors_origins_from_env, get_settings
 from app.executor import run_bundle_eval
 from app.services import AppServices, ModuleSyncError
 from app.validator import validate_bundle
@@ -29,11 +28,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="dspy-trainer-backend", lifespan=lifespan)
-raw_cors_origins = os.getenv(
-    "DSPY_TRAINER_CORS_ALLOW_ORIGINS",
-    "http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173",
-)
-cors_origins = [origin.strip() for origin in raw_cors_origins.split(",") if origin.strip()]
+cors_origins = get_cors_origins_from_env()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,

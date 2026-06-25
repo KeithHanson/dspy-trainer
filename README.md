@@ -43,6 +43,8 @@ docker compose up -d --remove-orphans
 
 If MLflow trace or run requests time out under load, increase `MLFLOW_WEB_WORKERS` in `.env` before restarting the stack.
 
+For non-local deployments, set `VITE_API_BASE_URL`, `VITE_MLFLOW_BASE_URL`, and `VITE_LITELLM_BASE_URL` in `.env` before rebuilding the web image. The backend automatically derives additional allowed CORS origins from those public URLs, and you can extend the allowlist further with `DSPY_TRAINER_CORS_ALLOW_ORIGINS`.
+
 ### 3. Access the Platform
 
 | Service | URL |
