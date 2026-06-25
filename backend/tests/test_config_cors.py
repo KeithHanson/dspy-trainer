@@ -20,3 +20,17 @@ def test_cors_origins_include_explicit_and_vite_public_origins_without_duplicate
         "https://agents.abatix.com:5001",
         "https://agents.abatix.com:4000",
     ]
+
+
+def test_cors_origins_derive_base_host_origin_from_http_service_urls(monkeypatch):
+    monkeypatch.delenv("DSPY_TRAINER_CORS_ALLOW_ORIGINS", raising=False)
+    monkeypatch.setenv("VITE_API_BASE_URL", "http://agents.abatix.com:8000/modules")
+    monkeypatch.setenv("VITE_MLFLOW_BASE_URL", "http://agents.abatix.com:5001")
+    monkeypatch.setenv("VITE_LITELLM_BASE_URL", "http://agents.abatix.com:4000")
+
+    origins = get_cors_origins_from_env()
+
+    assert "http://agents.abatix.com" in origins
+    assert "http://agents.abatix.com:8000" in origins
+    assert "http://agents.abatix.com:5001" in origins
+    assert "http://agents.abatix.com:4000" in origins

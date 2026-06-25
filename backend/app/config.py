@@ -61,29 +61,45 @@ def _normalize_origin(candidate: str) -> str:
     return value
 
 
+def _base_host_origin(candidate: str) -> str:
+    value = str(candidate or "").strip()
+    if not value:
+        return ""
+    parsed = urlparse(value)
+    if parsed.scheme and parsed.hostname:
+        return f"{parsed.scheme}://{parsed.hostname}"
+    return ""
+
+
 def get_cors_origins_from_values(
     cors_allow_origins: str,
     vite_api_base_url: str,
     vite_mlflow_base_url: str,
     vite_litellm_base_url: str,
 ) -> list[str]:
-        origins: list[str] = []
-        seen: set[str] = set()
+    origins: list[str] = []
+    seen: set[str] = set()
 
-        def add_origin(candidate: str) -> None:
-            origin = _normalize_origin(candidate)
-            if not origin:
-                return
-            if origin not in seen:
-                seen.add(origin)
-                origins.append(origin)
+    def add_origin(candidate: str) -> None:
+        origin = _normalize_origin(candidate)
+        if not origin:
+            return
+        if origin not in seen:
+            seen.add(origin)
+            origins.append(origin)
 
-        for origin in cors_allow_origins.split(","):
-            add_origin(origin)
-        add_origin(vite_api_base_url)
-        add_origin(vite_mlflow_base_url)
-        add_origin(vite_litellm_base_url)
-        return origins
+    def add_origin_with_base_host(candidate: str) -> None:
+        add_origin(candidate)
+        base_origin = _base_host_origin(candidate)
+        if base_origin:
+            add_origin(base_origin)
+
+    for origin in cors_allow_origins.split(","):
+        add_origin(origin)
+    add_origin_with_base_host(vite_api_base_url)
+    add_origin_with_base_host(vite_mlflow_base_url)
+    add_origin_with_base_host(vite_litellm_base_url)
+    return origins
 
 
 def get_cors_origins_from_env() -> list[str]:
