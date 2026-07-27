@@ -386,6 +386,9 @@ function SavedBundlesPanel({ modulesUrl }) {
   };
 
   const deleteBundle = async (bundleId) => {
+    if (!window.confirm("Are you sure you want to delete this module bundle? This action cannot be undone.")) {
+      return;
+    }
     const response = await fetch(`${modulesUrl}/${bundleId}`, { method: "DELETE" });
     if (!response.ok) {
       return;
@@ -776,6 +779,7 @@ function BundleDetailPage({ moduleId, modulesUrl, onBack }) {
           <div className="row gap-2">
             <Button variant="ghost" onClick={onBack}>Back</Button>
             <Button variant="danger" onClick={async () => {
+              if (!window.confirm("Are you sure you want to delete this module bundle? This action cannot be undone.")) return;
               const response = await fetch(`${modulesUrl}/${bundle.id}`, { method: "DELETE" });
               if (response.ok) navigate("/bundles");
             }}>Delete</Button>
