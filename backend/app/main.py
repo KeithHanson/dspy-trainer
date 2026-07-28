@@ -666,7 +666,7 @@ async def invoke_bundle_endpoint(endpoint_id: str, request: Request):
     await pubsub.subscribe(channel)
     try:
         await services.enqueue_endpoint_invocation(endpoint_id, payload, stream=False, invocation_id=invocation_id)
-        deadline = asyncio.get_running_loop().time() + 300.0
+        deadline = asyncio.get_running_loop().time() + 1800.0
         while asyncio.get_running_loop().time() < deadline:
             message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
             if message is None:
