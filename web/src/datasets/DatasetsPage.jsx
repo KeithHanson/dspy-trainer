@@ -5,11 +5,12 @@ import { Icon } from "../components/Icon";
 import { EmptyState } from "../components/states/EmptyState";
 import { ErrorState } from "../components/states/ErrorState";
 import { LoadingState } from "../components/states/LoadingState";
+import { normalizeApiBaseUrl } from "../api/base";
 
 const PROJECT_ID = "proj-1";
 
 function apiBaseUrl() {
-  return (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, "");
+  return normalizeApiBaseUrl();
 }
 
 function getBundleDisplayName(bundle) {

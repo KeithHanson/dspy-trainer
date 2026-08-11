@@ -1,3 +1,5 @@
+import { normalizeApiBaseUrl } from "../../api/base";
+
 function toArray(value) {
   return Array.isArray(value) ? value : [];
 }
@@ -158,7 +160,7 @@ export function mapDashboardOverview({ plans, modules, workers }) {
 }
 
 export function createLiveDashboardProvider(apiBase) {
-  const normalizedApiBase = (apiBase || "http://localhost:8000").replace(/\/$/, "");
+  const normalizedApiBase = normalizeApiBaseUrl(apiBase);
 
   return {
     async getOverview() {

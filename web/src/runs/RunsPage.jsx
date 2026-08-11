@@ -5,12 +5,13 @@ import { Icon } from "../components/Icon";
 import { EmptyState } from "../components/states/EmptyState";
 import { ErrorState } from "../components/states/ErrorState";
 import { LoadingState } from "../components/states/LoadingState";
+import { normalizeApiBaseUrl } from "../api/base";
 
 export function RunsPage() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const planId = searchParams.get("plan") || "";
-  const apiBase = useMemo(() => (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, ""), []);
+  const apiBase = useMemo(() => normalizeApiBaseUrl(), []);
   const [plans, setPlans] = useState([]);
   const [workersData, setWorkersData] = useState({ items: [], total_workers: 0, reported_workers: 0, available_workers: 0, busy_workers: 0 });
   const [runPlan, setRunPlan] = useState(null);
