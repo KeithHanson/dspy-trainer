@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import main as main_mod
-from app.services import ModuleSyncError, ReadinessStatus
+from app.services import EndpointUnavailableError, ModuleSyncError, ReadinessStatus
 
 
 STORE: dict[str, dict] = {}
@@ -342,6 +342,10 @@ async def fake_reconcile_endpoint_worker_assignments(self):
     return None
 
 
+async def fake_ensure_endpoint_ready_for_invocation(self, endpoint_id):
+    return {"endpoint_id": endpoint_id, "assigned_workers": 1, "ready_workers": 1, "status_counts": {"listening": 1}}
+
+
 async def fake_list_module_revisions(self, module_id):
     if module_id not in STORE:
         return []
@@ -463,6 +467,7 @@ def _patch_services(monkeypatch):
     monkeypatch.setattr(main_mod.AppServices, "authenticate_bundle_endpoint", fake_authenticate_bundle_endpoint)
     monkeypatch.setattr(main_mod.AppServices, "enqueue_endpoint_invocation", fake_enqueue_endpoint_invocation)
     monkeypatch.setattr(main_mod.AppServices, "reconcile_endpoint_worker_assignments", fake_reconcile_endpoint_worker_assignments)
+    monkeypatch.setattr(main_mod.AppServices, "ensure_endpoint_ready_for_invocation", fake_ensure_endpoint_ready_for_invocation)
 
 
 def test_module_import_and_status_flow(monkeypatch):
@@ -925,6 +930,110 @@ def test_bundle_endpoint_sync_and_stream_invocation(monkeypatch):
         assert '"chunk": 1' in body
         assert "event: final" in body
         assert '"done": true' in body
+
+
+def test_bundle_endpoint_invoke_returns_503_when_no_ready_workers(monkeypatch):
+    STORE.clear()
+    ENDPOINTS.clear()
+    _patch_services(monkeypatch)
+    STORE["mod-endpoint"] = {
+        "id": "mod-endpoint",
+        "status": "validated",
+        "validation_status": "passed",
+        "smoke_status": "passed",
+        "diagnostics": [],
+        "bundle_name": "agentic-chat",
+        "bundle_version": "0.1.0",
+        "source": "upload",
+        "source_ref": "/tmp/bundle",
+        "checkout_path": "/tmp/bundle",
+        "environment_entries": [],
+    }
+    ENDPOINTS["endpoint-1"] = {
+        "id": "endpoint-1",
+        "module_import_id": "mod-endpoint",
+        "pinned_worker_count": 1,
+        "name": "Customer stream",
+        "key_preview": "abc123",
+        "api_key": "secret-key",
+        "created_at": None,
+        "updated_at": None,
+    }
+
+    async def fake_no_ready_workers(self, endpoint_id):
+        raise EndpointUnavailableError(
+            "endpoint has no ready endpoint workers",
+            code="no_ready_workers",
+            routing_state={"endpoint_id": endpoint_id, "assigned_workers": 1, "ready_workers": 0, "status_counts": {"preparing": 1}},
+        )
+
+    monkeypatch.setattr(main_mod.AppServices, "ensure_endpoint_ready_for_invocation", fake_no_ready_workers)
+
+    with TestClient(main_mod.app) as client:
+        response = client.post(
+            "/bundle-endpoints/endpoint-1/invoke",
+            json={"question": "hello"},
+            headers={"Authorization": "Bearer secret-key"},
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": "endpoint has no ready endpoint workers",
+        "code": "no_ready_workers",
+        "routing_state": {"endpoint_id": "endpoint-1", "assigned_workers": 1, "ready_workers": 0, "status_counts": {"preparing": 1}},
+    }
+
+
+def test_bundle_endpoint_stream_returns_503_when_no_assigned_workers(monkeypatch):
+    STORE.clear()
+    ENDPOINTS.clear()
+    _patch_services(monkeypatch)
+    STORE["mod-endpoint"] = {
+        "id": "mod-endpoint",
+        "status": "validated",
+        "validation_status": "passed",
+        "smoke_status": "passed",
+        "diagnostics": [],
+        "bundle_name": "agentic-chat",
+        "bundle_version": "0.1.0",
+        "source": "upload",
+        "source_ref": "/tmp/bundle",
+        "checkout_path": "/tmp/bundle",
+        "environment_entries": [],
+    }
+    ENDPOINTS["endpoint-1"] = {
+        "id": "endpoint-1",
+        "module_import_id": "mod-endpoint",
+        "pinned_worker_count": 1,
+        "name": "Customer stream",
+        "key_preview": "abc123",
+        "api_key": "secret-key",
+        "created_at": None,
+        "updated_at": None,
+    }
+
+    async def fake_no_assigned_workers(self, endpoint_id):
+        raise EndpointUnavailableError(
+            "endpoint has no assigned endpoint workers",
+            code="no_assigned_workers",
+            routing_state={"endpoint_id": endpoint_id, "assigned_workers": 0, "ready_workers": 0, "status_counts": {}},
+        )
+
+    monkeypatch.setattr(main_mod.AppServices, "ensure_endpoint_ready_for_invocation", fake_no_assigned_workers)
+
+    with TestClient(main_mod.app) as client:
+        response = client.post(
+            "/bundle-endpoints/endpoint-1/stream",
+            json={"question": "hello"},
+            headers={"Authorization": "Bearer secret-key"},
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": "endpoint has no assigned endpoint workers",
+        "code": "no_assigned_workers",
+        "routing_state": {"endpoint_id": "endpoint-1", "assigned_workers": 0, "ready_workers": 0, "status_counts": {}},
+    }
 
 
 def test_endpoint_workers_listing(monkeypatch):
