@@ -40,8 +40,8 @@ services:
       MLFLOW_BACKEND_SCHEMA: mlflow
       MLFLOW_BACKEND_STORE_URI: postgresql+psycopg2://postgres:postgres@postgres:5432/dspy_trainer?options=-csearch_path%3Dmlflow
       MLFLOW_WEB_WORKERS: ${MLFLOW_WEB_WORKERS:-4}
-    ports:
-      - "5001:5000"
+      MLFLOW_STATIC_PREFIX: ${MLFLOW_STATIC_PREFIX:-/mlflow}
+      CADDY_HTTP_PORT: ${CADDY_HTTP_PORT:-8080}
     volumes:
       - ./ops/mlflow/start.sh:/opt/mlflow/start.sh:ro
       - mlflow_artifacts:/mlflow/artifacts
@@ -63,13 +63,13 @@ services:
       DSPY_TRAINER_QUEUE_NAME: dspy-trainer:jobs
       DSPY_TRAINER_MLFLOW_TRACKING_URI: http://mlflow:5000
       DSPY_TRAINER_TOTAL_ENDPOINT_WORKERS: ${DSPY_TRAINER_TOTAL_ENDPOINT_WORKERS:-2}
-      DSPY_TRAINER_CORS_ALLOW_ORIGINS: ${DSPY_TRAINER_CORS_ALLOW_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173}
+      DSPY_TRAINER_CORS_ALLOW_ORIGINS: ${DSPY_TRAINER_CORS_ALLOW_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080,http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173}
       DSPY_TRAINER_GITHUB_PAT: ${GITHUB_PAT:-}
       DSPY_TRAINER_GIT_COMMIT_NAME: ${GIT_COMMIT_NAME:-DSPy Trainer}
       DSPY_TRAINER_GIT_COMMIT_EMAIL: ${GIT_COMMIT_EMAIL:-dspy-trainer@local}
       DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY: ${DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY:-}
-      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
-      VITE_MLFLOW_BASE_URL: ${VITE_MLFLOW_BASE_URL:-http://localhost:5001}
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api}
+      VITE_MLFLOW_BASE_URL: ${VITE_MLFLOW_BASE_URL:-/mlflow}
       DSPY_TRAINER_BACKEND_HOST: 0.0.0.0
       DSPY_TRAINER_BACKEND_PORT: 8000
     depends_on:
@@ -79,8 +79,6 @@ services:
         condition: service_healthy
       mlflow:
         condition: service_healthy
-    ports:
-      - "8000:8000"
     volumes:
       - bundles_data:/tmp/dspy-trainer/bundles
       - checkouts_data:/tmp/dspy-trainer/checkouts
@@ -170,16 +168,35 @@ services:
       context: .
       dockerfile: web/Dockerfile
       args:
-        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
-        VITE_MLFLOW_BASE_URL: ${VITE_MLFLOW_BASE_URL:-http://localhost:5001}
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api}
+        VITE_MLFLOW_BASE_URL: ${VITE_MLFLOW_BASE_URL:-/mlflow}
     container_name: dspy-trainer-web
     depends_on:
       backend:
         condition: service_healthy
-    ports:
-      - "3000:80"
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://localhost/health >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: dspy-trainer-caddy
+    depends_on:
+      web:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+    ports:
+      - "${CADDY_HTTP_PORT:-8080}:80"
+    volumes:
+      - ./ops/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost/health"]
       interval: 15s
       timeout: 5s
       retries: 10

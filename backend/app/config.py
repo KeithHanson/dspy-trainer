@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     module_env_encryption_key: str = Field(default="")
 
     mlflow_tracking_uri: str = Field(default="http://localhost:5001")
-    cors_allow_origins: str = Field(default="http://localhost:5173,http://127.0.0.1:5173")
+    cors_allow_origins: str = Field(default="http://localhost:8080,http://127.0.0.1:8080,http://localhost:5173,http://127.0.0.1:5173")
 
     @field_validator("postgres_dsn")
     @classmethod
@@ -43,8 +43,8 @@ class Settings(BaseSettings):
     def cors_origins_list(self) -> list[str]:
         return get_cors_origins_from_values(
             cors_allow_origins=self.cors_allow_origins,
-            vite_api_base_url="http://localhost:8000",
-            vite_mlflow_base_url="http://localhost:5001",
+            vite_api_base_url=os.getenv("VITE_API_BASE_URL", "/api"),
+            vite_mlflow_base_url=os.getenv("VITE_MLFLOW_BASE_URL", "/mlflow"),
         )
 
 
@@ -55,7 +55,7 @@ def _normalize_origin(candidate: str) -> str:
     parsed = urlparse(value)
     if parsed.scheme and parsed.netloc:
         return f"{parsed.scheme}://{parsed.netloc}"
-    return value
+    return ""
 
 
 def _base_host_origin(candidate: str) -> str:
@@ -101,10 +101,10 @@ def get_cors_origins_from_env() -> list[str]:
     return get_cors_origins_from_values(
         cors_allow_origins=os.getenv(
             "DSPY_TRAINER_CORS_ALLOW_ORIGINS",
-            "http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173",
+            "http://localhost:8080,http://127.0.0.1:8080,http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173",
         ),
-        vite_api_base_url=os.getenv("VITE_API_BASE_URL", "http://localhost:8000"),
-        vite_mlflow_base_url=os.getenv("VITE_MLFLOW_BASE_URL", "http://localhost:5001"),
+        vite_api_base_url=os.getenv("VITE_API_BASE_URL", "/api"),
+        vite_mlflow_base_url=os.getenv("VITE_MLFLOW_BASE_URL", "/mlflow"),
     )
 
 

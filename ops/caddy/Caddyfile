@@ -1,0 +1,27 @@
+{
+	auto_https off
+}
+
+:80 {
+	encode zstd gzip
+
+	@mlflowNoSlash path /mlflow
+	redir @mlflowNoSlash /mlflow/ 308
+
+	handle /health {
+		respond "ok" 200
+	}
+
+	handle /api/* {
+		uri strip_prefix /api
+		reverse_proxy backend:8000
+	}
+
+	handle /mlflow/* {
+		reverse_proxy mlflow:5000
+	}
+
+	handle {
+		reverse_proxy web:80
+	}
+}
