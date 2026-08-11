@@ -17,10 +17,10 @@ pytest -q backend/tests/test_optimization_dataset_builders.py backend/tests/test
 From repo root:
 
 ```bash
-docker compose up -d --build backend worker
+docker compose up -d --build backend worker mlflow caddy
 ```
 
-This recreates backend/worker with your latest code and keeps services running in the background.
+This recreates the services most likely to change during the loop and keeps them running in the background. Include `mlflow` and `caddy` so proxy/path changes are picked up before you verify the UI.
 
 ## 3) Re-run the example eval script
 
@@ -36,9 +36,11 @@ Capture these values from output:
 
 ## 4) Verify in MLflow UI
 
-Open MLflow:
+Open MLflow through the local proxy:
 
-- `http://localhost:5001/#/experiments/1/evaluation-runs`
+- `http://localhost:${CADDY_HTTP_PORT:-8080}/mlflow/#/experiments/1/evaluation-runs`
+
+If you changed `CADDY_HTTP_PORT` in `.env`, use that port here so you exercise the same proxy entrypoint operators use.
 
 Check the newest run:
 

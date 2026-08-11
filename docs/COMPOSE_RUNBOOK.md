@@ -37,7 +37,7 @@ Named volumes:
 - `bundles_data` shared between `backend` and `worker` at `/tmp/dspy-trainer/bundles` for uploaded module bundles
 - `optimization_artifacts_data` shared between `backend` and `worker` at `/tmp/dspy-trainer/optimization_artifacts` so succeeded optimization artifacts can be materialized into new bundles
 
-MLflow concurrency can be tuned with `MLFLOW_WEB_WORKERS` in `.env` (default `4`). MLflow is started with `MLFLOW_STATIC_PREFIX` (default `/mlflow`) so its UI and assets load correctly behind the local reverse proxy.
+MLflow concurrency can be tuned with `MLFLOW_WEB_WORKERS` in `.env` (default `4`). MLflow is started with `MLFLOW_STATIC_PREFIX` (default `/mlflow`) so its UI and assets load correctly behind the local reverse proxy. Compose also forwards `CADDY_HTTP_PORT` into the MLflow container so its allowed-hosts list stays aligned if you move the proxy off the default `8080` port.
 
 ## Developer Bootstrap
 
@@ -129,11 +129,11 @@ Expected: all services show `running` and health-enabled services become `health
 ### Endpoint Checks from Host
 
 ```bash
-curl -fsS http://localhost:8080/health
-curl -fsS http://localhost:8080/api/health
-curl -fsS http://localhost:8080/api/ready
-curl -fsS http://localhost:8080/mlflow/
-curl -fsS http://localhost:8080/litellm/health
+curl -fsS "http://localhost:${CADDY_HTTP_PORT:-8080}/health"
+curl -fsS "http://localhost:${CADDY_HTTP_PORT:-8080}/api/health"
+curl -fsS "http://localhost:${CADDY_HTTP_PORT:-8080}/api/ready"
+curl -fsS "http://localhost:${CADDY_HTTP_PORT:-8080}/mlflow/"
+curl -fsS "http://localhost:${CADDY_HTTP_PORT:-8080}/litellm/health"
 ```
 
 ### Backend Dependency Checks from Container

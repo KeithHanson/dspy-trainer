@@ -43,7 +43,7 @@ docker compose up -d --remove-orphans
 
 If MLflow trace or run requests time out under load, increase `MLFLOW_WEB_WORKERS` in `.env` before restarting the stack.
 
-The default local Compose setup now routes operator/browser traffic through Caddy on `http://localhost:8080`. The web build defaults to relative proxy paths (`/api`, `/mlflow`, `/litellm`) so the UI, API, MLflow, and LiteLLM links stay on one origin. For non-local deployments, set `CADDY_HTTP_PORT` as needed and override `VITE_API_BASE_URL`, `VITE_MLFLOW_BASE_URL`, and `VITE_LITELLM_BASE_URL` in `.env` before rebuilding the web image. The backend automatically derives additional allowed CORS origins from absolute public URLs, and you can extend the allowlist further with `DSPY_TRAINER_CORS_ALLOW_ORIGINS`.
+The default local Compose setup now routes operator/browser traffic through Caddy on `http://localhost:8080`. The web build defaults to relative proxy paths (`/api`, `/mlflow`, `/litellm`) so the UI, API, MLflow, and LiteLLM links stay on one origin. For non-local deployments, set `CADDY_HTTP_PORT` as needed and override `VITE_API_BASE_URL`, `VITE_MLFLOW_BASE_URL`, and `VITE_LITELLM_BASE_URL` in `.env` before rebuilding the web image. Compose forwards `CADDY_HTTP_PORT` into the MLflow container so its allowed-hosts list matches the proxy port you expose. The backend automatically derives additional allowed CORS origins from absolute public URLs, and you can extend the allowlist further with `DSPY_TRAINER_CORS_ALLOW_ORIGINS`.
 
 ### 3. Access the Platform
 

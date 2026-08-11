@@ -41,6 +41,7 @@ services:
       MLFLOW_BACKEND_STORE_URI: postgresql+psycopg2://postgres:postgres@postgres:5432/dspy_trainer?options=-csearch_path%3Dmlflow
       MLFLOW_WEB_WORKERS: ${MLFLOW_WEB_WORKERS:-4}
       MLFLOW_STATIC_PREFIX: ${MLFLOW_STATIC_PREFIX:-/mlflow}
+      CADDY_HTTP_PORT: ${CADDY_HTTP_PORT:-8080}
     volumes:
       - ./ops/mlflow/start.sh:/opt/mlflow/start.sh:ro
       - mlflow_artifacts:/mlflow/artifacts
