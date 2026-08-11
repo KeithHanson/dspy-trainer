@@ -34,3 +34,12 @@ def test_cors_origins_derive_base_host_origin_from_http_service_urls(monkeypatch
     assert "http://agents.abatix.com:8000" in origins
     assert "http://agents.abatix.com:5001" in origins
     assert "http://agents.abatix.com:4000" in origins
+
+
+def test_cors_origins_ignore_relative_public_urls(monkeypatch):
+    monkeypatch.setenv("DSPY_TRAINER_CORS_ALLOW_ORIGINS", "http://localhost:8080")
+    monkeypatch.setenv("VITE_API_BASE_URL", "/api")
+    monkeypatch.setenv("VITE_MLFLOW_BASE_URL", "/mlflow")
+    monkeypatch.setenv("VITE_LITELLM_BASE_URL", "/litellm")
+
+    assert get_cors_origins_from_env() == ["http://localhost:8080"]

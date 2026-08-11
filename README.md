@@ -43,16 +43,19 @@ docker compose up -d --remove-orphans
 
 If MLflow trace or run requests time out under load, increase `MLFLOW_WEB_WORKERS` in `.env` before restarting the stack.
 
-For non-local deployments, set `VITE_API_BASE_URL`, `VITE_MLFLOW_BASE_URL`, and `VITE_LITELLM_BASE_URL` in `.env` before rebuilding the web image. The backend automatically derives additional allowed CORS origins from those public URLs, and you can extend the allowlist further with `DSPY_TRAINER_CORS_ALLOW_ORIGINS`.
+The default local Compose setup now routes operator/browser traffic through Caddy on `http://localhost:8080`. The web build defaults to relative proxy paths (`/api`, `/mlflow`, `/litellm`) so the UI, API, MLflow, and LiteLLM links stay on one origin. For non-local deployments, set `CADDY_HTTP_PORT` as needed and override `VITE_API_BASE_URL`, `VITE_MLFLOW_BASE_URL`, and `VITE_LITELLM_BASE_URL` in `.env` before rebuilding the web image. The backend automatically derives additional allowed CORS origins from absolute public URLs, and you can extend the allowlist further with `DSPY_TRAINER_CORS_ALLOW_ORIGINS`.
 
 ### 3. Access the Platform
 
-| Service | URL |
+| Surface | URL |
 |---------|-----|
-| **Web UI** | http://localhost:3000 |
-| **Backend API** | http://localhost:8000 |
-| **MLflow** | http://localhost:5001 |
-| **LiteLLM Proxy** | http://localhost:4000 |
+| **Web UI** | http://localhost:8080/ |
+| **Backend API** | http://localhost:8080/api/ |
+| **Backend API docs** | http://localhost:8080/api/docs |
+| **MLflow** | http://localhost:8080/mlflow/ |
+| **LiteLLM Proxy** | http://localhost:8080/litellm/ |
+
+Postgres (`5432`) and Redis (`6379`) remain published directly for local developer tooling. Browser/operator traffic should use the Caddy surface above.
 
 ### 4. Your First Eval
 
@@ -602,8 +605,9 @@ npm run build
 
 # compose health
 docker compose ps
-curl -fsS http://localhost:8000/ready
-curl -fsS http://localhost:3000/health
+curl -fsS http://localhost:8080/health
+curl -fsS http://localhost:8080/api/ready
+curl -fsS http://localhost:8080/mlflow/
 ```
 
 If you change backend runtime behavior that affects running containers, rebuild or recreate the affected services before handoff.
@@ -651,7 +655,7 @@ The backend exposes a comprehensive REST API. Key endpoints:
 - `GET /lm-profiles` - List profiles
 - `PATCH /lm-profiles/{id}` - Update profile
 
-**Interactive API docs:** http://localhost:8000/docs (when running)
+**Interactive API docs:** http://localhost:8080/api/docs (when running through the default local Caddy proxy)
 
 ---
 
@@ -724,7 +728,7 @@ A: Yes! LiteLLM supports 100+ providers. Just create an LM Profile with your pro
 A: Yes, for now. GitHub-first design enables commit provenance and collaborative workflows.
 
 **Q: Can I run this on a remote server?**  
-A: Yes. It's a Docker Compose stack, so adjust ports, DNS, and reverse proxying as needed. The current web shell is unauthenticated, so no Auth0 or hosted login setup is required.
+A: Yes. It's a Docker Compose stack with Caddy providing the default local reverse-proxy surface. Adjust ports, DNS, and proxy URLs as needed. The current web shell is unauthenticated, so no Auth0 or hosted login setup is required.
 
 **Q: How do I scale worker capacity?**  
 A: Increase worker replicas in `docker-compose.yml`:

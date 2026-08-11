@@ -7,17 +7,29 @@ References:
 
 Current shell note:
 - The local web shell is currently unauthenticated.
-- No Auth0, hosted login, or SSO bootstrap is required to access `http://localhost:3000`.
+- No Auth0, hosted login, or SSO bootstrap is required to access `http://localhost:8080`.
 
 ## Stack Services
 
+Operator/browser traffic goes through Caddy on `http://localhost:${CADDY_HTTP_PORT:-8080}` by default:
+- `/` → `web`
+- `/api/` → `backend`
+- `/mlflow/` → `mlflow`
+- `/litellm/` → `litellm-proxy`
+
+Direct host ports remain published only for local developer tooling where needed:
 - `postgres` (`5432`)
 - `redis` (`6379`)
-- `mlflow` (`5001`)
-- `litellm-proxy` (`4000`)
-- `backend` (`8000`)
-- `worker` (no host port)
-- `web` (`3000`)
+
+Internal Compose services:
+- `postgres`
+- `redis`
+- `mlflow`
+- `litellm-proxy`
+- `backend`
+- `worker`
+- `web`
+- `caddy`
 
 Named volumes:
 - `postgres_data` for PostgreSQL data
@@ -25,11 +37,13 @@ Named volumes:
 - `bundles_data` shared between `backend` and `worker` at `/tmp/dspy-trainer/bundles` for uploaded module bundles
 - `optimization_artifacts_data` shared between `backend` and `worker` at `/tmp/dspy-trainer/optimization_artifacts` so succeeded optimization artifacts can be materialized into new bundles
 
-MLflow concurrency can be tuned with `MLFLOW_WEB_WORKERS` in `.env` (default `4`).
+MLflow concurrency can be tuned with `MLFLOW_WEB_WORKERS` in `.env` (default `4`). MLflow is started with `MLFLOW_STATIC_PREFIX` (default `/mlflow`) so its UI and assets load correctly behind the local reverse proxy.
 
 ## Developer Bootstrap
 
 Before starting the stack, ensure `.env` contains `GITHUB_PAT` if you want to import, sync, or push GitHub-backed bundles. Backend and worker read that variable server-side; the web UI only reports whether GitHub access is configured. GitHub imports may target either the repo root or a configured bundle subfolder. Optimization writeback now pushes to an `optimization-<job-prefix>` branch for manual merge, so also set `GIT_COMMIT_NAME` and `GIT_COMMIT_EMAIL` (defaults are provided if omitted).
+
+The default local `.env.sample` now points the web build at relative proxy URLs (`/api`, `/mlflow`, `/litellm`) and exposes Caddy on `CADDY_HTTP_PORT=8080`. Override those values before rebuilding if you need a different host/port or absolute public URLs.
 
 LiteLLM setup note:
 - The repo does not ship a default upstream model configuration.
@@ -115,10 +129,11 @@ Expected: all services show `running` and health-enabled services become `health
 ### Endpoint Checks from Host
 
 ```bash
-curl -fsS http://localhost:8000/health
-curl -fsS http://localhost:8000/ready
-curl -fsS http://localhost:3000/health
-curl -fsS -H "Authorization: Bearer ${LITELLM_MASTER_KEY:-sk-local-dev-master-key}" http://localhost:4000/health
+curl -fsS http://localhost:8080/health
+curl -fsS http://localhost:8080/api/health
+curl -fsS http://localhost:8080/api/ready
+curl -fsS http://localhost:8080/mlflow/
+curl -fsS http://localhost:8080/litellm/health
 ```
 
 ### Backend Dependency Checks from Container
@@ -177,7 +192,7 @@ docker compose up -d --force-recreate litellm-proxy
 ### Backend Not Ready
 
 Symptoms:
-- `curl -fsS http://localhost:8000/ready` fails.
+- `curl -fsS http://localhost:8080/api/ready` fails.
 - `docker compose ps` shows `backend` as `starting` or `unhealthy`.
 
 Checks:
