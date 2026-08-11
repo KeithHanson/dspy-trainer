@@ -49,7 +49,7 @@ class _FakeConn:
                     "lm_model_type": profile["model_type"],
                     "lm_default_params": profile["default_params"],
                     "lm_class_path": profile["lm_class_path"],
-                    "lm_virtual_key": profile["virtual_key"],
+                    "lm_api_key_encrypted": profile["api_key_encrypted"],
                 }
             )
         if normalized.startswith("select id, status from agent_run_tasks where id = $1"):
@@ -162,11 +162,11 @@ def _build_state():
         "profile": {
             "id": "lm-1",
             "model": "openai/gpt-4o-mini",
-            "api_base": "http://litellm:4000",
+            "api_base": "https://api.openai.com",
             "model_type": "responses",
             "default_params": json.dumps({}),
             "lm_class_path": None,
-            "virtual_key": "vk",
+            "api_key_encrypted": None,
         },
     }
 

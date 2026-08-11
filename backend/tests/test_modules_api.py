@@ -81,7 +81,7 @@ async def fake_disconnect(self):
 
 
 async def fake_readiness(self):
-    return ReadinessStatus(postgres=True, redis=True, mlflow=True, litellm=True)
+    return ReadinessStatus(postgres=True, redis=True, mlflow=True)
 
 
 async def fake_list_endpoint_workers(self):
@@ -217,20 +217,20 @@ async def fake_get_lm_profile(self, lm_profile_id):
             "id": "lm-1",
             "name": "Primary LM",
             "model": "openai/gpt-4o-mini",
-            "api_base": "http://litellm:4000",
+            "api_base": "https://api.openai.com",
             "model_type": "responses",
             "default_params": {},
-            "virtual_key": "vk-lm-1",
+            "has_api_key": True,
         }
     if lm_profile_id == "lm-2":
         return {
             "id": "lm-2",
             "name": "Backup LM",
             "model": "openai/gpt-4.1-mini",
-            "api_base": "http://litellm:4000",
+            "api_base": "https://api.openai.com",
             "model_type": "responses",
             "default_params": {},
-            "virtual_key": "vk-lm-2",
+            "has_api_key": True,
         }
     return None
 

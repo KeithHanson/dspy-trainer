@@ -16,6 +16,29 @@ from app.config import Settings
 from app.services import AppServices, _classify_sync_status, _json_ready
 
 
+class _FakeAsyncProcess:
+    def __init__(self, *, returncode: int = 0, stdout: str = "", stderr: str = ""):
+        self.returncode: int | None = None
+        self._final_returncode = returncode
+        self._stdout = stdout.encode("utf-8")
+        self._stderr = stderr.encode("utf-8")
+
+    async def wait(self):
+        self.returncode = self._final_returncode
+        return self.returncode
+
+    async def communicate(self):
+        if self.returncode is None:
+            self.returncode = self._final_returncode
+        return self._stdout, self._stderr
+
+    def terminate(self):
+        self.returncode = -15
+
+    def kill(self):
+        self.returncode = -9
+
+
 class _Conn:
     def __init__(self, state):
         self.state = state
@@ -332,12 +355,18 @@ def test_ensure_bundle_requirements_installed_skips_when_missing(tmp_path, monke
 
     called = False
 
-    def fake_run(*args, **kwargs):
+    async def fake_exec(*args, **kwargs):
         nonlocal called
         called = True
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return _FakeAsyncProcess()
 
-    monkeypatch.setattr("app.services.subprocess.run", fake_run)
+    async def fake_shell(*args, **kwargs):
+        nonlocal called
+        called = True
+        return _FakeAsyncProcess()
+
+    monkeypatch.setattr("app.services.asyncio.create_subprocess_exec", fake_exec)
+    monkeypatch.setattr("app.services.asyncio.create_subprocess_shell", fake_shell)
 
     asyncio.run(services.ensure_bundle_requirements_installed(str(bundle_root)))
 
@@ -353,11 +382,12 @@ def test_ensure_bundle_requirements_installed_caches_by_requirements_hash(tmp_pa
 
     calls: list[list[str]] = []
 
-    def fake_run(args, **kwargs):
+    async def fake_exec(*args, **kwargs):
+        del kwargs
         calls.append(list(args))
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return _FakeAsyncProcess()
 
-    monkeypatch.setattr("app.services.subprocess.run", fake_run)
+    monkeypatch.setattr("app.services.asyncio.create_subprocess_exec", fake_exec)
 
     asyncio.run(services.ensure_bundle_requirements_installed(str(bundle_root)))
     asyncio.run(services.ensure_bundle_requirements_installed(str(bundle_root)))
@@ -379,19 +409,26 @@ def test_ensure_bundle_requirements_installed_runs_system_commands_before_pip(tm
     requirements = bundle_root / "requirements.txt"
     requirements.write_text("httpx==0.27.0\n", encoding="utf-8")
 
-    calls: list[list[str]] = []
+    calls: list[tuple[str, list[str] | str]] = []
 
-    def fake_run(args, **kwargs):
-        calls.append(list(args))
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    async def fake_shell(command, **kwargs):
+        del kwargs
+        calls.append(("shell", command))
+        return _FakeAsyncProcess()
 
-    monkeypatch.setattr("app.services.subprocess.run", fake_run)
+    async def fake_exec(*args, **kwargs):
+        del kwargs
+        calls.append(("exec", list(args)))
+        return _FakeAsyncProcess()
+
+    monkeypatch.setattr("app.services.asyncio.create_subprocess_shell", fake_shell)
+    monkeypatch.setattr("app.services.asyncio.create_subprocess_exec", fake_exec)
 
     asyncio.run(services.ensure_bundle_requirements_installed(str(bundle_root)))
 
-    assert calls[0] == ["/bin/sh", "-lc", "echo system-1"]
-    assert calls[1] == ["/bin/sh", "-lc", "echo system-2"]
-    assert calls[2][-2:] == ["-r", str(requirements)]
+    assert calls[0] == ("shell", "echo system-1")
+    assert calls[1] == ("shell", "echo system-2")
+    assert calls[2] == ("exec", [sys.executable, "-m", "pip", "install", "--disable-pip-version-check", "-r", str(requirements)])
 
 
 def test_ensure_bundle_requirements_installed_surfaces_system_command_failure(tmp_path, monkeypatch):
@@ -403,15 +440,16 @@ def test_ensure_bundle_requirements_installed_surfaces_system_command_failure(tm
         encoding="utf-8",
     )
 
-    def fake_run(args, **kwargs):
-        return SimpleNamespace(returncode=7, stdout="", stderr="failed")
+    async def fake_shell(*args, **kwargs):
+        del args, kwargs
+        return _FakeAsyncProcess(returncode=7, stderr="failed")
 
-    monkeypatch.setattr("app.services.subprocess.run", fake_run)
+    monkeypatch.setattr("app.services.asyncio.create_subprocess_shell", fake_shell)
 
     with pytest.raises(RuntimeError) as exc_info:
         asyncio.run(services.ensure_bundle_requirements_installed(str(bundle_root)))
 
-    assert "failed to install bundle system dependencies" in str(exc_info.value)
+    assert str(exc_info.value) == "failed"
 
 
 def test_json_ready_serializes_decimal_values():
@@ -447,3 +485,30 @@ def test_publish_endpoint_invocation_event_serializes_decimal_payloads():
     channel, payload = publisher.messages[0]
     assert channel.endswith("inv-1")
     assert '"655129.55"' in payload
+
+
+def test_module_env_encryption_key_error_mentions_lm_profile_api_keys():
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+
+    with pytest.raises(RuntimeError) as exc_info:
+        services._get_module_env_fernet()
+
+    assert str(exc_info.value) == (
+        "DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY is required to store module environment entries and LM profile API keys"
+    )
+
+
+def test_lm_profile_api_key_decrypt_error_mentions_shared_encryption_scope():
+    services = AppServices(
+        Settings(
+            postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer",
+            module_env_encryption_key=Fernet.generate_key().decode("utf-8"),
+        )
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        services._decrypt_lm_profile_api_key("not-a-valid-fernet-token")
+
+    assert str(exc_info.value) == (
+        "module environment entries or LM profile API keys could not be decrypted with the configured key"
+    )

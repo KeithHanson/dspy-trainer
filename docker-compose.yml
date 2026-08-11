@@ -52,30 +52,6 @@ services:
       retries: 10
       start_period: 20s
 
-  litellm-proxy:
-    image: ghcr.io/berriai/litellm:main-stable
-    container_name: dspy-trainer-litellm-proxy
-    command: ["--config", "/app/config.yaml", "--port", "4000", "--host", "0.0.0.0"]
-    environment:
-      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-local-dev-master-key}
-      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/dspy_trainer?schema=litellm
-      LITELLM_SALT_KEY: ${LITELLM_SALT_KEY:-sk-local-dev-salt-key-32-chars-minimum}
-      STORE_MODEL_IN_DB: ${STORE_MODEL_IN_DB:-True}
-      LITELLM_MIGRATION_DIR: /tmp/litellm-migrations
-    depends_on:
-      postgres:
-        condition: service_healthy
-    volumes:
-      - ./ops/litellm-proxy/config.yaml:/app/config.yaml:ro
-    ports:
-      - "4000:4000"
-    healthcheck:
-      test: ["CMD", "python", "-c", "import os, urllib.request; req=urllib.request.Request('http://localhost:4000/health/liveness', headers={'Authorization': 'Bearer ' + os.environ.get('LITELLM_MASTER_KEY', '')}); urllib.request.urlopen(req, timeout=3)"]
-      interval: 15s
-      timeout: 5s
-      retries: 30
-      start_period: 180s
-
   backend:
     build:
       context: .
@@ -86,8 +62,6 @@ services:
       DSPY_TRAINER_REDIS_URL: redis://redis:6379/0
       DSPY_TRAINER_QUEUE_NAME: dspy-trainer:jobs
       DSPY_TRAINER_MLFLOW_TRACKING_URI: http://mlflow:5000
-      DSPY_TRAINER_LITELLM_BASE_URL: http://litellm-proxy:4000
-      DSPY_TRAINER_LITELLM_API_KEY: ${LITELLM_MASTER_KEY:-sk-local-dev-master-key}
       DSPY_TRAINER_TOTAL_ENDPOINT_WORKERS: ${DSPY_TRAINER_TOTAL_ENDPOINT_WORKERS:-2}
       DSPY_TRAINER_CORS_ALLOW_ORIGINS: ${DSPY_TRAINER_CORS_ALLOW_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173}
       DSPY_TRAINER_GITHUB_PAT: ${GITHUB_PAT:-}
@@ -96,7 +70,6 @@ services:
       DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY: ${DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY:-}
       VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
       VITE_MLFLOW_BASE_URL: ${VITE_MLFLOW_BASE_URL:-http://localhost:5001}
-      VITE_LITELLM_BASE_URL: ${VITE_LITELLM_BASE_URL:-http://localhost:4000}
       DSPY_TRAINER_BACKEND_HOST: 0.0.0.0
       DSPY_TRAINER_BACKEND_PORT: 8000
     depends_on:
@@ -105,8 +78,6 @@ services:
       redis:
         condition: service_healthy
       mlflow:
-        condition: service_healthy
-      litellm-proxy:
         condition: service_healthy
     ports:
       - "8000:8000"
@@ -133,8 +104,6 @@ services:
       DSPY_TRAINER_REDIS_URL: redis://redis:6379/0
       DSPY_TRAINER_QUEUE_NAME: dspy-trainer:jobs
       DSPY_TRAINER_MLFLOW_TRACKING_URI: http://mlflow:5000
-      DSPY_TRAINER_LITELLM_BASE_URL: http://litellm-proxy:4000
-      DSPY_TRAINER_LITELLM_API_KEY: ${LITELLM_MASTER_KEY:-sk-local-dev-master-key}
       DSPY_TRAINER_GITHUB_PAT: ${GITHUB_PAT:-}
       DSPY_TRAINER_GIT_COMMIT_NAME: ${GIT_COMMIT_NAME:-DSPy Trainer}
       DSPY_TRAINER_GIT_COMMIT_EMAIL: ${GIT_COMMIT_EMAIL:-dspy-trainer@local}
@@ -145,8 +114,6 @@ services:
       redis:
         condition: service_healthy
       mlflow:
-        condition: service_healthy
-      litellm-proxy:
         condition: service_healthy
       backend:
         condition: service_healthy
@@ -173,8 +140,6 @@ services:
       DSPY_TRAINER_REDIS_URL: redis://redis:6379/0
       DSPY_TRAINER_QUEUE_NAME: dspy-trainer:jobs
       DSPY_TRAINER_MLFLOW_TRACKING_URI: http://mlflow:5000
-      DSPY_TRAINER_LITELLM_BASE_URL: http://litellm-proxy:4000
-      DSPY_TRAINER_LITELLM_API_KEY: ${LITELLM_MASTER_KEY:-sk-local-dev-master-key}
       DSPY_TRAINER_TOTAL_ENDPOINT_WORKERS: ${DSPY_TRAINER_TOTAL_ENDPOINT_WORKERS:-2}
       DSPY_TRAINER_GITHUB_PAT: ${GITHUB_PAT:-}
       DSPY_TRAINER_GIT_COMMIT_NAME: ${GIT_COMMIT_NAME:-DSPy Trainer}
@@ -186,8 +151,6 @@ services:
       redis:
         condition: service_healthy
       mlflow:
-        condition: service_healthy
-      litellm-proxy:
         condition: service_healthy
       backend:
         condition: service_healthy
@@ -209,7 +172,6 @@ services:
       args:
         VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
         VITE_MLFLOW_BASE_URL: ${VITE_MLFLOW_BASE_URL:-http://localhost:5001}
-        VITE_LITELLM_BASE_URL: ${VITE_LITELLM_BASE_URL:-http://localhost:4000}
     container_name: dspy-trainer-web
     depends_on:
       backend:
