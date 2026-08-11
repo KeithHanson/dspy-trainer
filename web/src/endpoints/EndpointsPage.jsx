@@ -4,7 +4,7 @@ import { Button } from "../components/primitives/Button";
 import { EmptyState } from "../components/states/EmptyState";
 import { ErrorState } from "../components/states/ErrorState";
 import { LoadingState } from "../components/states/LoadingState";
-import { buildApiUrl, normalizeApiBaseUrl } from "../api/base";
+import { buildAbsoluteApiUrl, buildApiUrl, normalizeApiBaseUrl } from "../api/base";
 
 async function readApiError(response, fallback) {
   try {
@@ -148,6 +148,7 @@ function EndpointWorkersSection({ endpointWorkers, endpoints }) {
 export function EndpointsPage() {
   const navigate = useNavigate();
   const apiBase = useMemo(() => normalizeApiBaseUrl(), []);
+  const publicApiBase = useMemo(() => buildAbsoluteApiUrl(""), []);
   const [endpoints, setEndpoints] = useState([]);
   const [endpointWorkers, setEndpointWorkers] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -255,7 +256,7 @@ export function EndpointsPage() {
                       </div>
                       <div className="row gap-2 lm-profiles-actions">
                         <Button size="sm" onClick={() => navigate(`/endpoints/${encodeURIComponent(endpoint.id)}/edit`)}>Edit</Button>
-                        <Button size="sm" onClick={() => copyCurlCommand(endpoint.id, buildSyncCurlCommand(apiBase, endpoint.id, `<your-endpoint-key>`))}>{copiedEndpointId === endpoint.id ? "Copied" : "Copy curl"}</Button>
+                        <Button size="sm" onClick={() => copyCurlCommand(endpoint.id, buildSyncCurlCommand(publicApiBase, endpoint.id, `<your-endpoint-key>`))}>{copiedEndpointId === endpoint.id ? "Copied" : "Copy curl"}</Button>
                         <Button size="sm" variant="danger" className="bundles-delete-btn" onClick={() => deleteEndpoint(endpoint.id)} disabled={deletingId === endpoint.id}>
                           {deletingId === endpoint.id ? "Deleting..." : "Delete"}
                         </Button>
@@ -284,6 +285,7 @@ export function EndpointsPage() {
 
 export function EndpointEditorPage() {
   const apiBase = useMemo(() => normalizeApiBaseUrl(), []);
+  const publicApiBase = useMemo(() => buildAbsoluteApiUrl(""), []);
   const location = useLocation();
   const navigate = useNavigate();
   const { endpointId } = useParams();
@@ -297,8 +299,8 @@ export function EndpointEditorPage() {
   const [bundles, setBundles] = useState([]);
   const [lmProfiles, setLmProfiles] = useState([]);
   const [apiKey, setApiKey] = useState(typeof location.state?.apiKey === "string" ? location.state.apiKey : "");
-  const syncCurlCommand = buildSyncCurlCommand(apiBase, endpointId, apiKey);
-  const streamCurlCommand = buildStreamCurlCommand(apiBase, endpointId, apiKey);
+  const syncCurlCommand = buildSyncCurlCommand(publicApiBase, endpointId, apiKey);
+  const streamCurlCommand = buildStreamCurlCommand(publicApiBase, endpointId, apiKey);
 
   useEffect(() => {
     const load = async () => {

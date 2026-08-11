@@ -72,7 +72,7 @@ describe("EndpointsPage", () => {
     const endpointCard = (await screen.findByText("Customer API")).closest("article");
     await userEvent.click(within(endpointCard).getByRole("button", { name: "Copy curl" }));
 
-    expect(writeText).toHaveBeenCalledWith(expect.stringContaining('/api/bundle-endpoints/ep-1/invoke'));
+    expect(writeText).toHaveBeenCalledWith(expect.stringContaining(`${window.location.origin}/api/bundle-endpoints/ep-1/invoke`));
   });
 
   it("shows endpoints zero state", async () => {

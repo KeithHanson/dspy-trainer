@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { NavLink } from "react-router-dom";
 import { Icon } from "../components/Icon";
-import { normalizeApiBaseUrl } from "../api/base";
+import { normalizeApiBaseUrl, normalizeMlflowBaseUrl } from "../api/base";
 
 const PRIMARY_NAV = [
   { to: "/dashboard", label: "Overview", icon: "grid" },
@@ -39,7 +39,7 @@ function NavSection({ items, hasActiveRun, hasActiveOptimization }) {
 
 export function AppShell({ children }) {
   const apiBase = useMemo(() => normalizeApiBaseUrl(), []);
-  const mlflowBase = useMemo(() => (import.meta.env.VITE_MLFLOW_BASE_URL || "http://localhost:5001").replace(/\/$/, ""), []);
+  const mlflowBase = useMemo(() => normalizeMlflowBaseUrl(), []);
   const [hasActiveRun, setHasActiveRun] = useState(false);
   const [hasActiveOptimization, setHasActiveOptimization] = useState(false);
 

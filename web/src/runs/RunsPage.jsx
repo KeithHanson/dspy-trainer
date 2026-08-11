@@ -5,7 +5,7 @@ import { Icon } from "../components/Icon";
 import { EmptyState } from "../components/states/EmptyState";
 import { ErrorState } from "../components/states/ErrorState";
 import { LoadingState } from "../components/states/LoadingState";
-import { normalizeApiBaseUrl } from "../api/base";
+import { buildMlflowUrl, normalizeApiBaseUrl } from "../api/base";
 
 export function RunsPage() {
   const [searchParams] = useSearchParams();
@@ -353,7 +353,7 @@ export function RunsPage() {
                 <p className="cap" style={{ marginTop: 8 }}>
                   <a
                     className="runs-mlflow-link"
-                    href={`${(import.meta.env.VITE_MLFLOW_BASE_URL || "http://localhost:5001").replace(/\/$/, "")}/#/experiments/${encodeURIComponent(runPlan.mlflow_experiment_id || "0")}/runs/${encodeURIComponent(runPlan.mlflow_parent_run_id)}/evaluations`}
+                    href={buildMlflowUrl(`/#/experiments/${encodeURIComponent(runPlan.mlflow_experiment_id || "0")}/runs/${encodeURIComponent(runPlan.mlflow_parent_run_id)}/evaluations`)}
                     target="_blank"
                     rel="noreferrer"
                   >

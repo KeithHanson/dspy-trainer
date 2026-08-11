@@ -115,7 +115,7 @@ describe("AppShell", () => {
       </MemoryRouter>,
     );
 
-    expect(screen.getByRole("link", { name: "MLFlow" })).toHaveAttribute("href", "http://localhost:5001");
+    expect(screen.getByRole("link", { name: "MLFlow" })).toHaveAttribute("href", "/mlflow");
     expect(screen.queryByText("Operator")).not.toBeInTheDocument();
     vi.unstubAllGlobals();
   });
