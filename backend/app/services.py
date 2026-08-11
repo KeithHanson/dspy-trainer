@@ -370,7 +370,7 @@ class AppServices:
         key = str(self.settings.module_env_encryption_key or "").strip()
         if not key:
             raise RuntimeError(
-                "DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY is required to store module environment entries"
+                "DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY is required to store module environment entries and LM profile API keys"
             )
         try:
             return Fernet(key.encode("utf-8"))
@@ -391,7 +391,9 @@ class AppServices:
         try:
             decrypted = self._get_module_env_fernet().decrypt(value.encode("utf-8")).decode("utf-8")
         except InvalidToken as exc:
-            raise RuntimeError("module environment entries could not be decrypted with the configured key") from exc
+            raise RuntimeError(
+                "module environment entries or LM profile API keys could not be decrypted with the configured key"
+            ) from exc
         payload = json.loads(decrypted)
         return _normalize_module_environment_entries(payload)
 
@@ -408,7 +410,9 @@ class AppServices:
         try:
             return self._get_module_env_fernet().decrypt(value.encode("utf-8")).decode("utf-8")
         except InvalidToken as exc:
-            raise RuntimeError("lm profile api key could not be decrypted with the configured key") from exc
+            raise RuntimeError(
+                "module environment entries or LM profile API keys could not be decrypted with the configured key"
+            ) from exc
 
     async def ensure_bundle_requirements_installed(
         self,
@@ -982,7 +986,8 @@ class AppServices:
             await conn.execute("alter table lm_profiles add column if not exists lm_class_path text;")
             await conn.execute("alter table lm_profiles add column if not exists api_key_encrypted text;")
             await conn.execute("alter table lm_profiles add column if not exists archived_at timestamptz;")
-            await conn.execute("alter table lm_profiles add column if not exists virtual_key text;")
+            # Legacy LiteLLM proxy profiles used virtual_key; direct-provider LM profiles do not.
+            # Skip adding the obsolete column for new or migrated installs.
             await conn.execute(
                 """
                 create table if not exists bundle_endpoints (

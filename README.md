@@ -28,8 +28,9 @@ Building production LLM programs requires iteration—lots of it. DSPy Trainer g
 ```bash
 cp .env.sample .env
 # Edit .env - at minimum, add your GITHUB_PAT
-# If you plan to store module environment entries in the UI,
-# also generate DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY:
+# If you plan to store module environment entries in the UI OR
+# save LM Profile provider API keys in the UI, also generate
+# DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY:
 # python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
@@ -537,7 +538,7 @@ Key variables in `.env`:
 | `GITHUB_PAT` | GitHub API access for bundle import/sync | ✅ |
 | `GIT_COMMIT_NAME` | Git author name for optimization commits | Recommended |
 | `GIT_COMMIT_EMAIL` | Git author email for optimization commits | Recommended |
-| `DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY` | Encrypts module environment entries stored in Postgres | Required for module env UI |
+| `DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY` | Encrypts module environment entries and LM Profile provider API keys stored in Postgres | Required for module env UI and LM Profile API key storage |
 | `DSPY_TRAINER_TOTAL_ENDPOINT_WORKERS` | Number of dedicated endpoint worker containers in Compose | Optional |
 | `DSPY_TRAINER_POSTGRES_DSN` | Postgres connection | ✅ (auto in Compose) |
 | `DSPY_TRAINER_REDIS_URL` | Redis connection | ✅ (auto in Compose) |

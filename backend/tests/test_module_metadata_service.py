@@ -447,3 +447,30 @@ def test_publish_endpoint_invocation_event_serializes_decimal_payloads():
     channel, payload = publisher.messages[0]
     assert channel.endswith("inv-1")
     assert '"655129.55"' in payload
+
+
+def test_module_env_encryption_key_error_mentions_lm_profile_api_keys():
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+
+    with pytest.raises(RuntimeError) as exc_info:
+        services._get_module_env_fernet()
+
+    assert str(exc_info.value) == (
+        "DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY is required to store module environment entries and LM profile API keys"
+    )
+
+
+def test_lm_profile_api_key_decrypt_error_mentions_shared_encryption_scope():
+    services = AppServices(
+        Settings(
+            postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer",
+            module_env_encryption_key=Fernet.generate_key().decode("utf-8"),
+        )
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        services._decrypt_lm_profile_api_key("not-a-valid-fernet-token")
+
+    assert str(exc_info.value) == (
+        "module environment entries or LM profile API keys could not be decrypted with the configured key"
+    )
