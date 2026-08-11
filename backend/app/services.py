@@ -879,6 +879,8 @@ class AppServices:
                     "last_seen": payload.get("last_seen"),
                     "kind": str(payload.get("kind") or "worker"),
                     "endpoint_id": payload.get("endpoint_id"),
+                    "desired_revision_id": payload.get("desired_revision_id"),
+                    "warmed_revision_id": payload.get("warmed_revision_id"),
                 }
             )
         workers.sort(key=lambda item: item["worker_id"])
@@ -2528,7 +2530,17 @@ class AppServices:
                 assigned += 1
         return assigned
 
+    async def _get_endpoint_desired_revision_id(self, endpoint_id: str) -> str | None:
+        endpoint = await self.get_bundle_endpoint(endpoint_id)
+        if endpoint is None:
+            return None
+        module_state = await self.resolve_module_execution_state(str(endpoint["module_import_id"]))
+        if module_state is None:
+            return None
+        return str(module_state.get("bundle_revision_id") or "").strip() or None
+
     async def get_endpoint_routing_state(self, endpoint_id: str) -> dict[str, Any]:
+        desired_revision_id = await self._get_endpoint_desired_revision_id(endpoint_id)
         workers = await self._list_registered_workers(self.settings.endpoint_worker_registry_prefix)
         assigned_workers = 0
         ready_workers = 0
@@ -2543,11 +2555,18 @@ class AppServices:
             assigned_workers += 1
             status = str(worker.get("status") or "unknown")
             worker_endpoint_id = str(worker.get("endpoint_id") or "").strip()
-            if status == "listening" and worker_endpoint_id == endpoint_id:
+            if (
+                desired_revision_id
+                and status == "listening"
+                and worker_endpoint_id == endpoint_id
+                and str(worker.get("desired_revision_id") or "").strip() == desired_revision_id
+                and str(worker.get("warmed_revision_id") or "").strip() == desired_revision_id
+            ):
                 ready_workers += 1
             status_counts[status] = status_counts.get(status, 0) + 1
         return {
             "endpoint_id": endpoint_id,
+            "desired_revision_id": desired_revision_id,
             "assigned_workers": assigned_workers,
             "ready_workers": ready_workers,
             "status_counts": status_counts,

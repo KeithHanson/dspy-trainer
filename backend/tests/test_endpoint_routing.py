@@ -35,10 +35,16 @@ async def _no_reconcile(self):
     return None
 
 
+async def _desired_revision(self, endpoint_id):
+    del endpoint_id
+    return "rev-1"
+
+
 def _services(worker_payloads, assignment_payloads):
     services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
     services.redis = FakeRedis({**worker_payloads, **assignment_payloads})
     services.reconcile_endpoint_worker_assignments = _no_reconcile.__get__(services, AppServices)
+    services._get_endpoint_desired_revision_id = _desired_revision.__get__(services, AppServices)
     return services
 
 
@@ -46,7 +52,13 @@ def test_endpoint_routing_accepts_only_listening_workers_for_assigned_endpoint()
     services = _services(
         {
             "dspy-trainer:endpoint-workers:endpoint-worker-1": json.dumps(
-                {"worker_id": "endpoint-worker-1", "status": "listening", "endpoint_id": "endpoint-1"}
+                {
+                    "worker_id": "endpoint-worker-1",
+                    "status": "listening",
+                    "endpoint_id": "endpoint-1",
+                    "desired_revision_id": "rev-1",
+                    "warmed_revision_id": "rev-1",
+                }
             )
         },
         {
@@ -60,6 +72,7 @@ def test_endpoint_routing_accepts_only_listening_workers_for_assigned_endpoint()
 
     assert routing_state == {
         "endpoint_id": "endpoint-1",
+        "desired_revision_id": "rev-1",
         "assigned_workers": 1,
         "ready_workers": 1,
         "status_counts": {"listening": 1},
@@ -84,7 +97,13 @@ def test_endpoint_routing_rejects_preparing_failed_and_unassigned_workers(
     services = _services(
         {
             "dspy-trainer:endpoint-workers:endpoint-worker-1": json.dumps(
-                {"worker_id": "endpoint-worker-1", "status": worker_status, "endpoint_id": worker_endpoint_id}
+                {
+                    "worker_id": "endpoint-worker-1",
+                    "status": worker_status,
+                    "endpoint_id": worker_endpoint_id,
+                    "desired_revision_id": "rev-1" if assignment_endpoint_id == "endpoint-1" else None,
+                    "warmed_revision_id": "rev-1" if worker_status == "listening" and assignment_endpoint_id == "endpoint-1" else None,
+                }
             )
         },
         {
@@ -100,6 +119,7 @@ def test_endpoint_routing_rejects_preparing_failed_and_unassigned_workers(
     assert exc_info.value.code == expected_code
     assert exc_info.value.routing_state == {
         "endpoint_id": "endpoint-1",
+        "desired_revision_id": "rev-1",
         "assigned_workers": 0 if expected_code == "no_assigned_workers" else 1,
         "ready_workers": 0,
         "status_counts": expected_counts,
