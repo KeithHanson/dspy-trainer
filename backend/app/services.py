@@ -46,6 +46,13 @@ class ModuleSyncError(RuntimeError):
         self.sync_state = sync_state or {}
 
 
+class EndpointUnavailableError(RuntimeError):
+    def __init__(self, message: str, *, code: str, routing_state: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.code = str(code or "endpoint_unavailable")
+        self.routing_state = routing_state or {}
+
+
 def _clean_optional_text(value: Any) -> str | None:
     if value is None:
         return None
@@ -2521,6 +2528,48 @@ class AppServices:
                 assigned += 1
         return assigned
 
+    async def get_endpoint_routing_state(self, endpoint_id: str) -> dict[str, Any]:
+        workers = await self._list_registered_workers(self.settings.endpoint_worker_registry_prefix)
+        assigned_workers = 0
+        ready_workers = 0
+        status_counts: dict[str, int] = {}
+        for worker in workers:
+            worker_id = str(worker.get("worker_id") or "").strip()
+            if not worker_id:
+                continue
+            assignment = await self.get_endpoint_worker_assignment(worker_id)
+            if not assignment or str(assignment.get("endpoint_id") or "") != endpoint_id:
+                continue
+            assigned_workers += 1
+            status = str(worker.get("status") or "unknown")
+            worker_endpoint_id = str(worker.get("endpoint_id") or "").strip()
+            if status == "listening" and worker_endpoint_id == endpoint_id:
+                ready_workers += 1
+            status_counts[status] = status_counts.get(status, 0) + 1
+        return {
+            "endpoint_id": endpoint_id,
+            "assigned_workers": assigned_workers,
+            "ready_workers": ready_workers,
+            "status_counts": status_counts,
+        }
+
+    async def ensure_endpoint_ready_for_invocation(self, endpoint_id: str) -> dict[str, Any]:
+        await self.reconcile_endpoint_worker_assignments()
+        routing_state = await self.get_endpoint_routing_state(endpoint_id)
+        if int(routing_state.get("ready_workers") or 0) > 0:
+            return routing_state
+        if int(routing_state.get("assigned_workers") or 0) < 1:
+            raise EndpointUnavailableError(
+                "endpoint has no assigned endpoint workers",
+                code="no_assigned_workers",
+                routing_state=routing_state,
+            )
+        raise EndpointUnavailableError(
+            "endpoint has no ready endpoint workers",
+            code="no_ready_workers",
+            routing_state=routing_state,
+        )
+
     async def enqueue_endpoint_invocation(
         self,
         endpoint_id: str,
@@ -2531,10 +2580,7 @@ class AppServices:
     ) -> str:
         if self.redis is None:
             raise RuntimeError("queue not initialized")
-        await self.reconcile_endpoint_worker_assignments()
-        assigned_workers = await self.count_endpoint_workers_assigned(endpoint_id)
-        if assigned_workers < 1:
-            raise RuntimeError("endpoint has no assigned endpoint workers")
+        await self.ensure_endpoint_ready_for_invocation(endpoint_id)
         invocation_id = str(invocation_id or uuid4())
         payload = {
             "type": "endpoint_invocation",
