@@ -36,13 +36,13 @@ Named volumes:
 - `bundles_data` shared between `backend` and `worker` at `/tmp/dspy-trainer/bundles` for uploaded module bundles
 - `optimization_artifacts_data` shared between `backend` and `worker` at `/tmp/dspy-trainer/optimization_artifacts` so succeeded optimization artifacts can be materialized into new bundles
 
-MLflow concurrency can be tuned with `MLFLOW_WEB_WORKERS` in `.env` (default `4`). MLflow is started with `MLFLOW_STATIC_PREFIX` (default `/mlflow`) so its UI and assets load correctly behind the local reverse proxy. Compose also forwards `CADDY_HTTP_PORT` into the MLflow container so its allowed-hosts list stays aligned if you move the proxy off the default `8080` port.
+MLflow concurrency can be tuned with `MLFLOW_WEB_WORKERS` in `.env` (default `4`). MLflow is started with `MLFLOW_STATIC_PREFIX` (default `/mlflow`) so its UI and assets load correctly behind the local reverse proxy. Compose also forwards `CADDY_HTTP_PORT` into the MLflow container so its allowed-hosts list stays aligned if you move the proxy off the default `8080` port. Compose now also reads worker replica counts from `.env` via `DSPY_TRAINER_TOTAL_WORKERS` and `DSPY_TRAINER_TOTAL_ENDPOINT_WORKER_REPLICAS`.
 
 ## Developer Bootstrap
 
 Before starting the stack, ensure `.env` contains `GITHUB_PAT` if you want to import, sync, or push GitHub-backed bundles. Backend and worker read that variable server-side; the web UI only reports whether GitHub access is configured. GitHub imports may target either the repo root or a configured bundle subfolder. Optimization writeback now pushes to an `optimization-<job-prefix>` branch for manual merge, so also set `GIT_COMMIT_NAME` and `GIT_COMMIT_EMAIL` (defaults are provided if omitted).
 
-The default local `.env.sample` now points the web build at relative proxy URLs (`/api`, `/mlflow`) and exposes Caddy on `CADDY_HTTP_PORT=8080`. Override those values before rebuilding if you need a different host/port or absolute public URLs.
+The default local `.env.sample` now points the web build at relative proxy URLs (`/api`, `/mlflow`) and exposes Caddy on `CADDY_HTTP_PORT=8080`. It also defines `DSPY_TRAINER_TOTAL_WORKERS` and `DSPY_TRAINER_TOTAL_ENDPOINT_WORKER_REPLICAS` so Compose replica counts can be adjusted from `.env`. Override those values before rebuilding/recreating if you need different worker counts, host/port, or absolute public URLs.
 
 Secret storage note:
 - `DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY` is required if you want to store module environment entries or LM Profile provider API keys in Postgres.

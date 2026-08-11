@@ -96,7 +96,7 @@ services:
       dockerfile: backend/Dockerfile
     command: ["python", "backend/worker.py"]
     deploy:
-      replicas: 8
+      replicas: ${DSPY_TRAINER_TOTAL_WORKERS:-8}
     environment:
       DSPY_TRAINER_POSTGRES_DSN: postgresql://postgres:postgres@postgres:5432/dspy_trainer
       DSPY_TRAINER_REDIS_URL: redis://redis:6379/0
@@ -132,7 +132,7 @@ services:
       dockerfile: backend/Dockerfile
     command: ["python", "backend/endpoint_worker.py"]
     deploy:
-      replicas: 72
+      replicas: ${DSPY_TRAINER_TOTAL_ENDPOINT_WORKER_REPLICAS:-72}
     environment:
       DSPY_TRAINER_POSTGRES_DSN: postgresql://postgres:postgres@postgres:5432/dspy_trainer
       DSPY_TRAINER_REDIS_URL: redis://redis:6379/0

@@ -542,7 +542,9 @@ Key variables in `.env`:
 | `GIT_COMMIT_NAME` | Git author name for optimization commits | Recommended |
 | `GIT_COMMIT_EMAIL` | Git author email for optimization commits | Recommended |
 | `DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY` | Encrypts module environment entries and LM Profile provider API keys stored in Postgres | Required for module env UI and LM Profile API key storage |
-| `DSPY_TRAINER_TOTAL_ENDPOINT_WORKERS` | Number of dedicated endpoint worker containers in Compose | Optional |
+| `DSPY_TRAINER_TOTAL_WORKERS` | Number of general worker containers in Compose | Optional |
+| `DSPY_TRAINER_TOTAL_ENDPOINT_WORKERS` | Logical endpoint worker count used for endpoint assignment | Optional |
+| `DSPY_TRAINER_TOTAL_ENDPOINT_WORKER_REPLICAS` | Number of dedicated endpoint worker containers in Compose | Optional |
 | `DSPY_TRAINER_POSTGRES_DSN` | Postgres connection | ✅ (auto in Compose) |
 | `DSPY_TRAINER_REDIS_URL` | Redis connection | ✅ (auto in Compose) |
 
@@ -570,7 +572,9 @@ LM Profiles store the provider model, API base, model type, optional LM class ov
 
 Managed bundle endpoints do not execute inside the backend container. The backend authenticates, enqueues, and relays responses, while dedicated `endpoint-worker` containers perform bundle installation/bootstrap and invocation.
 
-- Set `DSPY_TRAINER_TOTAL_ENDPOINT_WORKERS` in `.env` to control the size of the endpoint-worker pool.
+- Set `DSPY_TRAINER_TOTAL_WORKERS` in `.env` to control the number of general worker containers Compose starts.
+- Set `DSPY_TRAINER_TOTAL_ENDPOINT_WORKERS` in `.env` to control the logical endpoint worker count used for endpoint assignment.
+- Set `DSPY_TRAINER_TOTAL_ENDPOINT_WORKER_REPLICAS` in `.env` to control how many dedicated endpoint-worker containers Compose starts.
 - Each endpoint stores a `pinned_worker_count`.
 - Endpoint workers are assigned deterministically to endpoints based on those pinned counts.
 - Only workers assigned to a given endpoint consume that endpoint's invocation queue.
@@ -731,11 +735,10 @@ A: Yes. It's a Docker Compose stack, so adjust ports and DNS as needed. The curr
 A: Yes. It's a Docker Compose stack with Caddy providing the default local reverse-proxy surface. Adjust ports, DNS, and proxy URLs as needed. The current web shell is unauthenticated, so no Auth0 or hosted login setup is required.
 
 **Q: How do I scale worker capacity?**  
-A: Increase worker replicas in `docker-compose.yml`:
-```yaml
-worker:
-  deploy:
-    replicas: 4
+A: Set the worker replica env vars in `.env`, then recreate the stack:
+```env
+DSPY_TRAINER_TOTAL_WORKERS=4
+DSPY_TRAINER_TOTAL_ENDPOINT_WORKER_REPLICAS=16
 ```
 
 **Q: Can I use this for production LLM apps?**  
