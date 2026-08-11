@@ -18,7 +18,6 @@ from typing import Any, Callable
 import dspy
 
 
-DEFAULT_PROXY_API_BASE = "http://litellm-proxy:4000"
 AZURE_RESPONSES_COMPAT_CLASS_PATH = "app.lm.AzureResponsesCompatLM"
 
 
@@ -221,17 +220,13 @@ def _build_lm_from_profile(lm_profile: dict[str, Any]) -> Any:
     default_params = lm_profile.get("default_params")
     params = default_params if isinstance(default_params, dict) else {}
 
-    profile_id = str(lm_profile.get("id") or "").strip()
-    virtual_key = str(lm_profile.get("virtual_key") or "").strip()
     api_base = str(lm_profile.get("api_base") or "").strip()
-    if profile_id and virtual_key:
-        model_name = f"openai/lm-profile:{profile_id}"
-        api_base = str(lm_profile.get("proxy_api_base") or DEFAULT_PROXY_API_BASE).strip()
+    api_key = str(lm_profile.get("api_key") or "").strip()
 
     base_kwargs: dict[str, Any] = {
         "model": model_name,
         "api_base": api_base,
-        "api_key": virtual_key,
+        "api_key": api_key,
         "model_type": model_type,
     }
     kwargs: dict[str, Any] = {**base_kwargs, **params}

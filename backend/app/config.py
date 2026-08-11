@@ -31,8 +31,6 @@ class Settings(BaseSettings):
     module_env_encryption_key: str = Field(default="")
 
     mlflow_tracking_uri: str = Field(default="http://localhost:5001")
-    litellm_base_url: str = Field(default="http://localhost:4000")
-    litellm_api_key: str = Field(default="")
     cors_allow_origins: str = Field(default="http://localhost:5173,http://127.0.0.1:5173")
 
     @field_validator("postgres_dsn")
@@ -47,7 +45,6 @@ class Settings(BaseSettings):
             cors_allow_origins=self.cors_allow_origins,
             vite_api_base_url="http://localhost:8000",
             vite_mlflow_base_url="http://localhost:5001",
-            vite_litellm_base_url="http://localhost:4000",
         )
 
 
@@ -75,7 +72,6 @@ def get_cors_origins_from_values(
     cors_allow_origins: str,
     vite_api_base_url: str,
     vite_mlflow_base_url: str,
-    vite_litellm_base_url: str,
 ) -> list[str]:
     origins: list[str] = []
     seen: set[str] = set()
@@ -98,7 +94,6 @@ def get_cors_origins_from_values(
         add_origin(origin)
     add_origin_with_base_host(vite_api_base_url)
     add_origin_with_base_host(vite_mlflow_base_url)
-    add_origin_with_base_host(vite_litellm_base_url)
     return origins
 
 
@@ -110,7 +105,6 @@ def get_cors_origins_from_env() -> list[str]:
         ),
         vite_api_base_url=os.getenv("VITE_API_BASE_URL", "http://localhost:8000"),
         vite_mlflow_base_url=os.getenv("VITE_MLFLOW_BASE_URL", "http://localhost:5001"),
-        vite_litellm_base_url=os.getenv("VITE_LITELLM_BASE_URL", "http://localhost:4000"),
     )
 
 

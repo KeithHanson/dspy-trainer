@@ -13,7 +13,7 @@ const EMPTY_FORM = {
   model_type: "responses",
   default_params: JSON.stringify({ temperature: 0.2, max_tokens: 2048 }, null, 2),
   lm_class_path: "",
-  upstream_api_key: "",
+  api_key: "",
 };
 
 const MODEL_TYPE_OPTIONS = ["responses", "chat", "text"];
@@ -25,7 +25,6 @@ export function LmProfilesPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
   const [deletingId, setDeletingId] = useState("");
-  const [copiedKeyId, setCopiedKeyId] = useState("");
 
   const loadProfiles = async () => {
     setIsLoading(true);
@@ -64,26 +63,13 @@ export function LmProfilesPage() {
     }
   };
 
-  const copyCurlCommand = async (profileId, command) => {
-    if (!command) {
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(command);
-      setCopiedKeyId(profileId);
-      setTimeout(() => setCopiedKeyId(""), 1200);
-    } catch {
-      setError("Could not copy curl command to clipboard.");
-    }
-  };
-
   return (
     <section className="page">
       <div className="page-body lm-profiles-wrap">
         <header className="row between lm-profiles-head">
           <div className="col gap-1">
             <h1 className="t-display" style={{ fontSize: 22 }}>LM Profiles</h1>
-            <p className="muted t-sm">Manage reusable model config for plan-level run execution.</p>
+            <p className="muted t-sm">Manage reusable direct-provider model config for plan-level run execution.</p>
           </div>
           <div className="row gap-2">
             <Button onClick={loadProfiles} disabled={isLoading}>{isLoading ? "Refreshing..." : "Refresh"}</Button>
@@ -116,15 +102,8 @@ export function LmProfilesPage() {
                     </div>
                     <span className="cap mono lm-profiles-model-line">{profile.model || "model n/a"}</span>
                     <span className="cap mono">{profile.api_base || "api base n/a"}</span>
+                    <span className="cap">{profile.has_api_key ? "Stored API key configured" : "No stored API key"}</span>
                     <span className="cap mono">Updated {formatDate(profile.updated_at)}</span>
-                    <div className="lm-profiles-key-box col gap-2">
-                      <span className="t-label">Test with curl</span>
-                      <span className="cap">Copy and run this command to test an LLM call through the profile virtual key.</span>
-                      <pre className="bundles-structure lm-profiles-curl-box">{buildCurlCommand(profile)}</pre>
-                      {profile.virtual_key ? (
-                        <Button size="sm" onClick={() => copyCurlCommand(profile.id, buildCurlCommand(profile))}>{copiedKeyId === profile.id ? "Copied" : "Copy curl"}</Button>
-                      ) : null}
-                    </div>
                   </div>
                 </article>
               ))}
@@ -148,8 +127,7 @@ export function LmProfileEditorPage() {
   const [formError, setFormError] = useState("");
   const [isSaving, setIsSaving] = useState(false);
   const [form, setForm] = useState(EMPTY_FORM);
-  const [virtualKey, setVirtualKey] = useState("");
-  const [isRotating, setIsRotating] = useState(false);
+  const [hasStoredApiKey, setHasStoredApiKey] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
   const [testStatus, setTestStatus] = useState("");
   const [testLog, setTestLog] = useState("");
@@ -158,6 +136,7 @@ export function LmProfileEditorPage() {
     const loadProfile = async () => {
       if (!profileId) {
         setForm(EMPTY_FORM);
+        setHasStoredApiKey(false);
         return;
       }
       setIsLoading(true);
@@ -175,9 +154,9 @@ export function LmProfileEditorPage() {
           model_type: profile.model_type || "responses",
           default_params: JSON.stringify(profile.default_params || {}, null, 2),
           lm_class_path: profile.lm_class_path || "",
-          upstream_api_key: "",
+          api_key: "",
         });
-        setVirtualKey(typeof profile.virtual_key === "string" ? profile.virtual_key : "");
+        setHasStoredApiKey(Boolean(profile.has_api_key));
       } catch (err) {
         setError(err instanceof Error ? err.message : "Could not load LM profile");
       } finally {
@@ -189,10 +168,6 @@ export function LmProfileEditorPage() {
 
   const saveProfile = async () => {
     setFormError("");
-    if (!isEditing && !form.upstream_api_key.trim()) {
-      setFormError("Upstream API key is required when creating a profile.");
-      return;
-    }
     if (!form.name.trim() || !form.model.trim() || !form.api_base.trim() || !form.model_type.trim()) {
       setFormError("Name, model, API base, and model type are required.");
       return;
@@ -220,7 +195,7 @@ export function LmProfileEditorPage() {
         model_type: form.model_type.trim(),
         default_params: parsedParams,
         lm_class_path: form.lm_class_path.trim() || null,
-        upstream_api_key: form.upstream_api_key.trim() || null,
+        api_key: form.api_key.trim() || null,
       };
       const url = profileId ? `${apiBase}/lm-profiles/${profileId}` : `${apiBase}/lm-profiles`;
       const method = profileId ? "PATCH" : "POST";
@@ -234,36 +209,15 @@ export function LmProfileEditorPage() {
         throw new Error(detail || `Could not save LM profile (${response.status})`);
       }
       const responsePayload = await response.json();
-      if (profileId) {
-        setVirtualKey(typeof responsePayload.virtual_key === "string" ? responsePayload.virtual_key : "");
-      } else {
+      setHasStoredApiKey(Boolean(responsePayload.has_api_key) || Boolean(form.api_key.trim()));
+      setForm((prev) => ({ ...prev, api_key: "" }));
+      if (!profileId) {
         navigate("/lm-profiles");
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not save LM profile");
     } finally {
       setIsSaving(false);
-    }
-  };
-
-  const rotateVirtualKey = async () => {
-    if (!profileId) {
-      return;
-    }
-    setIsRotating(true);
-    setError("");
-    try {
-      const response = await fetch(`${apiBase}/lm-profiles/${profileId}/rotate-key`, { method: "POST" });
-      if (!response.ok) {
-        const detail = await readApiError(response);
-        throw new Error(detail || `Could not rotate key (${response.status})`);
-      }
-      const payload = await response.json();
-      setVirtualKey(typeof payload.virtual_key === "string" ? payload.virtual_key : "");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not rotate key");
-    } finally {
-      setIsRotating(false);
     }
   };
 
@@ -300,7 +254,7 @@ export function LmProfileEditorPage() {
         <header className="row between lm-profiles-head">
           <div className="col gap-1">
             <h1 className="t-display" style={{ fontSize: 22 }}>{isEditing ? "Edit LM Profile" : "New LM Profile"}</h1>
-            <p className="muted t-sm">Configure model runtime settings for plan-level execution.</p>
+            <p className="muted t-sm">Configure direct provider runtime settings for plan-level execution.</p>
           </div>
           <Link className="lnk" to="/lm-profiles">Back to LM profiles</Link>
         </header>
@@ -322,7 +276,7 @@ export function LmProfileEditorPage() {
             <label className="col gap-1">
               <span className="t-label">API base</span>
               <input aria-label="API base" className="bundles-input" value={form.api_base} onChange={(event) => setForm((prev) => ({ ...prev, api_base: event.target.value }))} />
-              <FieldHelp text="Provider base URL only; no trailing `/v1` path needed." />
+              <FieldHelp text="Provider base URL only; use the upstream endpoint directly." />
             </label>
             <label className="col gap-1">
               <span className="t-label">Model type</span>
@@ -339,9 +293,9 @@ export function LmProfileEditorPage() {
               <FieldHelp text="Override LM class only for custom adapters; otherwise leave blank." />
             </label>
             <label className="col gap-1">
-              <span className="t-label">Upstream API key (sent to LiteLLM only)</span>
-              <input type="password" aria-label="Upstream API key (sent to LiteLLM only)" className="bundles-input" value={form.upstream_api_key} onChange={(event) => setForm((prev) => ({ ...prev, upstream_api_key: event.target.value }))} placeholder="sk-..." autoComplete="off" />
-              <FieldHelp text="Used to initially provision proxy access." />
+              <span className="t-label">Provider API key (optional)</span>
+              <input type="password" aria-label="Provider API key (optional)" className="bundles-input" value={form.api_key} onChange={(event) => setForm((prev) => ({ ...prev, api_key: event.target.value }))} placeholder="sk-..." autoComplete="off" />
+              <FieldHelp text={isEditing ? (hasStoredApiKey ? "Leave blank to keep the stored key, or enter a new one to replace it." : "Optional for providers that do not require auth.") : "Optional for providers that do not require auth."} />
             </label>
             <label className="col gap-1">
               <span className="t-label">Default params (JSON object)</span>
@@ -353,13 +307,10 @@ export function LmProfileEditorPage() {
           {isEditing ? (
             <div className="panel card-pad" style={{ marginTop: 12 }}>
               <div className="row between" style={{ marginBottom: 8 }}>
-                <span className="t-label">Virtual key</span>
-                <div className="row gap-2">
-                  <Button size="sm" onClick={testConnection} disabled={isTesting}>{isTesting ? "Testing..." : "Test connection"}</Button>
-                  <Button size="sm" onClick={rotateVirtualKey} disabled={isRotating}>{isRotating ? "Rotating..." : "Rotate key"}</Button>
-                </div>
+                <span className="t-label">Stored credentials</span>
+                <Button size="sm" onClick={testConnection} disabled={isTesting}>{isTesting ? "Testing..." : "Test connection"}</Button>
               </div>
-              <div className="cap mono">{virtualKey || "No key available yet"}</div>
+              <div className="cap">{hasStoredApiKey ? "Provider API key stored." : "No provider API key stored."}</div>
               <div className="cap" style={{ marginTop: 8 }}>{testStatus || "No connection test run yet."}</div>
               <pre className="bundles-structure" style={{ marginTop: 8, maxHeight: 220 }}>{testLog || "Connection test logs will appear here."}</pre>
             </div>
@@ -410,21 +361,4 @@ function formatDate(value) {
     hour: "2-digit",
     minute: "2-digit",
   });
-}
-
-function buildCurlCommand(profile) {
-  const backendBase = (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, "");
-  const litellmBase = backendBase.replace(":8000", ":4000");
-  const profileId = String(profile?.id || "<lm-profile-id>");
-  const model = `lm-profile:${profileId}`;
-  const virtualKey = String(profile?.virtual_key || "<virtual-key-unavailable>");
-  return `curl -s ${litellmBase}/chat/completions \\
-  -H "Authorization: Bearer ${virtualKey}" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "model": "${model}",
-    "messages": [
-      {"role": "user", "content": "Reply with: LM profile test ok"}
-    ]
-  }'`;
 }

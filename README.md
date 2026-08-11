@@ -17,7 +17,7 @@ Building production LLM programs requires iteration—lots of it. DSPy Trainer g
 - **Repeatable evaluations**: Run the same tests against different models, prompts, or optimized versions
 - **Automated optimization**: Let DSPy's optimizers (MIPROv2, BootstrapFewShot, GEPA) improve your program automatically
 - **Full provenance**: Every eval and optimization links to MLflow tracking with commit SHA, metrics, and artifacts
-- **No vendor lock-in**: Uses LiteLLM for model routing—swap providers without code changes
+- **No vendor lock-in**: Point LM Profiles at direct provider endpoints without changing bundle code
 
 ---
 
@@ -43,7 +43,7 @@ docker compose up -d --remove-orphans
 
 If MLflow trace or run requests time out under load, increase `MLFLOW_WEB_WORKERS` in `.env` before restarting the stack.
 
-For non-local deployments, set `VITE_API_BASE_URL`, `VITE_MLFLOW_BASE_URL`, and `VITE_LITELLM_BASE_URL` in `.env` before rebuilding the web image. The backend automatically derives additional allowed CORS origins from those public URLs, and you can extend the allowlist further with `DSPY_TRAINER_CORS_ALLOW_ORIGINS`.
+For non-local deployments, set `VITE_API_BASE_URL` and `VITE_MLFLOW_BASE_URL` in `.env` before rebuilding the web image. The backend automatically derives additional allowed CORS origins from those public URLs, and you can extend the allowlist further with `DSPY_TRAINER_CORS_ALLOW_ORIGINS`.
 
 ### 3. Access the Platform
 
@@ -52,7 +52,6 @@ For non-local deployments, set `VITE_API_BASE_URL`, `VITE_MLFLOW_BASE_URL`, and 
 | **Web UI** | http://localhost:3000 |
 | **Backend API** | http://localhost:8000 |
 | **MLflow** | http://localhost:5001 |
-| **LiteLLM Proxy** | http://localhost:4000 |
 
 ### 4. Your First Eval
 
@@ -129,11 +128,11 @@ An **optimization job** uses DSPy optimizers to improve your program:
 
 ### 🤖 LM Profile
 
-An **LM profile** configures model routing through LiteLLM:
+An **LM profile** configures direct provider runtime access:
 
 - Model name (e.g., `openai/gpt-4o-mini`)
 - Temperature, max tokens, timeouts
-- API keys and virtual key aliases
+- Optional provider API key storage
 - Swap providers without changing bundle code
 
 ### 🔌 Managed Endpoint
@@ -190,7 +189,7 @@ DSPy handles execution, optimization, and prompt engineering for you.
 └──────┬──────┘
        │
 ┌──────┴──────────────────────────────┐
-│  Postgres  │  Redis  │  MLflow  │  LiteLLM │
+│  Postgres  │  Redis  │  MLflow  │
 └─────────────────────────────────────┘
 ```
 
@@ -200,7 +199,7 @@ DSPy handles execution, optimization, and prompt engineering for you.
 - **Postgres**: Primary app store
 - **Redis**: Queue + worker coordination
 - **MLflow**: Experiment tracking with metadata stored in a dedicated Postgres `mlflow` schema and artifacts on a Docker volume
-- **LiteLLM**: Unified LLM gateway
+- **LM Profiles**: Stored direct-provider runtime config
 
 For current stack operations and service expectations, see [`docs/COMPOSE_RUNBOOK.md`](docs/COMPOSE_RUNBOOK.md).
 
@@ -542,7 +541,6 @@ Key variables in `.env`:
 | `DSPY_TRAINER_TOTAL_ENDPOINT_WORKERS` | Number of dedicated endpoint worker containers in Compose | Optional |
 | `DSPY_TRAINER_POSTGRES_DSN` | Postgres connection | ✅ (auto in Compose) |
 | `DSPY_TRAINER_REDIS_URL` | Redis connection | ✅ (auto in Compose) |
-| `LITELLM_MASTER_KEY` | LiteLLM proxy auth | ✅ (auto in Compose) |
 
 See [`.env.sample`](.env.sample) for full reference.
 
@@ -552,9 +550,9 @@ Generate `DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY` with:
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-### LiteLLM Configuration
+### LM Profile Configuration
 
-LiteLLM runs as an internal proxy. Model routing is configured via **LM Profiles** in the Web UI:
+LM Profiles store direct provider endpoint configuration in the Web UI:
 
 1. Go to LM Profiles page
 2. Click "Create Profile"
@@ -562,7 +560,7 @@ LiteLLM runs as an internal proxy. Model routing is configured via **LM Profiles
 4. Add API key or select existing key
 5. Configure temperature, max tokens, etc.
 
-LM Profiles provision virtual keys in LiteLLM dynamically.
+LM Profiles store the provider model, API base, model type, optional LM class override, and optional provider API key.
 
 ### Managed Endpoint Workers
 
@@ -682,7 +680,7 @@ dspy-trainer/
 │   │   ├── config.py         # Pydantic settings
 │   │   ├── executor/         # Bundle execution
 │   │   ├── validator/        # Bundle validation
-│   │   └── lm/               # LiteLLM integration
+│   │   └── lm/               # LM runtime adapters
 │   ├── worker.py             # Redis queue worker
 │   ├── tests/
 │   └── sample_bundles/       # Example bundle
@@ -696,7 +694,7 @@ dspy-trainer/
 │   │   └── lmProfiles/
 │   └── package.json
 ├── docs/              # Architecture & ops docs
-├── ops/               # LiteLLM proxy config
+├── ops/               # operational helpers
 ├── dspy/              # DSPy reference submodule
 └── docker-compose.yml
 ```
@@ -718,13 +716,13 @@ See [`.serena/memories/conventions.md`](.serena/memories/conventions.md) for det
 A: A bundle is the packaging format DSPy Trainer uses. Your DSPy program lives in `module.py` inside the bundle.
 
 **Q: Can I use my own LLM provider?**  
-A: Yes! LiteLLM supports 100+ providers. Just create an LM Profile with your provider's model name.
+A: Yes. Create an LM Profile with your provider's model name, base URL, and API key if required.
 
 **Q: Do I need to use GitHub?**  
 A: Yes, for now. GitHub-first design enables commit provenance and collaborative workflows.
 
 **Q: Can I run this on a remote server?**  
-A: Yes. It's a Docker Compose stack, so adjust ports, DNS, and reverse proxying as needed. The current web shell is unauthenticated, so no Auth0 or hosted login setup is required.
+A: Yes. It's a Docker Compose stack, so adjust ports and DNS as needed. The current web shell is unauthenticated, so no Auth0 or hosted login setup is required.
 
 **Q: How do I scale worker capacity?**  
 A: Increase worker replicas in `docker-compose.yml`:
@@ -757,7 +755,7 @@ See [`AGENTS.md`](AGENTS.md) for detailed contribution guidelines.
 ## Resources
 
 - **DSPy Framework**: https://dspy.ai
-- **LiteLLM Docs**: https://docs.litellm.ai
+
 - **MLflow Docs**: https://mlflow.org/docs/latest/index.html
 - **Compose Runbook**: [`docs/COMPOSE_RUNBOOK.md`](docs/COMPOSE_RUNBOOK.md)
 

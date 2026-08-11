@@ -116,7 +116,6 @@ describe("AppShell", () => {
     );
 
     expect(screen.getByRole("link", { name: "MLFlow" })).toHaveAttribute("href", "http://localhost:5001");
-    expect(screen.getByRole("link", { name: "LiteLLM Proxy" })).toHaveAttribute("href", "http://localhost:4000");
     expect(screen.queryByText("Operator")).not.toBeInTheDocument();
     vi.unstubAllGlobals();
   });

@@ -305,11 +305,10 @@ class ReadinessStatus:
     postgres: bool
     redis: bool
     mlflow: bool
-    litellm: bool
 
     @property
     def ok(self) -> bool:
-        return self.postgres and self.redis and self.mlflow and self.litellm
+        return self.postgres and self.redis and self.mlflow
 
 
 def _load_score_threshold(bundle_path: str | None) -> float:
@@ -358,30 +357,6 @@ def _normalize_budget(value: Any, *, default: str = "medium") -> str:
     raise ValueError("budget must be one of: light, medium, heavy")
 
 
-def _derive_litellm_base_model(model: str) -> str | None:
-    raw_model = (model or "").strip()
-    if not raw_model.lower().startswith("azure/"):
-        return None
-    deployment = raw_model.split("/", 1)[1].strip()
-    if not deployment:
-        return None
-
-    patterns = [
-        r"^(?P<base>.+?)-eval-deployment-\d+$",
-        r"^(?P<base>.+?)-deployment-\d+$",
-        r"^(?P<base>.+?)-deployment$",
-        r"^(?P<base>.+?)_deployment_\d+$",
-        r"^(?P<base>.+?)_deployment$",
-    ]
-    for pattern in patterns:
-        match = re.match(pattern, deployment)
-        if match:
-            base_model = str(match.group("base") or "").strip()
-            if base_model:
-                return base_model
-    return deployment
-
-
 class AppServices:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -419,6 +394,21 @@ class AppServices:
             raise RuntimeError("module environment entries could not be decrypted with the configured key") from exc
         payload = json.loads(decrypted)
         return _normalize_module_environment_entries(payload)
+
+    def _encrypt_lm_profile_api_key(self, api_key: str | None) -> str | None:
+        clean_key = _clean_optional_text(api_key)
+        if not clean_key:
+            return None
+        return self._get_module_env_fernet().encrypt(clean_key.encode("utf-8")).decode("utf-8")
+
+    def _decrypt_lm_profile_api_key(self, encrypted_value: Any) -> str | None:
+        value = _clean_optional_text(encrypted_value)
+        if not value:
+            return None
+        try:
+            return self._get_module_env_fernet().decrypt(value.encode("utf-8")).decode("utf-8")
+        except InvalidToken as exc:
+            raise RuntimeError("lm profile api key could not be decrypted with the configured key") from exc
 
     async def ensure_bundle_requirements_installed(
         self,
@@ -549,25 +539,6 @@ class AppServices:
             lines.extend(segment for segment in existing_log.splitlines() if segment)
         lines.extend(segment for segment in additions if isinstance(segment, str) and segment)
         return "\n".join(lines)
-
-    @staticmethod
-    def _extract_litellm_message_text(result: dict[str, Any]) -> str:
-        choices = result.get("choices") if isinstance(result, dict) else None
-        if not isinstance(choices, list) or not choices:
-            return ""
-        message = choices[0].get("message") if isinstance(choices[0], dict) else None
-        if not isinstance(message, dict):
-            return ""
-        content = message.get("content")
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            text_parts: list[str] = []
-            for item in content:
-                if isinstance(item, dict) and isinstance(item.get("text"), str):
-                    text_parts.append(item["text"])
-            return "\n".join(text_parts)
-        return ""
 
     @staticmethod
     def _parse_generated_evaluation_rows(
@@ -805,7 +776,6 @@ class AppServices:
         postgres_ok = False
         redis_ok = False
         mlflow_ok = False
-        litellm_ok = False
 
         if self.postgres_pool is not None:
             try:
@@ -828,23 +798,10 @@ class AppServices:
             except Exception:
                 mlflow_ok = False
 
-            try:
-                headers = {}
-                if self.settings.litellm_api_key.strip():
-                    headers["Authorization"] = f"Bearer {self.settings.litellm_api_key}"
-                response = await self.http_client.get(
-                    f"{self.settings.litellm_base_url.rstrip('/')}/health/liveness",
-                    headers=headers,
-                )
-                litellm_ok = response.status_code < 500
-            except Exception:
-                litellm_ok = False
-
         return ReadinessStatus(
             postgres=postgres_ok,
             redis=redis_ok,
             mlflow=mlflow_ok,
-            litellm=litellm_ok,
         )
 
     async def list_workers(self) -> dict[str, Any]:
@@ -1013,6 +970,7 @@ class AppServices:
                   model_type text not null default 'responses',
                   default_params jsonb not null default '{}'::jsonb,
                   lm_class_path text,
+                  api_key_encrypted text,
                   archived_at timestamptz,
                   created_at timestamptz not null,
                   updated_at timestamptz not null
@@ -1022,6 +980,7 @@ class AppServices:
             await conn.execute("alter table lm_profiles add column if not exists model_type text not null default 'responses';")
             await conn.execute("alter table lm_profiles add column if not exists default_params jsonb not null default '{}'::jsonb;")
             await conn.execute("alter table lm_profiles add column if not exists lm_class_path text;")
+            await conn.execute("alter table lm_profiles add column if not exists api_key_encrypted text;")
             await conn.execute("alter table lm_profiles add column if not exists archived_at timestamptz;")
             await conn.execute("alter table lm_profiles add column if not exists virtual_key text;")
             await conn.execute(
@@ -2610,7 +2569,7 @@ class AppServices:
         try:
             await self.ensure_bundle_requirements_installed(module_state["bundle_path"])
             runtime_env = await self.get_module_runtime_environment(str(endpoint["module_import_id"]))
-            lm_profile = await self.get_lm_profile(str(endpoint["lm_profile_id"])) if endpoint.get("lm_profile_id") else None
+            lm_profile = await self._get_lm_profile_record(str(endpoint["lm_profile_id"]), include_secret=True) if endpoint.get("lm_profile_id") else None
             if stream:
                 from app.executor.module_runner import stream_bundle
 
@@ -2977,110 +2936,58 @@ class AppServices:
             raise RuntimeError(f"MLflow {method} {path} returned invalid payload")
         return data
 
-    async def _litellm_request(
-        self,
-        method: str,
-        path: str,
-        payload: dict[str, Any] | None = None,
-        query: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        if self.http_client is None:
-            raise RuntimeError("http client not initialized")
-        headers = {}
-        if self.settings.litellm_api_key.strip():
-            headers["Authorization"] = f"Bearer {self.settings.litellm_api_key}"
-        url = f"{self.settings.litellm_base_url.rstrip('/')}{path}"
-        response = await self.http_client.request(method, url, json=payload, params=query, headers=headers)
-        if response.status_code >= 400:
-            raise RuntimeError(f"LiteLLM {method} {path} failed ({response.status_code}): {response.text}")
-        data = response.json()
-        if isinstance(data, dict):
-            return data
-        return {"data": data}
+    @staticmethod
+    def _extract_lm_output_text(result: Any) -> str:
+        if isinstance(result, str):
+            return result
+        if isinstance(result, dict):
+            for key in ("output_text", "text", "content"):
+                value = result.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value
+                if isinstance(value, list):
+                    pieces: list[str] = []
+                    for item in value:
+                        if isinstance(item, str):
+                            pieces.append(item)
+                        elif isinstance(item, dict):
+                            text_value = item.get("text") or item.get("content")
+                            if isinstance(text_value, str):
+                                pieces.append(text_value)
+                    combined = "".join(pieces).strip()
+                    if combined:
+                        return combined
+        if isinstance(result, list) and result:
+            return AppServices._extract_lm_output_text(result[0])
+        return str(result or "")
 
-    async def _litellm_openai_request(self, path: str, payload: dict[str, Any], api_key: str) -> dict[str, Any]:
-        if self.http_client is None:
-            raise RuntimeError("http client not initialized")
-        headers = {"Authorization": f"Bearer {api_key}"}
-        url = f"{self.settings.litellm_base_url.rstrip('/')}{path}"
+    async def _call_lm_profile(
+        self,
+        profile: dict[str, Any],
+        *,
+        messages: list[dict[str, Any]],
+        prompt: str | None = None,
+        overrides: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        from app.executor.module_runner import _build_lm_from_profile
+
+        def _invoke() -> dict[str, Any]:
+            lm = _build_lm_from_profile(profile)
+            kwargs = dict(overrides or {})
+            if str(profile.get("model_type") or "responses").strip() == "text":
+                raw = lm(prompt=prompt or "\n\n".join(str(item.get("content") or "") for item in messages), **kwargs)
+            else:
+                raw = lm(messages=messages, **kwargs)
+            return {
+                "raw": raw,
+                "reply": self._extract_lm_output_text(raw),
+                "model": str(profile.get("model") or ""),
+            }
+
         try:
-            response = await self.http_client.post(url, json=payload, headers=headers, timeout=60.0)
-        except httpx.TimeoutException as exc:
-            raise RuntimeError(f"LiteLLM POST {path} timed out after 60s") from exc
-        if response.status_code >= 400:
-            raise RuntimeError(f"LiteLLM POST {path} failed ({response.status_code}): {response.text}")
-        data = response.json()
-        if isinstance(data, dict):
-            return data
-        return {"data": data}
-
-    async def list_litellm_keys(self) -> dict[str, Any]:
-        try:
-            return await self._litellm_request("GET", "/key/list")
-        except Exception:
-            return await self._litellm_request("GET", "/v1/key/list")
-
-    async def create_litellm_key(
-        self,
-        models: list[str],
-        aliases: dict[str, str],
-        metadata: dict[str, Any],
-        duration: str | None,
-        key_alias: str | None,
-        team_id: str | None,
-        user_id: str | None,
-    ) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "models": models,
-            "aliases": aliases,
-            "metadata": metadata,
-        }
-        if duration:
-            payload["duration"] = duration
-        if key_alias:
-            payload["key_alias"] = key_alias
-        if team_id:
-            payload["team_id"] = team_id
-        if user_id:
-            payload["user_id"] = user_id
-        return await self._litellm_request("POST", "/key/generate", payload=payload)
-
-    async def get_litellm_key_info(self, key: str) -> dict[str, Any]:
-        return await self._litellm_request("GET", "/key/info", query={"key": key})
-
-    async def update_litellm_key(
-        self,
-        key: str,
-        models: list[str] | None,
-        aliases: dict[str, str] | None,
-        metadata: dict[str, Any] | None,
-        duration: str | None,
-        max_budget: float | None,
-        rpm_limit: int | None,
-        tpm_limit: int | None,
-    ) -> dict[str, Any]:
-        payload: dict[str, Any] = {"key": key}
-        if models is not None:
-            payload["models"] = models
-        if aliases is not None:
-            payload["aliases"] = aliases
-        if metadata is not None:
-            payload["metadata"] = metadata
-        if duration is not None:
-            payload["duration"] = duration
-        if max_budget is not None:
-            payload["max_budget"] = max_budget
-        if rpm_limit is not None:
-            payload["rpm_limit"] = rpm_limit
-        if tpm_limit is not None:
-            payload["tpm_limit"] = tpm_limit
-        return await self._litellm_request("POST", "/key/update", payload=payload)
-
-    async def revoke_litellm_key(self, key: str) -> dict[str, Any]:
-        return await self._litellm_request("POST", "/key/block", payload={"key": key})
-
-    async def restore_litellm_key(self, key: str) -> dict[str, Any]:
-        return await self._litellm_request("POST", "/key/unblock", payload={"key": key})
+            return await asyncio.to_thread(_invoke)
+        except Exception as exc:
+            raise RuntimeError(f"LM profile invocation failed: {exc}") from exc
 
     async def ensure_mlflow_experiment(self, project_id: str, experiment_name: str | None = None) -> str:
         if not experiment_name:
@@ -3966,14 +3873,14 @@ class AppServices:
 
                 execution_lm_profile = None
                 if job.get("execution_lm_profile_id"):
-                    execution_lm_profile = await self.get_lm_profile(str(job["execution_lm_profile_id"]))
+                    execution_lm_profile = await self._get_lm_profile_record(str(job["execution_lm_profile_id"]), include_secret=True)
                     if execution_lm_profile is None:
                         raise RuntimeError("execution lm profile not found")
                     emit(f"execution_lm_profile_id={job['execution_lm_profile_id']}")
 
                 helper_lm_profile = None
                 if job.get("helper_lm_profile_id"):
-                    helper_lm_profile = await self.get_lm_profile(str(job["helper_lm_profile_id"]))
+                    helper_lm_profile = await self._get_lm_profile_record(str(job["helper_lm_profile_id"]), include_secret=True)
                     if helper_lm_profile is None:
                         raise RuntimeError("helper lm profile not found")
                     emit(f"helper_lm_profile_id={job['helper_lm_profile_id']}")
@@ -4199,6 +4106,39 @@ class AppServices:
                 )
         return await self.get_optimization_job(optimization_job_id)
 
+    def _serialize_lm_profile(self, row: Any, *, include_secret: bool = False) -> dict[str, Any]:
+        profile = {
+            "id": row["id"],
+            "name": row["name"],
+            "model": row["model"],
+            "api_base": row["api_base"],
+            "model_type": row["model_type"],
+            "default_params": self._json_dict(row["default_params"]),
+            "lm_class_path": row["lm_class_path"],
+            "has_api_key": bool(_clean_optional_text(self._row_value(row, "api_key_encrypted"))),
+            "created_at": row["created_at"].isoformat(),
+            "updated_at": row["updated_at"].isoformat(),
+        }
+        if include_secret:
+            profile["api_key"] = self._decrypt_lm_profile_api_key(self._row_value(row, "api_key_encrypted"))
+        return profile
+
+    async def _get_lm_profile_record(self, lm_profile_id: str, *, include_secret: bool = False) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                select id, name, model, api_base, model_type, default_params, lm_class_path, api_key_encrypted, archived_at, created_at, updated_at
+                from lm_profiles
+                where id = $1 and archived_at is null
+                """,
+                lm_profile_id,
+            )
+        if row is None:
+            return None
+        return self._serialize_lm_profile(row, include_secret=include_secret)
+
     async def create_lm_profile(
         self,
         name: str,
@@ -4207,7 +4147,7 @@ class AppServices:
         model_type: str,
         default_params: dict[str, Any],
         lm_class_path: str | None,
-        upstream_api_key: str | None,
+        api_key: str | None,
     ) -> dict[str, Any]:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
@@ -4217,21 +4157,13 @@ class AppServices:
         clean_api_base = api_base.strip()
         clean_model_type = model_type.strip() or "responses"
         clean_lm_class_path = lm_class_path.strip() if isinstance(lm_class_path, str) and lm_class_path.strip() else None
-        await self._provision_litellm_model(
-            profile_ref=profile_id,
-            profile_name=clean_name,
-            model=clean_model,
-            api_base=clean_api_base,
-            model_type=clean_model_type,
-            upstream_api_key=upstream_api_key,
-        )
-        virtual_key = await self._generate_lm_profile_virtual_key(profile_id=profile_id, model=clean_model)
+        encrypted_api_key = self._encrypt_lm_profile_api_key(api_key)
         now = datetime.now(timezone.utc)
         async with self.postgres_pool.acquire() as conn:
             await conn.execute(
                 """
                 insert into lm_profiles (
-                  id, name, model, api_base, model_type, default_params, lm_class_path, virtual_key, archived_at, created_at, updated_at
+                  id, name, model, api_base, model_type, default_params, lm_class_path, api_key_encrypted, archived_at, created_at, updated_at
                 )
                 values ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, null, $9, $10)
                 """,
@@ -4242,7 +4174,7 @@ class AppServices:
                 clean_model_type,
                 __import__("json").dumps(default_params if isinstance(default_params, dict) else {}),
                 clean_lm_class_path,
-                virtual_key,
+                encrypted_api_key,
                 now,
                 now,
             )
@@ -4257,55 +4189,16 @@ class AppServices:
         async with self.postgres_pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                select id, name, model, api_base, model_type, default_params, lm_class_path, virtual_key, archived_at, created_at, updated_at
+                select id, name, model, api_base, model_type, default_params, lm_class_path, api_key_encrypted, archived_at, created_at, updated_at
                 from lm_profiles
                 where archived_at is null
                 order by created_at desc
                 """
             )
-        return [
-            {
-                "id": row["id"],
-                "name": row["name"],
-                "model": row["model"],
-                "api_base": row["api_base"],
-                "model_type": row["model_type"],
-                "default_params": self._json_dict(row["default_params"]),
-                "lm_class_path": row["lm_class_path"],
-                "virtual_key": row["virtual_key"],
-                "created_at": row["created_at"].isoformat(),
-                "updated_at": row["updated_at"].isoformat(),
-            }
-            for row in rows
-        ]
+        return [self._serialize_lm_profile(row) for row in rows]
 
     async def get_lm_profile(self, lm_profile_id: str) -> dict[str, Any] | None:
-        if self.postgres_pool is None:
-            raise RuntimeError("database not initialized")
-        async with self.postgres_pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                select id, name, model, api_base, model_type, default_params, lm_class_path, virtual_key, archived_at, created_at, updated_at
-                from lm_profiles
-                where id = $1 and archived_at is null
-                """,
-                lm_profile_id,
-            )
-        if row is None:
-            return None
-        return {
-            "id": row["id"],
-            "name": row["name"],
-            "model": row["model"],
-            "api_base": row["api_base"],
-            "proxy_api_base": self.settings.litellm_base_url,
-            "model_type": row["model_type"],
-            "default_params": self._json_dict(row["default_params"]),
-            "lm_class_path": row["lm_class_path"],
-            "virtual_key": row["virtual_key"],
-            "created_at": row["created_at"].isoformat(),
-            "updated_at": row["updated_at"].isoformat(),
-        }
+        return await self._get_lm_profile_record(lm_profile_id)
 
     async def update_lm_profile(
         self,
@@ -4316,7 +4209,7 @@ class AppServices:
         model_type: str | None,
         default_params: dict[str, Any] | None,
         lm_class_path: str | None,
-        upstream_api_key: str | None,
+        api_key: str | None,
     ) -> dict[str, Any] | None:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
@@ -4324,7 +4217,7 @@ class AppServices:
         async with self.postgres_pool.acquire() as conn:
             existing = await conn.fetchrow(
                 """
-                select id, name, model, api_base, model_type, default_params, lm_class_path
+                select id, name, model, api_base, model_type, default_params, lm_class_path, api_key_encrypted
                 from lm_profiles
                 where id = $1 and archived_at is null
                 """,
@@ -4338,17 +4231,9 @@ class AppServices:
             next_model_type = model_type.strip() if isinstance(model_type, str) and model_type.strip() else existing["model_type"]
             next_default_params = default_params if isinstance(default_params, dict) else self._json_dict(existing["default_params"])
             next_lm_class_path = lm_class_path.strip() if isinstance(lm_class_path, str) and lm_class_path.strip() else None
-            model_changed = next_model != existing["model"]
-            api_base_changed = next_api_base != existing["api_base"]
-            await self._sync_litellm_model_update(
-                profile_ref=lm_profile_id,
-                profile_name=next_name,
-                model=next_model,
-                api_base=next_api_base,
-                model_type=next_model_type,
-                upstream_api_key=upstream_api_key,
-                include_litellm_params=(model_changed or api_base_changed),
-            )
+            encrypted_api_key = existing["api_key_encrypted"]
+            if api_key is not None:
+                encrypted_api_key = self._encrypt_lm_profile_api_key(api_key)
             await conn.execute(
                 """
                 update lm_profiles
@@ -4358,7 +4243,8 @@ class AppServices:
                     model_type = $5,
                     default_params = $6::jsonb,
                     lm_class_path = $7,
-                    updated_at = $8
+                    api_key_encrypted = $8,
+                    updated_at = $9
                 where id = $1
                 """,
                 lm_profile_id,
@@ -4368,191 +4254,26 @@ class AppServices:
                 next_model_type,
                 __import__("json").dumps(next_default_params),
                 next_lm_class_path,
+                encrypted_api_key,
                 now,
             )
         return await self.get_lm_profile(lm_profile_id)
 
-    async def rotate_lm_profile_virtual_key(self, lm_profile_id: str) -> dict[str, Any] | None:
-        if self.postgres_pool is None:
-            raise RuntimeError("database not initialized")
-        async with self.postgres_pool.acquire() as conn:
-            existing = await conn.fetchrow(
-                """
-                select id, name, model, api_base, model_type, virtual_key
-                from lm_profiles
-                where id = $1 and archived_at is null
-                """,
-                lm_profile_id,
-            )
-            if existing is None:
-                return None
-            await self._provision_litellm_model(
-                profile_ref=lm_profile_id,
-                profile_name=existing["name"],
-                model=existing["model"],
-                api_base=existing["api_base"],
-                model_type=existing["model_type"],
-                upstream_api_key=None,
-            )
-            prior_key = existing["virtual_key"]
-            if isinstance(prior_key, str) and prior_key.strip():
-                try:
-                    await self.revoke_litellm_key(prior_key)
-                except Exception:
-                    # Continue rotation even if previous key is already invalid/missing in proxy.
-                    pass
-            new_key = await self._generate_lm_profile_virtual_key(profile_id=lm_profile_id, model=existing["model"])
-            now = datetime.now(timezone.utc)
-            await conn.execute(
-                """
-                update lm_profiles
-                set virtual_key = $2,
-                    updated_at = $3
-                where id = $1
-                """,
-                lm_profile_id,
-                new_key,
-                now,
-            )
-        result = await self.get_lm_profile(lm_profile_id)
-        return result
-
     async def test_lm_profile_connection(self, lm_profile_id: str) -> dict[str, Any] | None:
-        profile = await self.get_lm_profile(lm_profile_id)
+        profile = await self._get_lm_profile_record(lm_profile_id, include_secret=True)
         if profile is None:
             return None
-        virtual_key = profile.get("virtual_key")
-        if not isinstance(virtual_key, str) or not virtual_key.strip():
-            raise RuntimeError("lm profile has no virtual key")
-        payload = {
-            "model": f"lm-profile:{lm_profile_id}",
-            "messages": [{"role": "user", "content": "Reply with: connection-ok"}],
-            "temperature": 0,
-            "max_tokens": 24,
-        }
-        try:
-            result = await self._litellm_openai_request("/chat/completions", payload=payload, api_key=virtual_key)
-        except Exception:
-            result = await self._litellm_openai_request("/v1/chat/completions", payload=payload, api_key=virtual_key)
-        text = ""
-        try:
-            choices = result.get("choices") if isinstance(result, dict) else None
-            if isinstance(choices, list) and choices:
-                message = choices[0].get("message") if isinstance(choices[0], dict) else None
-                if isinstance(message, dict):
-                    text = str(message.get("content") or "")
-        except Exception:
-            text = ""
-        return {
-            "ok": True,
-            "model": payload["model"],
-            "reply": text,
-            "raw": result,
-        }
-
-    async def _generate_lm_profile_virtual_key(self, profile_id: str, model: str) -> str:
-        profile_model_name = f"lm-profile:{profile_id}"
-        unique_alias = f"lm-profile:{profile_id}:{str(uuid4())[:8]}"
-        payload = await self.create_litellm_key(
-            models=[profile_model_name, model],
-            aliases={"default": profile_model_name},
-            metadata={"lm_profile_id": profile_id},
-            duration=None,
-            key_alias=unique_alias,
-            team_id=None,
-            user_id=None,
+        result = await self._call_lm_profile(
+            profile,
+            messages=[{"role": "user", "content": "Reply with: connection-ok"}],
+            prompt="Reply with: connection-ok",
+            overrides={"temperature": 0, "max_tokens": 24},
         )
-        key = payload.get("key")
-        if not isinstance(key, str) or not key.strip():
-            raise RuntimeError("LiteLLM key generation returned no key")
-        return key
-
-    async def _provision_litellm_model(
-        self,
-        profile_ref: str,
-        profile_name: str,
-        model: str,
-        api_base: str,
-        model_type: str,
-        upstream_api_key: str | None,
-    ) -> None:
-        clean_key = upstream_api_key.strip() if isinstance(upstream_api_key, str) else ""
-        if not clean_key:
-            return
-        payload = {
-            "model_name": f"lm-profile:{profile_ref}",
-            "litellm_params": {
-                "model": model,
-                "api_base": api_base,
-                "api_key": clean_key,
-            },
-            "model_info": {
-                "id": profile_ref,
-                "mode": model_type,
-                "metadata": {"lm_profile_name": profile_name},
-            },
-        }
-        base_model = _derive_litellm_base_model(model)
-        if base_model:
-            payload["litellm_params"]["base_model"] = base_model
-        try:
-            await self._litellm_request("POST", "/model/new", payload=payload)
-        except Exception as exc:
-            message = str(exc)
-            if "Unique constraint failed" not in message and "Failed to add model to db" not in message:
-                raise
-            await self._litellm_request("PATCH", f"/model/{profile_ref}/update", payload=payload)
-
-    async def _sync_litellm_model_update(
-        self,
-        profile_ref: str,
-        profile_name: str,
-        model: str,
-        api_base: str,
-        model_type: str,
-        upstream_api_key: str | None,
-        include_litellm_params: bool,
-    ) -> None:
-        payload: dict[str, Any] = {
-            "model_name": f"lm-profile:{profile_ref}",
-            "model_info": {
-                "id": profile_ref,
-                "mode": model_type,
-                "metadata": {"lm_profile_name": profile_name},
-            },
-        }
-        if include_litellm_params:
-            clean_key = upstream_api_key.strip() if isinstance(upstream_api_key, str) else ""
-            if not clean_key:
-                raise RuntimeError("upstream_api_key is required when model or api_base changes")
-            payload["litellm_params"] = {
-                "model": model,
-                "api_base": api_base,
-                "api_key": clean_key,
-            }
-            base_model = _derive_litellm_base_model(model)
-            if base_model:
-                payload["litellm_params"]["base_model"] = base_model
-        await self._litellm_request("PATCH", f"/model/{profile_ref}/update", payload=payload)
+        return {"ok": True, **result}
 
     async def delete_lm_profile(self, lm_profile_id: str) -> bool:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
-        async with self.postgres_pool.acquire() as conn:
-            existing = await conn.fetchrow(
-                """
-                select id, virtual_key
-                from lm_profiles
-                where id = $1 and archived_at is null
-                """,
-                lm_profile_id,
-            )
-        if existing is None:
-            return False
-        virtual_key = existing["virtual_key"]
-        if isinstance(virtual_key, str) and virtual_key.strip():
-            await self._litellm_request("POST", "/key/delete", payload={"keys": [virtual_key]})
-        await self._litellm_request("POST", "/model/delete", payload={"id": lm_profile_id})
         now = datetime.now(timezone.utc)
         async with self.postgres_pool.acquire() as conn:
             result = await conn.execute(
@@ -5104,12 +4825,9 @@ class AppServices:
             raise ValueError("operator_prompt is required")
         if max_rows < 1 or max_rows > 25:
             raise ValueError("max_rows must be between 1 and 25")
-        profile = await self.get_lm_profile(lm_profile_id)
+        profile = await self._get_lm_profile_record(lm_profile_id, include_secret=True)
         if profile is None:
             raise ValueError("lm profile not found")
-        virtual_key = str(profile.get("virtual_key") or "").strip()
-        if not virtual_key:
-            raise RuntimeError("lm profile has no virtual key")
         evaluation_contract = await self._resolve_evaluation_contract(module_import_id)
 
         normalized_existing: list[dict[str, Any]] = []
@@ -5142,20 +4860,17 @@ class AppServices:
 
         last_error = "unknown parse failure"
         for attempt in range(1, 4):
-            payload = {
-                "model": f"lm-profile:{lm_profile_id}",
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "temperature": 0.3,
-                "max_tokens": 1400,
-            }
-            try:
-                result = await self._litellm_openai_request("/chat/completions", payload=payload, api_key=virtual_key)
-            except Exception:
-                result = await self._litellm_openai_request("/v1/chat/completions", payload=payload, api_key=virtual_key)
-            text = self._extract_litellm_message_text(result)
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+            result = await self._call_lm_profile(
+                profile,
+                messages=messages,
+                prompt=f"{system_prompt}\n\n{user_prompt}",
+                overrides={"temperature": 0.3, "max_tokens": 1400},
+            )
+            text = str(result.get("reply") or "")
             try:
                 rows = self._parse_generated_evaluation_rows(text, evaluation_contract=evaluation_contract)
                 return {"items": rows, "attempts": attempt}
@@ -5690,7 +5405,7 @@ class AppServices:
                        lp.model_type as lm_model_type,
                        lp.default_params as lm_default_params,
                        lp.lm_class_path as lm_class_path,
-                       lp.virtual_key as lm_virtual_key
+                       lp.api_key_encrypted as lm_api_key_encrypted
                 from agent_run_tasks t
                 join agent_run_plans p on p.id = t.plan_id
                 left join lm_profiles lp on lp.id = p.lm_profile_id and lp.archived_at is null
@@ -5755,11 +5470,10 @@ class AppServices:
                     "id": str(task["lm_profile_id"]),
                     "model": task["lm_model"],
                     "api_base": task["lm_api_base"],
-                    "proxy_api_base": self.settings.litellm_base_url,
                     "model_type": task["lm_model_type"],
                     "default_params": self._json_dict(task["lm_default_params"]),
                     "lm_class_path": task["lm_class_path"],
-                    "virtual_key": task["lm_virtual_key"],
+                    "api_key": self._decrypt_lm_profile_api_key(task["lm_api_key_encrypted"]),
                 }
             child_payload = {
                 "bundle_path": str(task["bundle_path"]),

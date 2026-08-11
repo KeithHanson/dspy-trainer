@@ -14,7 +14,6 @@ Current shell note:
 - `postgres` (`5432`)
 - `redis` (`6379`)
 - `mlflow` (`5001`)
-- `litellm-proxy` (`4000`)
 - `backend` (`8000`)
 - `worker` (no host port)
 - `web` (`3000`)
@@ -31,10 +30,14 @@ MLflow concurrency can be tuned with `MLFLOW_WEB_WORKERS` in `.env` (default `4`
 
 Before starting the stack, ensure `.env` contains `GITHUB_PAT` if you want to import, sync, or push GitHub-backed bundles. Backend and worker read that variable server-side; the web UI only reports whether GitHub access is configured. GitHub imports may target either the repo root or a configured bundle subfolder. Optimization writeback now pushes to an `optimization-<job-prefix>` branch for manual merge, so also set `GIT_COMMIT_NAME` and `GIT_COMMIT_EMAIL` (defaults are provided if omitted).
 
-LiteLLM setup note:
+Secret storage note:
+- `DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY` is required if you want to store module environment entries or LM Profile provider API keys in Postgres.
+- Generate it once and keep it stable across restarts.
+
+LM Profile setup note:
 - The repo does not ship a default upstream model configuration.
-- Normal operator flow is to start the proxy, then create LM Profiles in the app UI.
-- Those LM Profiles provision model routing and virtual keys dynamically inside LiteLLM.
+- Normal operator flow is to start the stack, then create LM Profiles in the app UI.
+- Each LM Profile stores the direct provider endpoint, model identifier, optional LM class override, and optional provider API key.
 
 Bundle runtime note:
 - If a tracked bundle contains `requirements.txt`, backend and worker install those dependencies automatically before executing the bundle.
@@ -46,11 +49,6 @@ docker compose pull --ignore-pull-failures
 docker compose build --pull
 docker compose up -d --remove-orphans
 ```
-
-Expected outcome:
-- Images are present and build completes.
-- Containers start in detached mode.
-- `backend`, `worker`, and `web` wait on upstream health checks.
 
 ## Non-Interactive Operations
 
@@ -83,7 +81,7 @@ docker compose logs --timestamps --tail=200
 Follow key services:
 
 ```bash
-docker compose logs -f --timestamps backend worker litellm-proxy
+docker compose logs -f --timestamps backend worker
 ```
 
 ### Rebuild
@@ -118,7 +116,6 @@ Expected: all services show `running` and health-enabled services become `health
 curl -fsS http://localhost:8000/health
 curl -fsS http://localhost:8000/ready
 curl -fsS http://localhost:3000/health
-curl -fsS -H "Authorization: Bearer ${LITELLM_MASTER_KEY:-sk-local-dev-master-key}" http://localhost:4000/health
 ```
 
 ### Backend Dependency Checks from Container
@@ -126,53 +123,22 @@ curl -fsS -H "Authorization: Bearer ${LITELLM_MASTER_KEY:-sk-local-dev-master-ke
 ```bash
 docker compose exec -T backend python -c "import os, redis; redis.Redis.from_url(os.environ['DSPY_TRAINER_REDIS_URL']).ping(); print('redis ok')"
 docker compose exec -T backend python -c "import os, urllib.request; urllib.request.urlopen(os.environ['DSPY_TRAINER_MLFLOW_TRACKING_URI'], timeout=5); print('mlflow ok')"
-docker compose exec -T backend python -c "import os, urllib.request; req=urllib.request.Request(os.environ['DSPY_TRAINER_LITELLM_BASE_URL'] + '/health', headers={'Authorization':'Bearer ' + os.environ['DSPY_TRAINER_LITELLM_API_KEY']}); urllib.request.urlopen(req, timeout=5); print('litellm ok')"
 docker compose exec -T backend python -c "import os; print('github ok' if (os.environ.get('DSPY_TRAINER_GITHUB_PAT') or os.environ.get('GITHUB_PAT')) else 'github missing')"
 docker compose exec -T backend python -c "import os; print(os.environ.get('DSPY_TRAINER_GIT_COMMIT_NAME', '')); print(os.environ.get('DSPY_TRAINER_GIT_COMMIT_EMAIL', ''))"
 ```
 
 ## Troubleshooting
 
-### LiteLLM Auth Failures (`401` or `403`)
+### LM Profile Connection or Provider Auth Issues
 
 Symptoms:
-- `backend` or `worker` logs contain unauthorized responses from LiteLLM.
+- LM Profile `Test connection` fails in the UI.
+- Eval or optimization logs contain provider auth, URL, or model-not-found errors.
 
 Checks:
-
-```bash
-docker compose exec -T backend python -c "import os; print(os.environ['DSPY_TRAINER_LITELLM_API_KEY'])"
-docker compose exec -T litellm-proxy python -c "import os; print(os.environ['LITELLM_MASTER_KEY'])"
-```
-
-Remediation:
-- Ensure both values match (`DSPY_TRAINER_LITELLM_API_KEY` and `LITELLM_MASTER_KEY`).
-- If you changed `.env`, restart services:
-
-```bash
-docker compose up -d --force-recreate litellm-proxy backend worker
-```
-
-### LiteLLM Endpoint/Model Issues (`404`, `422`, provider errors)
-
-Symptoms:
-- Proxy healthy but completion calls fail.
-- Logs mention missing model, invalid provider config, or Azure base/version errors.
-
-Checks:
-
-```bash
-docker compose logs --tail=200 litellm-proxy
-```
-
-Remediation:
-- Confirm the proxy is healthy and the target LM Profile was created successfully in the app.
-- If model creation or key provisioning failed, inspect backend logs and retry LM Profile creation.
-- Recreate proxy after env/config changes:
-
-```bash
-docker compose up -d --force-recreate litellm-proxy
-```
+- Confirm the LM Profile `api_base`, `model`, and `model_type` match the target provider.
+- Re-enter the provider API key in the LM Profile if credentials changed.
+- If the bundle needs additional env vars (for example Azure API version), configure them on the module import and recreate the run.
 
 ### Backend Not Ready
 
@@ -184,11 +150,11 @@ Checks:
 
 ```bash
 docker compose logs --tail=200 backend
-docker compose ps postgres redis mlflow litellm-proxy backend
+docker compose ps postgres redis mlflow backend
 ```
 
 Remediation sequence:
-1. Confirm upstream services are healthy (`postgres`, `redis`, `mlflow`, `litellm-proxy`).
+1. Confirm upstream services are healthy (`postgres`, `redis`, `mlflow`).
 2. Restart backend after dependencies are healthy:
 
 ```bash

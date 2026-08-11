@@ -39,7 +39,6 @@ function NavSection({ items, hasActiveRun, hasActiveOptimization }) {
 export function AppShell({ children }) {
   const apiBase = useMemo(() => (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, ""), []);
   const mlflowBase = useMemo(() => (import.meta.env.VITE_MLFLOW_BASE_URL || "http://localhost:5001").replace(/\/$/, ""), []);
-  const litellmBase = useMemo(() => (import.meta.env.VITE_LITELLM_BASE_URL || "http://localhost:4000").replace(/\/$/, ""), []);
   const [hasActiveRun, setHasActiveRun] = useState(false);
   const [hasActiveOptimization, setHasActiveOptimization] = useState(false);
 
@@ -104,10 +103,6 @@ export function AppShell({ children }) {
             <a className="shell-nav-item" href={mlflowBase} target="_blank" rel="noreferrer">
               <Icon className="shell-nav-icon" name="external" size={16} />
               <span>MLFlow</span>
-            </a>
-            <a className="shell-nav-item" href={litellmBase} target="_blank" rel="noreferrer">
-              <Icon className="shell-nav-icon" name="external" size={16} />
-              <span>LiteLLM Proxy</span>
             </a>
           </div>
         </div>
