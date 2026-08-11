@@ -49,23 +49,32 @@ def test_list_workers_reports_configured_total_even_when_some_workers_are_missin
 
 
 def test_list_endpoint_workers_exposes_revision_state():
-    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer", total_endpoint_workers=2))
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer", total_endpoint_workers=4))
     setattr(
         services,
         "redis",
         FakeRedis(
             {
-                "dspy-trainer:endpoint-workers:endpoint-worker-1": '{"worker_id":"endpoint-worker-1","status":"listening","endpoint_id":"endpoint-1","desired_revision_id":"rev-2","warmed_revision_id":"rev-2","last_seen":"2026-01-01T00:00:00+00:00","kind":"endpoint"}',
-                "dspy-trainer:endpoint-workers:endpoint-worker-2": '{"worker_id":"endpoint-worker-2","status":"stale","endpoint_id":"endpoint-1","desired_revision_id":"rev-2","warmed_revision_id":"rev-1","last_seen":"2026-01-01T00:00:00+00:00","kind":"endpoint"}',
+                "dspy-trainer:endpoint-workers:endpoint-worker-1": '{"worker_id":"endpoint-worker-1","status":"listening","endpoint_id":"endpoint-1","desired_revision_id":"rev-22222222","warmed_revision_id":"rev-22222222","last_seen":"2026-01-01T00:00:00+00:00","kind":"endpoint"}',
+                "dspy-trainer:endpoint-workers:endpoint-worker-2": '{"worker_id":"endpoint-worker-2","status":"stale","endpoint_id":"endpoint-1","desired_revision_id":"rev-22222222","warmed_revision_id":"rev-11111111","last_seen":"2026-01-01T00:00:00+00:00","kind":"endpoint"}',
+                "dspy-trainer:endpoint-workers:endpoint-worker-3": '{"worker_id":"endpoint-worker-3","status":"preparing","endpoint_id":"endpoint-2","desired_revision_id":"rev-33333333","warmed_revision_id":"rev-22222222","last_seen":"2026-01-01T00:00:00+00:00","kind":"endpoint"}',
+                "dspy-trainer:endpoint-workers:endpoint-worker-4": '{"worker_id":"endpoint-worker-4","status":"idle","endpoint_id":null,"desired_revision_id":null,"warmed_revision_id":null,"last_seen":"2026-01-01T00:00:00+00:00","kind":"endpoint"}',
             }
         ),
     )
 
     payload = asyncio.run(services.list_endpoint_workers())
 
-    assert payload["available_workers"] == 1
-    assert payload["items"][0]["desired_revision_id"] == "rev-2"
-    assert payload["items"][1]["warmed_revision_id"] == "rev-1"
+    assert payload["available_workers"] == 2
+    assert payload["items"][0]["desired_revision_id"] == "rev-22222222"
+    assert payload["items"][0]["deploy_state"] == "ready"
+    assert payload["items"][0]["is_revision_ready"] is True
+    assert payload["items"][1]["warmed_revision_id"] == "rev-11111111"
+    assert payload["items"][1]["deploy_state"] == "revision_mismatch"
+    assert "rev-2222" in payload["items"][1]["state_summary"]
+    assert payload["items"][2]["deploy_state"] == "warming"
+    assert payload["items"][3]["state_label"] == "Idle"
+    assert payload["items"][3]["deploy_state"] == "unassigned"
 
 
 def test_enqueue_endpoint_invocation_succeeds_once_worker_is_listening_on_current_revision(monkeypatch):
