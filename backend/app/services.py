@@ -2544,6 +2544,8 @@ class AppServices:
                 continue
             if str(worker.get("status") or "") != "listening":
                 continue
+            if str(worker.get("desired_revision_id") or "").strip() != desired_revision_id:
+                continue
             if str(worker.get("warmed_revision_id") or "").strip() != desired_revision_id:
                 continue
             ready += 1
