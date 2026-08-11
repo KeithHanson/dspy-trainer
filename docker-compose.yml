@@ -46,7 +46,7 @@ services:
       - ./ops/mlflow/start.sh:/opt/mlflow/start.sh:ro
       - mlflow_artifacts:/mlflow/artifacts
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000', timeout=3)"]
+      test: ["CMD", "python", "-c", "import os, urllib.request; base=os.environ.get('MLFLOW_STATIC_PREFIX', '/mlflow').rstrip('/') or '/mlflow'; urllib.request.urlopen(f'http://localhost:5000{base}/', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 10
