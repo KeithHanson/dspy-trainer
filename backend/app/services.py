@@ -872,6 +872,8 @@ class AppServices:
                     "last_seen": payload.get("last_seen"),
                     "kind": str(payload.get("kind") or "worker"),
                     "endpoint_id": payload.get("endpoint_id"),
+                    "desired_revision_id": payload.get("desired_revision_id"),
+                    "warmed_revision_id": payload.get("warmed_revision_id"),
                 }
             )
         workers.sort(key=lambda item: item["worker_id"])
@@ -2521,6 +2523,32 @@ class AppServices:
                 assigned += 1
         return assigned
 
+    async def _get_endpoint_desired_revision_id(self, endpoint_id: str) -> str | None:
+        endpoint = await self.get_bundle_endpoint(endpoint_id)
+        if endpoint is None:
+            return None
+        module_state = await self.resolve_module_execution_state(str(endpoint["module_import_id"]))
+        if module_state is None:
+            return None
+        return str(module_state.get("bundle_revision_id") or "").strip() or None
+
+    async def count_ready_endpoint_workers_assigned(self, endpoint_id: str) -> int:
+        desired_revision_id = await self._get_endpoint_desired_revision_id(endpoint_id)
+        if desired_revision_id is None:
+            return 0
+        workers = await self._list_registered_workers(self.settings.endpoint_worker_registry_prefix)
+        ready = 0
+        for worker in workers:
+            assignment = await self.get_endpoint_worker_assignment(str(worker["worker_id"]))
+            if not assignment or str(assignment.get("endpoint_id") or "") != endpoint_id:
+                continue
+            if str(worker.get("status") or "") != "listening":
+                continue
+            if str(worker.get("warmed_revision_id") or "").strip() != desired_revision_id:
+                continue
+            ready += 1
+        return ready
+
     async def enqueue_endpoint_invocation(
         self,
         endpoint_id: str,
@@ -2535,6 +2563,9 @@ class AppServices:
         assigned_workers = await self.count_endpoint_workers_assigned(endpoint_id)
         if assigned_workers < 1:
             raise RuntimeError("endpoint has no assigned endpoint workers")
+        ready_workers = await self.count_ready_endpoint_workers_assigned(endpoint_id)
+        if ready_workers < 1:
+            raise RuntimeError("endpoint has no ready endpoint workers")
         invocation_id = str(invocation_id or uuid4())
         payload = {
             "type": "endpoint_invocation",

@@ -30,6 +30,7 @@ class FakeServices:
         self.fail_agent_run = False
         self.endpoint_invocations = []
         self.bundle_requirement_installs = []
+        self.bundle_revision_id = "rev-1"
 
     async def append_optimization_process_log(self, optimization_job_id, additions):
         self.process_log_updates.append((optimization_job_id, additions))
@@ -51,7 +52,7 @@ class FakeServices:
         return {"id": endpoint_id, "module_import_id": "mod-1"}
 
     async def resolve_module_execution_state(self, module_id):
-        return {"module_id": module_id, "bundle_path": "/tmp/bundle"}
+        return {"module_id": module_id, "bundle_path": "/tmp/bundle", "bundle_revision_id": self.bundle_revision_id}
 
     async def ensure_bundle_requirements_installed(self, bundle_path):
         self.bundle_requirement_installs.append(bundle_path)
@@ -123,21 +124,56 @@ def test_process_endpoint_job_runs_endpoint_invocation_and_restores_listening():
             json.dumps({"type": "endpoint_invocation", "invocation_id": "inv-1", "input_payload": {"question": "hello"}, "stream": True}),
             worker_id="endpoint-worker-1",
             endpoint_id="endpoint-1",
+            revision_id="rev-1",
         )
     )
 
     assert services.endpoint_invocations == [("inv-1", "endpoint-1", {"question": "hello"}, "endpoint-worker-1", True)]
     assert json.loads(services.redis.calls[0][1])["status"] == "running"
+    assert json.loads(services.redis.calls[0][1])["warmed_revision_id"] == "rev-1"
     assert json.loads(services.redis.calls[-1][1])["status"] == "listening"
+    assert json.loads(services.redis.calls[-1][1])["desired_revision_id"] == "rev-1"
 
 
 def test_ensure_endpoint_assignment_ready_preinstalls_dependencies_and_marks_listening():
     services = FakeServices()
     services.settings = SimpleNamespace(endpoint_worker_registry_prefix="dspy-trainer:endpoint-workers")
 
-    ready = asyncio.run(ensure_endpoint_assignment_ready(cast(Any, services), "endpoint-worker-1", "endpoint-1"))
+    ready_revision_id = asyncio.run(ensure_endpoint_assignment_ready(cast(Any, services), "endpoint-worker-1", "endpoint-1"))
 
-    assert ready is True
+    assert ready_revision_id == "rev-1"
     assert services.bundle_requirement_installs == ["/tmp/bundle"]
-    assert json.loads(services.redis.calls[0][1])["status"] == "preparing"
+    assert json.loads(services.redis.calls[0][1])["status"] == "stale"
+    assert json.loads(services.redis.calls[1][1])["status"] == "preparing"
     assert json.loads(services.redis.calls[-1][1])["status"] == "listening"
+    assert json.loads(services.redis.calls[-1][1])["warmed_revision_id"] == "rev-1"
+
+
+def test_ensure_endpoint_assignment_ready_rewarms_when_revision_changes():
+    services = FakeServices()
+    services.settings = SimpleNamespace(endpoint_worker_registry_prefix="dspy-trainer:endpoint-workers")
+    services.bundle_revision_id = "rev-2"
+
+    ready_revision_id = asyncio.run(
+        ensure_endpoint_assignment_ready(cast(Any, services), "endpoint-worker-1", "endpoint-1", warmed_revision_id="rev-1")
+    )
+
+    statuses = [json.loads(call[1])["status"] for call in services.redis.calls]
+    assert ready_revision_id == "rev-2"
+    assert statuses == ["stale", "preparing", "listening"]
+    assert services.bundle_requirement_installs == ["/tmp/bundle"]
+    assert json.loads(services.redis.calls[0][1])["warmed_revision_id"] == "rev-1"
+    assert json.loads(services.redis.calls[-1][1])["warmed_revision_id"] == "rev-2"
+
+
+def test_ensure_endpoint_assignment_ready_skips_warmup_when_revision_matches():
+    services = FakeServices()
+    services.settings = SimpleNamespace(endpoint_worker_registry_prefix="dspy-trainer:endpoint-workers")
+
+    ready_revision_id = asyncio.run(
+        ensure_endpoint_assignment_ready(cast(Any, services), "endpoint-worker-1", "endpoint-1", warmed_revision_id="rev-1")
+    )
+
+    assert ready_revision_id == "rev-1"
+    assert services.bundle_requirement_installs == []
+    assert [json.loads(call[1])["status"] for call in services.redis.calls] == ["listening"]
