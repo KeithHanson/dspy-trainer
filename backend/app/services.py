@@ -999,7 +999,11 @@ class AppServices:
 
     async def list_endpoint_workers(self) -> dict[str, Any]:
         workers = await self._list_registered_workers(self.settings.endpoint_worker_registry_prefix)
-        available_workers = sum(1 for item in workers if item["status"] in {"listening", "idle"})
+        available_workers = sum(
+            1
+            for item in workers
+            if item.get("deploy_state") in {"ready", "unassigned"}
+        )
         reported_workers = len(workers)
         total_workers = max(reported_workers, max(0, int(self.settings.total_endpoint_workers)))
         return {

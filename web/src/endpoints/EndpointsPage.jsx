@@ -90,10 +90,10 @@ function formatWorkerLastSeen(value) {
 function EndpointWorkersSection({ endpointWorkers, endpoints }) {
   const workers = Array.isArray(endpointWorkers) ? endpointWorkers : [];
   const totalWorkers = workers.length;
-  const readyWorkers = workers.filter((worker) => worker?.status === "listening").length;
+  const readyWorkers = workers.filter((worker) => worker?.deploy_state === "ready").length;
   const busyWorkers = workers.filter((worker) => worker?.status === "running").length;
   const preparingWorkers = workers.filter((worker) => worker?.status === "preparing").length;
-  const staleWorkers = workers.filter((worker) => worker?.status === "stale").length;
+  const staleWorkers = workers.filter((worker) => worker?.deploy_state === "revision_mismatch" || worker?.status === "stale").length;
   const idleWorkers = workers.filter((worker) => worker?.status === "idle").length;
   const failedWorkers = workers.filter((worker) => worker?.status === "failed").length;
   const endpointNameById = new Map((Array.isArray(endpoints) ? endpoints : []).map((endpoint) => [endpoint.id, endpoint.name || endpoint.id]));

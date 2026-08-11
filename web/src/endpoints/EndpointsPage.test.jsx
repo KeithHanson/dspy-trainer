@@ -53,6 +53,34 @@ describe("EndpointsPage", () => {
     expect(await screen.findByText("No endpoints yet")).toBeInTheDocument();
   });
 
+  it("does not count listening revision mismatches as ready in the worker summary", async () => {
+    const fetchMock = vi.fn((url, init) => {
+      if (String(url).endsWith("/bundle-endpoints") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([
+          { id: "ep-1", name: "Customer API", module_import_id: "mod-1", module_bundle_name: "agentic-chat", pinned_worker_count: 2, key_preview: "abc123" },
+        ]) });
+      }
+      if (String(url).endsWith("/endpoint-workers") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ items: [
+          { worker_id: "endpoint-worker-1", endpoint_id: "ep-1", status: "listening", deploy_state: "revision_mismatch", desired_revision_id: "rev-22222222", warmed_revision_id: "rev-11111111", state_summary: "Heartbeat says listening, but desired revision rev-2222 does not match warmed revision rev-1111." },
+          { worker_id: "endpoint-worker-2", endpoint_id: "ep-1", status: "listening", deploy_state: "ready", desired_revision_id: "rev-22222222", warmed_revision_id: "rev-22222222", state_summary: "Ready for traffic on revision rev-2222." },
+          { worker_id: "endpoint-worker-3", endpoint_id: null, status: "idle", deploy_state: "unassigned", desired_revision_id: null, warmed_revision_id: null, state_summary: "Waiting for an endpoint assignment." },
+        ] }) });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter>
+        <EndpointsPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText(/1 ready of 3 total · 1 stale · 1 idle/)).toBeInTheDocument();
+    expect(screen.getByText("Heartbeat says listening, but desired revision rev-2222 does not match warmed revision rev-1111.")).toBeInTheDocument();
+  });
+
   it("copies curl command from the list page", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal("navigator", { clipboard: { writeText } });
