@@ -4,12 +4,7 @@ import { Button } from "../components/primitives/Button";
 import { EmptyState } from "../components/states/EmptyState";
 import { ErrorState } from "../components/states/ErrorState";
 import { LoadingState } from "../components/states/LoadingState";
-
-function buildApiUrl(path) {
-  const base = import.meta.env.VITE_API_BASE_URL?.trim();
-  if (!base) return path;
-  return `${base.replace(/\/$/, "")}${path}`;
-}
+import { buildApiUrl, normalizeApiBaseUrl } from "../api/base";
 
 async function readApiError(response, fallback) {
   try {
@@ -152,7 +147,7 @@ function EndpointWorkersSection({ endpointWorkers, endpoints }) {
 
 export function EndpointsPage() {
   const navigate = useNavigate();
-  const apiBase = useMemo(() => (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, ""), []);
+  const apiBase = useMemo(() => normalizeApiBaseUrl(), []);
   const [endpoints, setEndpoints] = useState([]);
   const [endpointWorkers, setEndpointWorkers] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -288,7 +283,7 @@ export function EndpointsPage() {
 }
 
 export function EndpointEditorPage() {
-  const apiBase = useMemo(() => (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, ""), []);
+  const apiBase = useMemo(() => normalizeApiBaseUrl(), []);
   const location = useLocation();
   const navigate = useNavigate();
   const { endpointId } = useParams();

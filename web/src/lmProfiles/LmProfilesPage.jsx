@@ -5,6 +5,7 @@ import { Icon } from "../components/Icon";
 import { EmptyState } from "../components/states/EmptyState";
 import { ErrorState } from "../components/states/ErrorState";
 import { LoadingState } from "../components/states/LoadingState";
+import { normalizeApiBaseUrl } from "../api/base";
 
 const EMPTY_FORM = {
   name: "",
@@ -20,7 +21,7 @@ const MODEL_TYPE_OPTIONS = ["responses", "chat", "text"];
 
 export function LmProfilesPage() {
   const navigate = useNavigate();
-  const apiBase = useMemo(() => (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, ""), []);
+  const apiBase = useMemo(() => normalizeApiBaseUrl(), []);
   const [profiles, setProfiles] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
@@ -118,7 +119,7 @@ export function LmProfilesPage() {
 }
 
 export function LmProfileEditorPage() {
-  const apiBase = useMemo(() => (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, ""), []);
+  const apiBase = useMemo(() => normalizeApiBaseUrl(), []);
   const navigate = useNavigate();
   const { profileId } = useParams();
   const isEditing = Boolean(profileId);
