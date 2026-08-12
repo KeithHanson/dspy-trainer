@@ -114,6 +114,30 @@ class _RegistryPool:
         return _Acquire(self.conn)
 
 
+class _Redis:
+    def __init__(self):
+        self.values: dict[str, str] = {}
+
+    async def set(self, key, value, ex=None, nx=False, xx=False):
+        del ex
+        if nx and key in self.values:
+            return False
+        if xx and key not in self.values:
+            return False
+        self.values[key] = value
+        return True
+
+    async def get(self, key):
+        return self.values.get(key)
+
+    async def delete(self, key):
+        self.values.pop(key, None)
+
+    async def keys(self, pattern):
+        prefix = pattern[:-1] if pattern.endswith("*") else pattern
+        return [key for key in self.values if key.startswith(prefix)]
+
+
 def _make_services() -> AppServices:
     services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
     services.postgres_pool = _RegistryPool()
@@ -258,5 +282,52 @@ def test_list_endpoint_workers_uses_registry_backed_summaries():
         ]
         assert payload["items"][-1]["status"] == "stale"
         assert payload["items"][-1]["assigned_endpoint_id"] is None
+
+    asyncio.run(scenario())
+
+
+def test_reconcile_endpoint_worker_assignments_uses_registered_workers_without_static_ids():
+    async def scenario() -> None:
+        services = _make_services()
+        services.redis = _Redis()
+        now = datetime(2099, 1, 1, tzinfo=timezone.utc)
+
+        async def list_all_bundle_endpoints():
+            return [{"id": "endpoint-1", "pinned_worker_count": 1, "created_at": now.isoformat()}]
+
+        async def get_bundle_endpoint(endpoint_id: str):
+            return {"id": endpoint_id, "module_import_id": "mod-1"}
+
+        async def resolve_module_execution_state(module_id: str):
+            return {"module_id": module_id, "bundle_revision_id": "rev-1"}
+
+        services.list_all_bundle_endpoints = list_all_bundle_endpoints  # type: ignore[method-assign]
+        services.get_bundle_endpoint = get_bundle_endpoint  # type: ignore[method-assign]
+        services.resolve_module_execution_state = resolve_module_execution_state  # type: ignore[method-assign]
+
+        registered_1 = await services.register_endpoint_worker(
+            runtime_instance_id="runtime-1",
+            status="idle",
+            hostname="host-1",
+            pid=101,
+            now=now,
+        )
+        registered_2 = await services.register_endpoint_worker(
+            runtime_instance_id="runtime-2",
+            status="idle",
+            hostname="host-2",
+            pid=102,
+            now=now + timedelta(seconds=1),
+        )
+
+        await services.reconcile_endpoint_worker_assignments()
+
+        assignment_2 = json.loads(services.redis.values[f"dspy-trainer:endpoint-worker-assignments:{registered_2['worker_id']}"])
+        inventory_2 = json.loads(services.redis.values[f"dspy-trainer:endpoint-worker-inventory:{registered_2['worker_id']}"])
+
+        assert assignment_2 == {"worker_id": registered_2["worker_id"], "endpoint_id": "endpoint-1"}
+        assert inventory_2["endpoint_id"] == "endpoint-1"
+        assert inventory_2["desired_revision_id"] == "rev-1"
+        assert f"dspy-trainer:endpoint-worker-assignments:{registered_1['worker_id']}" not in services.redis.values
 
     asyncio.run(scenario())
