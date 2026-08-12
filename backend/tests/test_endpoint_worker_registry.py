@@ -286,6 +286,16 @@ def test_list_endpoint_workers_uses_registry_backed_summaries():
         assert payload["warming_workers"] == 1
         assert payload["running_workers"] == 0
         assert payload["failed_workers"] == 0
+        assert payload["summary"] == {
+            "live_workers": 2,
+            "stale_workers": 1,
+            "assigned_workers": 2,
+            "unassigned_workers": 1,
+            "ready_workers": 1,
+            "warming_workers": 1,
+            "running_workers": 0,
+            "failed_workers": 0,
+        }
         assert [item["worker_id"] for item in payload["items"]] == [
             "endpoint-worker-1",
             "endpoint-worker-2",
@@ -293,6 +303,45 @@ def test_list_endpoint_workers_uses_registry_backed_summaries():
         ]
         assert payload["items"][-1]["status"] == "stale"
         assert payload["items"][-1]["assigned_endpoint_id"] is None
+
+    asyncio.run(scenario())
+
+
+def test_list_endpoint_workers_registry_summary_excludes_listening_revision_mismatch_from_ready_counts():
+    async def scenario() -> None:
+        services = _make_services()
+        now = datetime(2099, 1, 1, tzinfo=timezone.utc)
+
+        await services.register_endpoint_worker(
+            worker_id="endpoint-worker-1",
+            runtime_instance_id="runtime-1",
+            status="listening",
+            assigned_endpoint_id="endpoint-1",
+            hostname="host-1",
+            pid=101,
+            runtime_metadata={"endpoint_id": "endpoint-1", "desired_revision_id": "rev-2", "warmed_revision_id": "rev-1"},
+            now=now,
+        )
+        await services.register_endpoint_worker(
+            worker_id="endpoint-worker-2",
+            runtime_instance_id="runtime-2",
+            status="idle",
+            hostname="host-2",
+            pid=102,
+            now=now,
+        )
+
+        payload = await services.list_endpoint_workers(now=now)
+
+        assert payload["total_workers"] == 2
+        assert payload["reported_workers"] == 2
+        assert payload["available_workers"] == 1
+        assert payload["busy_workers"] == 1
+        assert payload["ready_workers"] == 1
+        assert payload["summary"]["ready_workers"] == 1
+        assert payload["items"][0]["deploy_state"] == "revision_mismatch"
+        assert payload["items"][0]["is_revision_ready"] is False
+        assert payload["items"][1]["deploy_state"] == "unassigned"
 
     asyncio.run(scenario())
 
