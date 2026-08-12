@@ -13,7 +13,7 @@ describe("EndpointsPage", () => {
         ]) });
       }
       if (String(url).endsWith("/endpoint-workers") && init?.method === "GET") {
-        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ items: [
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ total_workers: 3, missing_workers: 0, items: [
           { worker_id: "endpoint-worker-1", endpoint_id: "ep-1", status: "listening", deploy_state: "ready", desired_revision_id: "rev-22222222", warmed_revision_id: "rev-22222222", state_summary: "Ready for traffic on revision rev-2222." },
           { worker_id: "endpoint-worker-2", endpoint_id: "ep-1", status: "stale", deploy_state: "revision_mismatch", desired_revision_id: "rev-22222222", warmed_revision_id: "rev-11111111", state_summary: "Assigned endpoint expects revision rev-2222; worker is still warmed on rev-1111." },
           { worker_id: "endpoint-worker-3", endpoint_id: null, status: "idle", deploy_state: "unassigned", desired_revision_id: null, warmed_revision_id: null, state_summary: "Waiting for an endpoint assignment." },
@@ -61,7 +61,7 @@ describe("EndpointsPage", () => {
         ]) });
       }
       if (String(url).endsWith("/endpoint-workers") && init?.method === "GET") {
-        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ items: [
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ total_workers: 3, missing_workers: 0, items: [
           { worker_id: "endpoint-worker-1", endpoint_id: "ep-1", status: "listening", deploy_state: "revision_mismatch", desired_revision_id: "rev-22222222", warmed_revision_id: "rev-11111111", state_summary: "Heartbeat says listening, but desired revision rev-2222 does not match warmed revision rev-1111." },
           { worker_id: "endpoint-worker-2", endpoint_id: "ep-1", status: "listening", deploy_state: "ready", desired_revision_id: "rev-22222222", warmed_revision_id: "rev-22222222", state_summary: "Ready for traffic on revision rev-2222." },
           { worker_id: "endpoint-worker-3", endpoint_id: null, status: "idle", deploy_state: "unassigned", desired_revision_id: null, warmed_revision_id: null, state_summary: "Waiting for an endpoint assignment." },
@@ -81,6 +81,35 @@ describe("EndpointsPage", () => {
     expect(screen.getByText("Heartbeat says listening, but desired revision rev-2222 does not match warmed revision rev-1111.")).toBeInTheDocument();
   });
 
+  it("shows missing workers from durable inventory", async () => {
+    const fetchMock = vi.fn((url, init) => {
+      if (String(url).endsWith("/bundle-endpoints") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([
+          { id: "ep-1", name: "Customer API", module_import_id: "mod-1", module_bundle_name: "agentic-chat", pinned_worker_count: 2, key_preview: "abc123" },
+        ]) });
+      }
+      if (String(url).endsWith("/endpoint-workers") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ total_workers: 2, reported_workers: 1, missing_workers: 1, items: [
+          { worker_id: "endpoint-worker-1", endpoint_id: "ep-1", status: "listening", deploy_state: "ready", desired_revision_id: "rev-22222222", warmed_revision_id: "rev-22222222", state_summary: "Ready for traffic on revision rev-2222." },
+          { worker_id: "endpoint-worker-2", endpoint_id: "ep-1", status: "missing", deploy_state: "missing", desired_revision_id: "rev-33333333", warmed_revision_id: "rev-11111111", state_summary: "Missing heartbeat since 2025-12-31T23:59:00+00:00; assigned endpoint expects revision rev-3333 while the last warmed revision was rev-1111.", last_seen: "2025-12-31T23:59:00+00:00" },
+        ] }) });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter>
+        <EndpointsPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText(/1 ready of 2 total · 1 missing/)).toBeInTheDocument();
+    expect(screen.getByText("endpoint-worker-2")).toBeInTheDocument();
+    expect(screen.getByText(/Missing heartbeat since 2025-12-31T23:59:00\+00:00/)).toBeInTheDocument();
+    expect(screen.getAllByText("missing").length).toBeGreaterThan(0);
+  });
+
   it("copies curl command from the list page", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal("navigator", { clipboard: { writeText } });
@@ -91,7 +120,7 @@ describe("EndpointsPage", () => {
         ]) });
       }
       if (String(url).endsWith("/endpoint-workers") && init?.method === "GET") {
-        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ items: [] }) });
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ items: [], total_workers: 0, missing_workers: 0 }) });
       }
       return Promise.reject(new Error(`Unexpected URL ${url}`));
     });
@@ -115,7 +144,7 @@ describe("EndpointsPage", () => {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
       }
       if (String(url).endsWith("/endpoint-workers") && init?.method === "GET") {
-        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ items: [] }) });
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ items: [], total_workers: 0, missing_workers: 0 }) });
       }
       return Promise.reject(new Error(`Unexpected URL ${url}`));
     });
@@ -128,7 +157,7 @@ describe("EndpointsPage", () => {
     );
 
     expect(await screen.findByText("No endpoints yet")).toBeInTheDocument();
-    expect(screen.getByText("No endpoint workers reported yet.")).toBeInTheDocument();
+    expect(screen.getByText("No endpoint worker inventory configured yet.")).toBeInTheDocument();
   });
 
   it("creates a new endpoint from the editor page", async () => {

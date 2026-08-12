@@ -578,8 +578,8 @@ Managed bundle endpoints do not execute inside the backend container. The backen
 - Each endpoint stores a `pinned_worker_count`.
 - Endpoint workers are assigned deterministically to endpoints based on those pinned counts.
 - Only workers assigned to a given endpoint consume that endpoint's invocation queue.
-- `GET /endpoint-workers` exposes operator-facing readiness details for each endpoint worker, including `deploy_state`, `state_summary`, and the desired versus warmed bundle revisions.
-- Common endpoint worker states: `idle` (unassigned), `stale` (assigned but warmed on an older revision), `preparing` (installing the desired revision), `listening` (ready), `running` (serving traffic), and `failed` (warmup or invocation failure).
+- `GET /endpoint-workers` exposes operator-facing readiness details for each endpoint worker from the durable endpoint-worker inventory, including `deploy_state`, `state_summary`, and the desired versus warmed bundle revisions.
+- Common endpoint worker states: `idle` (unassigned), `stale` (assigned but warmed on an older revision), `missing` (assignment still exists but live heartbeats stopped), `preparing` (installing the desired revision), `listening` (ready), `running` (serving traffic), and `failed` (warmup or invocation failure).
 
 ---
 

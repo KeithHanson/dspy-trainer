@@ -868,8 +868,33 @@ class AppServices:
         desired_revision_id = str(worker.get("desired_revision_id") or "").strip() or None
         warmed_revision_id = str(worker.get("warmed_revision_id") or "").strip() or None
         task_id = str(worker.get("task_id") or "").strip() or None
+        last_seen = str(worker.get("last_seen") or "").strip() or None
         revision_matches = bool(desired_revision_id and warmed_revision_id and desired_revision_id == warmed_revision_id)
 
+        if status == "missing":
+            last_seen_text = last_seen or "an unknown time"
+            if endpoint_id and desired_revision_id and warmed_revision_id and not revision_matches:
+                summary = (
+                    f"Missing heartbeat since {last_seen_text}; assigned endpoint expects revision "
+                    f"{cls._format_revision_label(desired_revision_id)} while the last warmed revision was "
+                    f"{cls._format_revision_label(warmed_revision_id)}."
+                )
+            elif endpoint_id and desired_revision_id:
+                summary = (
+                    f"Missing heartbeat since {last_seen_text}; assigned endpoint still expects revision "
+                    f"{cls._format_revision_label(desired_revision_id)}."
+                )
+            elif endpoint_id:
+                summary = f"Missing heartbeat since {last_seen_text}; worker is still assigned to endpoint {endpoint_id}."
+            else:
+                summary = f"Missing heartbeat since {last_seen_text}."
+            return {
+                "operator_state": "missing",
+                "state_label": "Missing",
+                "deploy_state": "missing",
+                "state_summary": summary,
+                "is_revision_ready": False,
+            }
         if status == "idle":
             return {
                 "operator_state": "idle",
@@ -997,21 +1022,105 @@ class AppServices:
         workers.sort(key=lambda item: item["worker_id"])
         return workers
 
+    def _endpoint_worker_inventory_key(self, worker_id: str) -> str:
+        return f"{self.settings.endpoint_worker_inventory_prefix}:{worker_id}"
+
+    def _expected_endpoint_worker_ids(self) -> list[str]:
+        total_workers = max(0, int(self.settings.total_endpoint_workers))
+        return [f"endpoint-worker-{index}" for index in range(1, total_workers + 1)]
+
+    async def _list_endpoint_worker_inventory(self) -> dict[str, dict[str, Any]]:
+        if self.redis is None:
+            return {}
+        redis_prefix = f"{self.settings.endpoint_worker_inventory_prefix}:"
+        keys = await self.redis.keys(f"{redis_prefix}*")
+        inventory: dict[str, dict[str, Any]] = {}
+        for key in keys:
+            raw = await self.redis.get(key)
+            if not raw:
+                continue
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            worker_id = str(payload.get("worker_id") or key.replace(redis_prefix, "", 1)).strip()
+            if not worker_id:
+                continue
+            inventory[worker_id] = payload
+        return inventory
+
+    async def _write_endpoint_worker_inventory(self, worker_id: str, payload: dict[str, Any]) -> None:
+        if self.redis is None:
+            return
+        await self.redis.set(self._endpoint_worker_inventory_key(worker_id), json.dumps(payload))
+
+    def _build_missing_endpoint_worker_record(self, inventory: dict[str, Any]) -> dict[str, Any]:
+        worker = {
+            "worker_id": str(inventory.get("worker_id") or ""),
+            "status": "missing",
+            "task_id": inventory.get("task_id"),
+            "last_seen": inventory.get("last_seen"),
+            "kind": "endpoint",
+            "endpoint_id": inventory.get("endpoint_id"),
+            "desired_revision_id": inventory.get("desired_revision_id"),
+            "warmed_revision_id": inventory.get("warmed_revision_id"),
+            "is_live": False,
+            "last_heartbeat_status": inventory.get("last_heartbeat_status") or inventory.get("status"),
+        }
+        worker.update(self._describe_endpoint_worker_visibility(worker))
+        return worker
+
     async def list_endpoint_workers(self) -> dict[str, Any]:
-        workers = await self._list_registered_workers(self.settings.endpoint_worker_registry_prefix)
-        available_workers = sum(
-            1
-            for item in workers
-            if item.get("deploy_state") in {"ready", "unassigned"}
-        )
-        reported_workers = len(workers)
-        total_workers = max(reported_workers, max(0, int(self.settings.total_endpoint_workers)))
+        if self.redis is None:
+            return {
+                "items": [],
+                "total_workers": max(0, int(self.settings.total_endpoint_workers)),
+                "reported_workers": 0,
+                "available_workers": 0,
+                "busy_workers": 0,
+                "missing_workers": max(0, int(self.settings.total_endpoint_workers)),
+            }
+        await self.reconcile_endpoint_worker_assignments()
+        live_workers = {
+            str(worker["worker_id"]): {**worker, "is_live": True, "last_heartbeat_status": worker.get("status")}
+            for worker in await self._list_registered_workers(self.settings.endpoint_worker_registry_prefix)
+        }
+        inventory_by_id = await self._list_endpoint_worker_inventory()
+        worker_ids = sorted({*self._expected_endpoint_worker_ids(), *inventory_by_id.keys(), *live_workers.keys()})
+        workers: list[dict[str, Any]] = []
+        for worker_id in worker_ids:
+            live_worker = live_workers.get(worker_id)
+            if live_worker is not None:
+                workers.append(live_worker)
+                continue
+            inventory = inventory_by_id.get(worker_id)
+            if inventory is None:
+                inventory = {
+                    "worker_id": worker_id,
+                    "endpoint_id": None,
+                    "desired_revision_id": None,
+                    "warmed_revision_id": None,
+                    "last_seen": None,
+                    "task_id": None,
+                    "status": "missing",
+                    "last_heartbeat_status": None,
+                }
+            workers.append(self._build_missing_endpoint_worker_record(inventory))
+        workers.sort(key=lambda item: item["worker_id"])
+        available_workers = sum(1 for item in workers if item.get("deploy_state") in {"ready", "unassigned"})
+        busy_workers = sum(1 for item in workers if item.get("status") == "running")
+        missing_workers = sum(1 for item in workers if item.get("status") == "missing")
+        reported_workers = sum(1 for item in workers if item.get("is_live"))
+        total_workers = max(len(workers), max(0, int(self.settings.total_endpoint_workers)))
         return {
             "items": workers,
             "total_workers": total_workers,
             "reported_workers": reported_workers,
             "available_workers": available_workers,
-            "busy_workers": max(0, reported_workers - available_workers),
+            "busy_workers": busy_workers,
+            "missing_workers": missing_workers,
         }
 
     async def init_db(self) -> None:
@@ -2617,30 +2726,42 @@ class AppServices:
         return payload
 
     async def reconcile_endpoint_worker_assignments(self) -> None:
-        if self.redis is None:
+        if self.redis is None or self.postgres_pool is None:
             return
         endpoints = sorted(
             await self.list_all_bundle_endpoints(),
             key=lambda item: (str(item.get("created_at") or ""), str(item.get("id") or "")),
         )
-        workers = await self._list_registered_workers(self.settings.endpoint_worker_registry_prefix)
-        worker_ids = [str(worker["worker_id"]) for worker in workers]
+        worker_ids = self._expected_endpoint_worker_ids()
         desired_assignments: list[str] = []
+        desired_revision_by_endpoint_id: dict[str, str | None] = {}
         for endpoint in endpoints:
-            desired_assignments.extend([str(endpoint["id"])] * max(1, int(endpoint.get("pinned_worker_count") or 1)))
+            endpoint_id = str(endpoint["id"])
+            desired_assignments.extend([endpoint_id] * max(1, int(endpoint.get("pinned_worker_count") or 1)))
+            desired_revision_by_endpoint_id[endpoint_id] = await self._get_endpoint_desired_revision_id(endpoint_id)
+        existing_inventory = await self._list_endpoint_worker_inventory()
         for index, worker_id in enumerate(worker_ids):
             assignment_key = self._endpoint_worker_assignment_key(worker_id)
+            inventory = dict(existing_inventory.get(worker_id) or {"worker_id": worker_id, "kind": "endpoint"})
+            inventory["worker_id"] = worker_id
+            inventory["kind"] = "endpoint"
             if index < len(desired_assignments):
                 endpoint_id = desired_assignments[index]
+                desired_revision_id = desired_revision_by_endpoint_id.get(endpoint_id)
                 await self.redis.set(assignment_key, json.dumps({"worker_id": worker_id, "endpoint_id": endpoint_id}))
+                inventory["endpoint_id"] = endpoint_id
+                inventory["desired_revision_id"] = desired_revision_id
             else:
                 await self.redis.delete(assignment_key)
+                inventory["endpoint_id"] = None
+                inventory["desired_revision_id"] = None
+                inventory["task_id"] = None
+            await self._write_endpoint_worker_inventory(worker_id, inventory)
 
     async def count_endpoint_workers_assigned(self, endpoint_id: str) -> int:
-        workers = await self._list_registered_workers(self.settings.endpoint_worker_registry_prefix)
         assigned = 0
-        for worker in workers:
-            assignment = await self.get_endpoint_worker_assignment(str(worker["worker_id"]))
+        for worker_id in self._expected_endpoint_worker_ids():
+            assignment = await self.get_endpoint_worker_assignment(worker_id)
             if assignment and str(assignment.get("endpoint_id") or "") == endpoint_id:
                 assigned += 1
         return assigned
@@ -2656,7 +2777,7 @@ class AppServices:
 
     async def get_endpoint_routing_state(self, endpoint_id: str) -> dict[str, Any]:
         desired_revision_id = await self._get_endpoint_desired_revision_id(endpoint_id)
-        workers = await self._list_registered_workers(self.settings.endpoint_worker_registry_prefix)
+        workers = (await self.list_endpoint_workers())["items"]
         assigned_workers = 0
         ready_workers = 0
         status_counts: dict[str, int] = {}

@@ -69,6 +69,7 @@ function describeEndpointWorkerState(status, taskId, endpointId, stateSummary) {
   if (status === "stale") return "Assigned revision does not match the warmed bundle yet";
   if (status === "running") return taskId ? "Processing endpoint invocation" : "Busy";
   if (status === "failed") return "Warmup or execution failed";
+  if (status === "missing") return "Worker is missing from live heartbeats";
   return "Heartbeat reported";
 }
 
@@ -88,12 +89,14 @@ function formatWorkerLastSeen(value) {
 }
 
 function EndpointWorkersSection({ endpointWorkers, endpoints }) {
-  const workers = Array.isArray(endpointWorkers) ? endpointWorkers : [];
-  const totalWorkers = workers.length;
+  const workersPayload = endpointWorkers && typeof endpointWorkers === "object" ? endpointWorkers : {};
+  const workers = Array.isArray(workersPayload.items) ? workersPayload.items : [];
+  const totalWorkers = Number(workersPayload.total_workers ?? workers.length);
   const readyWorkers = workers.filter((worker) => worker?.deploy_state === "ready").length;
   const busyWorkers = workers.filter((worker) => worker?.status === "running").length;
   const preparingWorkers = workers.filter((worker) => worker?.status === "preparing").length;
   const staleWorkers = workers.filter((worker) => worker?.deploy_state === "revision_mismatch" || worker?.status === "stale").length;
+  const missingWorkers = workers.filter((worker) => worker?.status === "missing" || worker?.deploy_state === "missing").length;
   const idleWorkers = workers.filter((worker) => worker?.status === "idle").length;
   const failedWorkers = workers.filter((worker) => worker?.status === "failed").length;
   const endpointNameById = new Map((Array.isArray(endpoints) ? endpoints : []).map((endpoint) => [endpoint.id, endpoint.name || endpoint.id]));
@@ -108,13 +111,14 @@ function EndpointWorkersSection({ endpointWorkers, endpoints }) {
             {busyWorkers ? ` · ${busyWorkers} running` : ""}
             {preparingWorkers ? ` · ${preparingWorkers} preparing` : ""}
             {staleWorkers ? ` · ${staleWorkers} stale` : ""}
+            {missingWorkers ? ` · ${missingWorkers} missing` : ""}
             {idleWorkers ? ` · ${idleWorkers} idle` : ""}
             {failedWorkers ? ` · ${failedWorkers} failed` : ""}
           </p>
         </div>
       </div>
       {!workers.length ? (
-        <div className="dashboard-zero">No endpoint workers reported yet.</div>
+        <div className="dashboard-zero">No endpoint worker inventory configured yet.</div>
       ) : (
         <div className="runs-workers-grid">
           {workers.map((worker) => {
@@ -172,7 +176,7 @@ export function EndpointsPage() {
   const apiBase = useMemo(() => normalizeApiBaseUrl(), []);
   const publicApiBase = useMemo(() => buildAbsoluteApiUrl(""), []);
   const [endpoints, setEndpoints] = useState([]);
-  const [endpointWorkers, setEndpointWorkers] = useState([]);
+  const [endpointWorkers, setEndpointWorkers] = useState({ items: [], total_workers: 0, missing_workers: 0 });
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
   const [deletingId, setDeletingId] = useState("");
@@ -185,9 +189,9 @@ export function EndpointsPage() {
         throw new Error(`Could not load endpoint workers (${response.status})`);
       }
       const payload = await response.json();
-      setEndpointWorkers(Array.isArray(payload?.items) ? payload.items : []);
+      setEndpointWorkers(payload && typeof payload === "object" ? payload : { items: [], total_workers: 0, missing_workers: 0 });
     } catch {
-      setEndpointWorkers([]);
+      setEndpointWorkers({ items: [], total_workers: 0, missing_workers: 0 });
     }
   };
 

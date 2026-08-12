@@ -39,6 +39,10 @@ async def _heartbeat(
         "last_seen": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
     }
     await services.redis.set(key, json.dumps(payload), ex=15)
+    inventory_key = f"{services.settings.endpoint_worker_inventory_prefix}:{worker_id}"
+    inventory_payload = dict(payload)
+    inventory_payload["last_heartbeat_status"] = status
+    await services.redis.set(inventory_key, json.dumps(inventory_payload))
 
 
 async def _heartbeat_loop(

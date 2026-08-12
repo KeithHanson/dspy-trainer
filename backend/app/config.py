@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     worker_registry_prefix: str = Field(default="dspy-trainer:workers")
     total_workers: int = Field(default=8)
     endpoint_worker_registry_prefix: str = Field(default="dspy-trainer:endpoint-workers")
+    endpoint_worker_inventory_prefix: str = Field(default="dspy-trainer:endpoint-worker-inventory")
     total_endpoint_workers: int = Field(default=2)
     endpoint_queue_prefix: str = Field(default="dspy-trainer:endpoint-queues")
     endpoint_worker_assignment_prefix: str = Field(default="dspy-trainer:endpoint-worker-assignments")

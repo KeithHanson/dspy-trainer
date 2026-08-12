@@ -116,6 +116,7 @@ def test_process_endpoint_job_runs_endpoint_invocation_and_restores_listening():
     services.settings = SimpleNamespace(
         worker_registry_prefix="dspy-trainer:workers",
         endpoint_worker_registry_prefix="dspy-trainer:endpoint-workers",
+        endpoint_worker_inventory_prefix="dspy-trainer:endpoint-worker-inventory",
     )
 
     asyncio.run(
@@ -129,46 +130,60 @@ def test_process_endpoint_job_runs_endpoint_invocation_and_restores_listening():
     )
 
     assert services.endpoint_invocations == [("inv-1", "endpoint-1", {"question": "hello"}, "endpoint-worker-1", True)]
-    assert json.loads(services.redis.calls[0][1])["status"] == "running"
-    assert json.loads(services.redis.calls[0][1])["warmed_revision_id"] == "rev-1"
-    assert json.loads(services.redis.calls[-1][1])["status"] == "listening"
-    assert json.loads(services.redis.calls[-1][1])["desired_revision_id"] == "rev-1"
+    live_calls = [json.loads(value) for key, value, _ in services.redis.calls if key.startswith("dspy-trainer:endpoint-workers:")]
+    inventory_calls = [json.loads(value) for key, value, _ in services.redis.calls if key.startswith("dspy-trainer:endpoint-worker-inventory:")]
+    assert live_calls[0]["status"] == "running"
+    assert live_calls[0]["warmed_revision_id"] == "rev-1"
+    assert live_calls[-1]["status"] == "listening"
+    assert inventory_calls[-1]["desired_revision_id"] == "rev-1"
+    assert inventory_calls[-1]["last_heartbeat_status"] == "listening"
 
 
 def test_ensure_endpoint_assignment_ready_preinstalls_dependencies_and_marks_listening():
     services = FakeServices()
-    services.settings = SimpleNamespace(endpoint_worker_registry_prefix="dspy-trainer:endpoint-workers")
+    services.settings = SimpleNamespace(
+        endpoint_worker_registry_prefix="dspy-trainer:endpoint-workers",
+        endpoint_worker_inventory_prefix="dspy-trainer:endpoint-worker-inventory",
+    )
 
     ready_revision_id = asyncio.run(ensure_endpoint_assignment_ready(cast(Any, services), "endpoint-worker-1", "endpoint-1"))
 
     assert ready_revision_id == "rev-1"
     assert services.bundle_requirement_installs == ["/tmp/bundle"]
-    assert json.loads(services.redis.calls[0][1])["status"] == "stale"
-    assert json.loads(services.redis.calls[1][1])["status"] == "preparing"
-    assert json.loads(services.redis.calls[-1][1])["status"] == "listening"
-    assert json.loads(services.redis.calls[-1][1])["warmed_revision_id"] == "rev-1"
+    live_calls = [json.loads(value) for key, value, _ in services.redis.calls if key.startswith("dspy-trainer:endpoint-workers:")]
+    assert live_calls[0]["status"] == "stale"
+    assert live_calls[1]["status"] == "preparing"
+    assert live_calls[-1]["status"] == "listening"
+    assert live_calls[-1]["warmed_revision_id"] == "rev-1"
 
 
 def test_ensure_endpoint_assignment_ready_rewarms_when_revision_changes():
     services = FakeServices()
-    services.settings = SimpleNamespace(endpoint_worker_registry_prefix="dspy-trainer:endpoint-workers")
+    services.settings = SimpleNamespace(
+        endpoint_worker_registry_prefix="dspy-trainer:endpoint-workers",
+        endpoint_worker_inventory_prefix="dspy-trainer:endpoint-worker-inventory",
+    )
     services.bundle_revision_id = "rev-2"
 
     ready_revision_id = asyncio.run(
         ensure_endpoint_assignment_ready(cast(Any, services), "endpoint-worker-1", "endpoint-1", warmed_revision_id="rev-1")
     )
 
-    statuses = [json.loads(call[1])["status"] for call in services.redis.calls]
+    live_calls = [json.loads(value) for key, value, _ in services.redis.calls if key.startswith("dspy-trainer:endpoint-workers:")]
+    statuses = [payload["status"] for payload in live_calls]
     assert ready_revision_id == "rev-2"
     assert statuses == ["stale", "preparing", "listening"]
     assert services.bundle_requirement_installs == ["/tmp/bundle"]
-    assert json.loads(services.redis.calls[0][1])["warmed_revision_id"] == "rev-1"
-    assert json.loads(services.redis.calls[-1][1])["warmed_revision_id"] == "rev-2"
+    assert live_calls[0]["warmed_revision_id"] == "rev-1"
+    assert live_calls[-1]["warmed_revision_id"] == "rev-2"
 
 
 def test_ensure_endpoint_assignment_ready_skips_warmup_when_revision_matches():
     services = FakeServices()
-    services.settings = SimpleNamespace(endpoint_worker_registry_prefix="dspy-trainer:endpoint-workers")
+    services.settings = SimpleNamespace(
+        endpoint_worker_registry_prefix="dspy-trainer:endpoint-workers",
+        endpoint_worker_inventory_prefix="dspy-trainer:endpoint-worker-inventory",
+    )
 
     ready_revision_id = asyncio.run(
         ensure_endpoint_assignment_ready(cast(Any, services), "endpoint-worker-1", "endpoint-1", warmed_revision_id="rev-1")
@@ -176,4 +191,5 @@ def test_ensure_endpoint_assignment_ready_skips_warmup_when_revision_matches():
 
     assert ready_revision_id == "rev-1"
     assert services.bundle_requirement_installs == []
-    assert [json.loads(call[1])["status"] for call in services.redis.calls] == ["listening"]
+    live_calls = [json.loads(value) for key, value, _ in services.redis.calls if key.startswith("dspy-trainer:endpoint-workers:")]
+    assert [payload["status"] for payload in live_calls] == ["listening"]
