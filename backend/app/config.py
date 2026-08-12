@@ -19,11 +19,8 @@ class Settings(BaseSettings):
     total_workers: int = Field(default=8)
     endpoint_worker_registry_prefix: str = Field(default="dspy-trainer:endpoint-workers")
     endpoint_worker_inventory_prefix: str = Field(default="dspy-trainer:endpoint-worker-inventory")
-    endpoint_worker_ids: str = Field(default="")
-    total_endpoint_workers: int = Field(default=2)
     endpoint_worker_heartbeat_ttl_seconds: int = Field(default=15)
     endpoint_queue_prefix: str = Field(default="dspy-trainer:endpoint-queues")
-    endpoint_worker_assignment_prefix: str = Field(default="dspy-trainer:endpoint-worker-assignments")
     endpoint_invocation_channel_prefix: str = Field(default="dspy-trainer:endpoint-invocations")
 
     postgres_dsn: str = Field(default="")
@@ -42,12 +39,6 @@ class Settings(BaseSettings):
         if not value.strip():
             raise ValueError("DSPY_TRAINER_POSTGRES_DSN is required")
         return value
-
-    def endpoint_worker_ids_list(self) -> list[str]:
-        configured_ids = [item.strip() for item in self.endpoint_worker_ids.split(",") if item.strip()]
-        if configured_ids:
-            return configured_ids
-        return [f"endpoint-worker-{index}" for index in range(1, self.total_endpoint_workers + 1)]
 
     @field_validator("endpoint_worker_heartbeat_ttl_seconds")
     @classmethod

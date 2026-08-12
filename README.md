@@ -581,7 +581,6 @@ Managed bundle endpoints do not execute inside the backend container. The backen
 - Only workers assigned to a given endpoint consume that endpoint's invocation queue.
 - `GET /endpoint-workers` exposes operator-facing readiness details for each endpoint worker from the durable endpoint-worker inventory, including `deploy_state`, `state_summary`, and the desired versus warmed bundle revisions.
 - Common endpoint worker states: `idle` (unassigned), `stale` (assigned but warmed on an older revision), `missing` (assignment still exists but live heartbeats stopped), `preparing` (installing the desired revision), `listening` (ready), `running` (serving traffic), and `failed` (warmup or invocation failure).
-- Short-lived compatibility note: legacy `DSPY_TRAINER_TOTAL_ENDPOINT_WORKERS` / `DSPY_TRAINER_ENDPOINT_WORKER_IDS` overrides may still be honored by non-Compose fallback code paths, but new operator deployments should treat them as deprecated and avoid wiring roster membership through env.
 
 ---
 

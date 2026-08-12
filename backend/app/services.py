@@ -1025,12 +1025,9 @@ class AppServices:
     def _endpoint_worker_inventory_key(self, worker_id: str) -> str:
         return f"{self.settings.endpoint_worker_inventory_prefix}:{worker_id}"
 
-    def _expected_endpoint_worker_ids(self) -> list[str]:
-        return self.settings.endpoint_worker_ids_list()
-
     async def _registered_endpoint_worker_ids_for_assignment(self, *, now: datetime | None = None) -> list[str]:
         if self.postgres_pool is None:
-            return self._expected_endpoint_worker_ids()
+            return []
         workers = await self.list_endpoint_worker_registrations(now=now)
 
         def _worker_rank(item: dict[str, Any]) -> tuple[int, int, float, str]:
@@ -1333,107 +1330,18 @@ class AppServices:
         return [self._build_endpoint_worker_registry_payload(row, now=as_of) for row in rows]
 
     async def list_endpoint_workers(self, *, now: datetime | None = None) -> dict[str, Any]:
-        if self.postgres_pool is not None:
-            workers = await self.list_endpoint_worker_registrations(now=now)
-            summary = self._summarize_endpoint_workers(workers)
-            reported_workers = len(workers)
-            available_workers = summary["ready_workers"]
-            busy_workers = max(0, reported_workers - available_workers)
-            return {
-                "items": workers,
-                "total_workers": reported_workers,
-                "reported_workers": reported_workers,
-                "available_workers": available_workers,
-                "busy_workers": busy_workers,
-                "missing_workers": 0,
-                "summary": summary,
-                **summary,
-            }
-
-        worker_ids = self._expected_endpoint_worker_ids()
-        if self.redis is None:
-            summary = {
-                "live_workers": 0,
-                "stale_workers": len(worker_ids),
-                "assigned_workers": 0,
-                "unassigned_workers": len(worker_ids),
-                "ready_workers": 0,
-                "warming_workers": 0,
-                "running_workers": 0,
-                "failed_workers": 0,
-            }
-            return {
-                "items": [],
-                "total_workers": len(worker_ids),
-                "reported_workers": 0,
-                "available_workers": 0,
-                "busy_workers": 0,
-                "missing_workers": len(worker_ids),
-                "summary": summary,
-                **summary,
-            }
-        await self.reconcile_endpoint_worker_assignments()
-        live_workers = {
-            str(worker["worker_id"]): {**worker, "is_live": True, "last_heartbeat_status": worker.get("status")}
-            for worker in await self._list_registered_workers(self.settings.endpoint_worker_registry_prefix)
-        }
-        inventory_by_id = await self._list_endpoint_worker_inventory()
-        workers: list[dict[str, Any]] = []
-        for worker_id in worker_ids:
-            inventory = dict(inventory_by_id.get(worker_id) or {
-                "worker_id": worker_id,
-                "endpoint_id": None,
-                "assigned_endpoint_id": None,
-                "desired_revision_id": None,
-                "warmed_revision_id": None,
-                "last_seen": None,
-                "task_id": None,
-                "status": "missing",
-                "last_heartbeat_status": None,
-                "kind": "endpoint",
-            })
-            inventory["worker_id"] = worker_id
-            assignment = await self.get_endpoint_worker_assignment(worker_id)
-            if assignment:
-                inventory["assigned_endpoint_id"] = assignment.get("endpoint_id")
-            live_worker = live_workers.get(worker_id)
-            if live_worker is None:
-                workers.append(self._build_missing_endpoint_worker_record(inventory))
-                continue
-            worker = {
-                **inventory,
-                **live_worker,
-                "worker_id": worker_id,
-                "kind": "endpoint",
-                "assigned_endpoint_id": inventory.get("assigned_endpoint_id") or live_worker.get("endpoint_id"),
-                "is_live": True,
-                "last_heartbeat_status": live_worker.get("status") or inventory.get("last_heartbeat_status") or inventory.get("status"),
-            }
-            worker.update(self._describe_endpoint_worker_visibility(worker))
-            workers.append(worker)
-        workers.sort(key=lambda item: item["worker_id"])
-        available_workers = sum(1 for item in workers if item.get("deploy_state") in {"ready", "unassigned"})
-        busy_workers = sum(1 for item in workers if item.get("status") == "running")
-        missing_workers = sum(1 for item in workers if item.get("status") == "missing")
-        reported_workers = sum(1 for item in workers if item.get("is_live"))
-        total_workers = len(worker_ids)
-        summary = {
-            "live_workers": reported_workers,
-            "stale_workers": total_workers - reported_workers,
-            "assigned_workers": sum(1 for item in workers if item.get("assigned_endpoint_id")),
-            "unassigned_workers": sum(1 for item in workers if not item.get("assigned_endpoint_id")),
-            "ready_workers": sum(1 for item in workers if item.get("deploy_state") in {"ready", "unassigned"}),
-            "warming_workers": sum(1 for item in workers if item.get("status") == "preparing"),
-            "running_workers": sum(1 for item in workers if item.get("status") == "running"),
-            "failed_workers": sum(1 for item in workers if item.get("status") == "failed"),
-        }
+        workers = await self.list_endpoint_worker_registrations(now=now)
+        summary = self._summarize_endpoint_workers(workers)
+        reported_workers = len(workers)
+        available_workers = summary["ready_workers"]
+        busy_workers = max(0, reported_workers - available_workers)
         return {
             "items": workers,
-            "total_workers": total_workers,
+            "total_workers": reported_workers,
             "reported_workers": reported_workers,
             "available_workers": available_workers,
             "busy_workers": busy_workers,
-            "missing_workers": missing_workers,
+            "missing_workers": 0,
             "summary": summary,
             **summary,
         }
@@ -3046,9 +2954,6 @@ class AppServices:
             return None
         return self._build_bundle_endpoint_payload(row)
 
-    def _endpoint_worker_assignment_key(self, worker_id: str) -> str:
-        return f"{self.settings.endpoint_worker_assignment_prefix}:{worker_id}"
-
     def _endpoint_queue_name(self, endpoint_id: str) -> str:
         return f"{self.settings.endpoint_queue_prefix}:{endpoint_id}"
 
@@ -3056,34 +2961,18 @@ class AppServices:
         return f"{self.settings.endpoint_invocation_channel_prefix}:{invocation_id}"
 
     async def get_endpoint_worker_assignment(self, worker_id: str) -> dict[str, Any] | None:
-        if self.postgres_pool is not None:
-            registration = await self._get_endpoint_worker_registration(worker_id)
-            if registration is None:
-                return None
-            endpoint_id = str(registration.get("assigned_endpoint_id") or "").strip()
-            if not endpoint_id:
-                return None
-            payload = {
-                "worker_id": str(registration.get("worker_id") or worker_id),
-                "endpoint_id": endpoint_id,
-                "desired_revision_id": str(registration.get("desired_revision_id") or "").strip() or None,
-                "is_live": bool(registration.get("is_live")),
-            }
-            return payload
-        if self.redis is None:
+        registration = await self._get_endpoint_worker_registration(worker_id)
+        if registration is None:
             return None
-        raw = await self.redis.get(self._endpoint_worker_assignment_key(worker_id))
-        if not raw:
-            return None
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError:
-            return None
-        if not isinstance(payload, dict):
-            return None
-        endpoint_id = str(payload.get("endpoint_id") or "").strip()
+        endpoint_id = str(registration.get("assigned_endpoint_id") or "").strip()
         if not endpoint_id:
             return None
+        payload = {
+            "worker_id": str(registration.get("worker_id") or worker_id),
+            "endpoint_id": endpoint_id,
+            "desired_revision_id": str(registration.get("desired_revision_id") or "").strip() or None,
+            "is_live": bool(registration.get("is_live")),
+        }
         return payload
 
     async def _set_endpoint_worker_assignment(self, worker_id: str, endpoint_id: str | None) -> None:
@@ -3136,12 +3025,10 @@ class AppServices:
             inventory["kind"] = "endpoint"
             assigned_endpoint_id = assignment_by_worker_id.get(worker_id)
             if assigned_endpoint_id:
-                await self.redis.delete(self._endpoint_worker_assignment_key(worker_id))
                 inventory["assigned_endpoint_id"] = assigned_endpoint_id
                 inventory["endpoint_id"] = assigned_endpoint_id
                 inventory["desired_revision_id"] = desired_revision_by_endpoint_id.get(assigned_endpoint_id)
             else:
-                await self.redis.delete(self._endpoint_worker_assignment_key(worker_id))
                 inventory["assigned_endpoint_id"] = None
                 inventory["endpoint_id"] = None
                 inventory["desired_revision_id"] = None
