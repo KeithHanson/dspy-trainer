@@ -9,7 +9,14 @@ from typing import Any, cast
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from worker import process_job
-from endpoint_worker import ensure_endpoint_assignment_ready, process_endpoint_job, resolve_configured_endpoint_worker_id, resolve_endpoint_worker_id
+from endpoint_worker import (
+    _build_runtime_identity,
+    _heartbeat,
+    ensure_endpoint_assignment_ready,
+    process_endpoint_job,
+    resolve_configured_endpoint_worker_id,
+    resolve_endpoint_worker_id,
+)
 
 
 class FakeRedis:
@@ -30,6 +37,7 @@ class FakeRedis:
 class FakeServices:
     def __init__(self):
         self.redis = FakeRedis()
+        self.postgres_pool = None
         self.settings = SimpleNamespace(worker_registry_prefix="dspy-trainer:workers")
         self.optimization_job_ids = []
         self.agent_run_task_ids = []
@@ -38,6 +46,8 @@ class FakeServices:
         self.endpoint_invocations = []
         self.bundle_requirement_installs = []
         self.bundle_revision_id = "rev-1"
+        self.registry_workers = {}
+        self.registry_calls = []
 
     async def append_optimization_process_log(self, optimization_job_id, additions):
         self.process_log_updates.append((optimization_job_id, additions))
@@ -63,6 +73,22 @@ class FakeServices:
 
     async def ensure_bundle_requirements_installed(self, bundle_path):
         self.bundle_requirement_installs.append(bundle_path)
+
+    async def register_endpoint_worker(self, **payload):
+        worker_id = payload.get("worker_id") or f"endpoint-worker-{len(self.registry_workers) + 1}"
+        record = {**payload, "worker_id": worker_id}
+        self.registry_workers[worker_id] = record
+        self.registry_calls.append(("register", record))
+        return record
+
+    async def heartbeat_endpoint_worker(self, worker_id, **payload):
+        record = self.registry_workers.get(worker_id)
+        if record is None:
+            return None
+        record = {**record, **payload, "worker_id": worker_id}
+        self.registry_workers[worker_id] = record
+        self.registry_calls.append(("heartbeat", record))
+        return record
 
 
 def test_process_job_runs_optimization_job_payload():
@@ -153,6 +179,66 @@ def test_resolve_configured_endpoint_worker_id_skips_already_claimed_logical_ids
     assert worker_id == "endpoint-worker-2"
     assert claim_owner_token is not None
     assert services.redis.values["dspy-trainer:endpoint-workers:claims:endpoint-worker-2"] == claim_owner_token
+
+
+def test_endpoint_worker_self_registers_through_registry_with_runtime_metadata():
+    services = FakeServices()
+    services.postgres_pool = object()
+    runtime_identity = _build_runtime_identity()
+
+    worker_id = asyncio.run(
+        _heartbeat(
+            cast(Any, services),
+            "",
+            "idle",
+            runtime_identity=runtime_identity,
+            registration=True,
+        )
+    )
+
+    assert worker_id == "endpoint-worker-1"
+    registered = services.registry_workers[worker_id]
+    assert registered["runtime_instance_id"] == runtime_identity["runtime_instance_id"]
+    assert registered["runtime_metadata"]["booted_at"] == runtime_identity["booted_at"]
+    assert registered["runtime_metadata"]["hostname"] == runtime_identity["hostname"]
+    assert registered["runtime_metadata"]["pid"] == runtime_identity["pid"]
+    assert services.redis.calls == []
+
+
+def test_endpoint_worker_heartbeats_update_registry_status_and_assignment_metadata():
+    services = FakeServices()
+    services.postgres_pool = object()
+    runtime_identity = _build_runtime_identity(explicit_worker_id="endpoint-worker-9")
+
+    asyncio.run(
+        _heartbeat(
+            cast(Any, services),
+            "endpoint-worker-9",
+            "idle",
+            runtime_identity=runtime_identity,
+            registration=True,
+        )
+    )
+    asyncio.run(
+        _heartbeat(
+            cast(Any, services),
+            "endpoint-worker-9",
+            "running",
+            task_id="inv-1",
+            endpoint_id="endpoint-1",
+            desired_revision_id="rev-2",
+            warmed_revision_id="rev-1",
+            runtime_identity=runtime_identity,
+        )
+    )
+
+    assert [call[0] for call in services.registry_calls] == ["register", "heartbeat"]
+    heartbeat = services.registry_workers["endpoint-worker-9"]
+    assert heartbeat["status"] == "running"
+    assert heartbeat["assigned_endpoint_id"] == "endpoint-1"
+    assert heartbeat["task_id"] == "inv-1"
+    assert heartbeat["runtime_metadata"]["desired_revision_id"] == "rev-2"
+    assert heartbeat["runtime_metadata"]["warmed_revision_id"] == "rev-1"
 
 
 def test_process_endpoint_job_runs_endpoint_invocation_and_restores_listening():

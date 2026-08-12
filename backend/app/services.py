@@ -1028,6 +1028,27 @@ class AppServices:
     def _expected_endpoint_worker_ids(self) -> list[str]:
         return self.settings.endpoint_worker_ids_list()
 
+    async def _registered_endpoint_worker_ids_for_assignment(self, *, now: datetime | None = None) -> list[str]:
+        if self.postgres_pool is None:
+            return self._expected_endpoint_worker_ids()
+        workers = await self.list_endpoint_worker_registrations(now=now)
+
+        def _worker_rank(item: dict[str, Any]) -> tuple[int, int, float, str]:
+            last_seen_raw = str(item.get("last_seen_at") or item.get("last_seen") or "").strip()
+            try:
+                last_seen_rank = -datetime.fromisoformat(last_seen_raw.replace("Z", "+00:00")).timestamp() if last_seen_raw else float("inf")
+            except ValueError:
+                last_seen_rank = float("inf")
+            return (
+                0 if item.get("is_live") else 1,
+                0 if item.get("raw_status") in {"idle", "listening", "preparing", "running", "failed"} else 1,
+                last_seen_rank,
+                str(item.get("worker_id") or ""),
+            )
+
+        ranked_workers = sorted(workers, key=_worker_rank)
+        return [str(item.get("worker_id") or "").strip() for item in ranked_workers if str(item.get("worker_id") or "").strip()]
+
     async def _list_endpoint_worker_inventory(self) -> dict[str, dict[str, Any]]:
         if self.redis is None:
             return {}
@@ -3001,11 +3022,12 @@ class AppServices:
     async def reconcile_endpoint_worker_assignments(self) -> None:
         if self.redis is None or self.postgres_pool is None:
             return
+        await self.mark_stale_endpoint_workers()
         endpoints = sorted(
             await self.list_all_bundle_endpoints(),
             key=lambda item: (str(item.get("created_at") or ""), str(item.get("id") or "")),
         )
-        worker_ids = self._expected_endpoint_worker_ids()
+        worker_ids = await self._registered_endpoint_worker_ids_for_assignment()
         desired_assignments: list[str] = []
         desired_revision_by_endpoint_id: dict[str, str | None] = {}
         for endpoint in endpoints:
@@ -3013,6 +3035,7 @@ class AppServices:
             desired_assignments.extend([endpoint_id] * max(1, int(endpoint.get("pinned_worker_count") or 1)))
             desired_revision_by_endpoint_id[endpoint_id] = await self._get_endpoint_desired_revision_id(endpoint_id)
         existing_inventory = await self._list_endpoint_worker_inventory()
+        tracked_worker_ids = sorted(set(existing_inventory) | set(worker_ids))
         for index, worker_id in enumerate(worker_ids):
             assignment_key = self._endpoint_worker_assignment_key(worker_id)
             inventory = dict(existing_inventory.get(worker_id) or {"worker_id": worker_id, "kind": "endpoint"})
@@ -3030,10 +3053,21 @@ class AppServices:
                 inventory["desired_revision_id"] = None
                 inventory["task_id"] = None
             await self._write_endpoint_worker_inventory(worker_id, inventory)
+        for worker_id in tracked_worker_ids:
+            if worker_id in worker_ids:
+                continue
+            await self.redis.delete(self._endpoint_worker_assignment_key(worker_id))
+            inventory = dict(existing_inventory.get(worker_id) or {"worker_id": worker_id, "kind": "endpoint"})
+            inventory["worker_id"] = worker_id
+            inventory["kind"] = "endpoint"
+            inventory["endpoint_id"] = None
+            inventory["desired_revision_id"] = None
+            inventory["task_id"] = None
+            await self._write_endpoint_worker_inventory(worker_id, inventory)
 
     async def count_endpoint_workers_assigned(self, endpoint_id: str) -> int:
         assigned = 0
-        for worker_id in self._expected_endpoint_worker_ids():
+        for worker_id in await self._registered_endpoint_worker_ids_for_assignment():
             assignment = await self.get_endpoint_worker_assignment(worker_id)
             if assignment and str(assignment.get("endpoint_id") or "") == endpoint_id:
                 assigned += 1
