@@ -9,7 +9,7 @@ from typing import Any, cast
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from worker import process_job
-from endpoint_worker import ensure_endpoint_assignment_ready, process_endpoint_job
+from endpoint_worker import ensure_endpoint_assignment_ready, process_endpoint_job, resolve_endpoint_worker_id
 
 
 class FakeRedis:
@@ -109,6 +109,18 @@ def test_process_job_restores_listening_when_agent_run_task_fails():
 
     assert json.loads(services.redis.calls[0][1])["status"] == "running"
     assert json.loads(services.redis.calls[-1][1])["status"] == "listening"
+
+
+def test_resolve_endpoint_worker_id_prefers_explicit_id():
+    assert resolve_endpoint_worker_id("endpoint-worker-9", hostname="stack-endpoint-worker-2", pid=1234) == "endpoint-worker-9"
+
+
+def test_resolve_endpoint_worker_id_derives_stable_logical_id_from_compose_hostname():
+    assert resolve_endpoint_worker_id(None, hostname="dspy-trainer-endpoint-worker-2", pid=1234) == "endpoint-worker-2"
+
+
+def test_resolve_endpoint_worker_id_falls_back_when_hostname_is_not_a_worker_replica():
+    assert resolve_endpoint_worker_id(None, hostname="devbox-7", pid=1234) == "devbox-7-1234"
 
 
 def test_process_endpoint_job_runs_endpoint_invocation_and_restores_listening():

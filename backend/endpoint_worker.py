@@ -3,6 +3,7 @@ from contextlib import suppress
 import json
 import logging
 import os
+import re
 import socket
 
 from redis.exceptions import TimeoutError as RedisTimeoutError
@@ -13,6 +14,24 @@ from app.services import AppServices
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [endpoint-worker] %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def resolve_endpoint_worker_id(
+    explicit_worker_id: str | None = None,
+    *,
+    hostname: str | None = None,
+    pid: int | None = None,
+) -> str:
+    configured_worker_id = str(explicit_worker_id or "").strip()
+    if configured_worker_id:
+        return configured_worker_id
+    resolved_hostname = str(hostname or socket.gethostname()).strip()
+    hostname_lower = resolved_hostname.lower()
+    if "endpoint-worker" in hostname_lower:
+        match = re.search(r"[-_](\d+)$", resolved_hostname)
+        if match is not None:
+            return f"endpoint-worker-{int(match.group(1))}"
+    return f"{resolved_hostname}-{pid if pid is not None else os.getpid()}"
 
 
 async def _heartbeat(
@@ -186,7 +205,11 @@ async def ensure_endpoint_assignment_ready(
 async def run_endpoint_worker() -> None:
     settings = get_settings()
     services = AppServices(settings)
-    worker_id = os.getenv("DSPY_TRAINER_ENDPOINT_WORKER_ID", f"{socket.gethostname()}-{os.getpid()}")
+    worker_id = resolve_endpoint_worker_id(
+        os.getenv("DSPY_TRAINER_ENDPOINT_WORKER_ID"),
+        hostname=socket.gethostname(),
+        pid=os.getpid(),
+    )
     await services.connect()
     logger.info("Endpoint worker started")
     logger.info("Endpoint worker id: %s", worker_id)
