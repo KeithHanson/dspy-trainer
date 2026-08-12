@@ -543,9 +543,8 @@ Key variables in `.env`:
 | `GIT_COMMIT_EMAIL` | Git author email for optimization commits | Recommended |
 | `DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY` | Encrypts module environment entries and LM Profile provider API keys stored in Postgres | Required for module env UI and LM Profile API key storage |
 | `DSPY_TRAINER_TOTAL_WORKERS` | Number of general worker containers in Compose | Optional |
-| `DSPY_TRAINER_TOTAL_ENDPOINT_WORKERS` | Logical endpoint worker count used for endpoint assignment | Optional |
-| `DSPY_TRAINER_ENDPOINT_WORKER_IDS` | Optional comma-separated stable endpoint worker IDs to publish/assign instead of deriving only from the count | Optional |
 | `DSPY_TRAINER_TOTAL_ENDPOINT_WORKER_REPLICAS` | Number of dedicated endpoint worker containers in Compose | Optional |
+| `DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS` | Seconds before a missing endpoint-worker heartbeat is marked stale | Optional |
 | `DSPY_TRAINER_POSTGRES_DSN` | Postgres connection | ✅ (auto in Compose) |
 | `DSPY_TRAINER_REDIS_URL` | Redis connection | ✅ (auto in Compose) |
 
@@ -574,14 +573,15 @@ LM Profiles store the provider model, API base, model type, optional LM class ov
 Managed bundle endpoints do not execute inside the backend container. The backend authenticates, enqueues, and relays responses, while dedicated `endpoint-worker` containers perform bundle installation/bootstrap and invocation.
 
 - Set `DSPY_TRAINER_TOTAL_WORKERS` in `.env` to control the number of general worker containers Compose starts.
-- Set `DSPY_TRAINER_TOTAL_ENDPOINT_WORKERS` in `.env` to control the logical endpoint worker count used for endpoint assignment.
-- Optionally set `DSPY_TRAINER_ENDPOINT_WORKER_IDS` in `.env` to inject an explicit comma-separated logical endpoint-worker roster (for example `endpoint-worker-1,endpoint-worker-2`) and keep worker heartbeats aligned with the control-plane inventory.
 - Set `DSPY_TRAINER_TOTAL_ENDPOINT_WORKER_REPLICAS` in `.env` to control how many dedicated endpoint-worker containers Compose starts.
+- Compose-backed endpoint workers now self-register into the backend's durable endpoint-worker registry; operator-facing assignment comes from that live inventory rather than from an env-defined logical roster.
+- Set `DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS` in `.env` if you need to tune how quickly missing endpoint-worker heartbeats become `stale` in operator views.
 - Each endpoint stores a `pinned_worker_count`.
-- Endpoint workers are assigned deterministically to endpoints based on those pinned counts.
+- Endpoint workers are assigned deterministically to endpoints based on those pinned counts and the current registry-backed worker inventory.
 - Only workers assigned to a given endpoint consume that endpoint's invocation queue.
 - `GET /endpoint-workers` exposes operator-facing readiness details for each endpoint worker from the durable endpoint-worker inventory, including `deploy_state`, `state_summary`, and the desired versus warmed bundle revisions.
 - Common endpoint worker states: `idle` (unassigned), `stale` (assigned but warmed on an older revision), `missing` (assignment still exists but live heartbeats stopped), `preparing` (installing the desired revision), `listening` (ready), `running` (serving traffic), and `failed` (warmup or invocation failure).
+- Short-lived compatibility note: legacy `DSPY_TRAINER_TOTAL_ENDPOINT_WORKERS` / `DSPY_TRAINER_ENDPOINT_WORKER_IDS` overrides may still be honored by non-Compose fallback code paths, but new operator deployments should treat them as deprecated and avoid wiring roster membership through env.
 
 ---
 
@@ -743,6 +743,7 @@ A: Set the worker replica env vars in `.env`, then recreate the stack:
 ```env
 DSPY_TRAINER_TOTAL_WORKERS=4
 DSPY_TRAINER_TOTAL_ENDPOINT_WORKER_REPLICAS=16
+DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS=15
 ```
 
 **Q: Can I use this for production LLM apps?**  
