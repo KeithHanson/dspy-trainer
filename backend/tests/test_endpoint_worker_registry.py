@@ -52,7 +52,6 @@ class _RegistryConn:
                 {
                     "runtime_instance_id": runtime_instance_id or row["runtime_instance_id"],
                     "status": params[2],
-                    "assigned_endpoint_id": params[3],
                     "task_id": params[4],
                     "last_seen_at": params[5],
                     "heartbeat_expires_at": params[6],
@@ -64,6 +63,9 @@ class _RegistryConn:
                 }
             )
             return dict(row)
+        if normalized.startswith("select worker_id, runtime_instance_id, status, assigned_endpoint_id, task_id, last_seen_at,") and "where worker_id = $1" in normalized:
+            row = self.state["workers"].get(str(params[0]))
+            return None if row is None else dict(row)
         return None
 
     async def fetch(self, query, *params):
@@ -91,6 +93,14 @@ class _RegistryConn:
                     row["updated_at"] = stale_time
                     count += 1
             return f"UPDATE {count}"
+        if normalized.startswith("update endpoint_worker_registrations set assigned_endpoint_id = $2,"):
+            worker_id = str(params[0])
+            row = self.state["workers"].get(worker_id)
+            if row is None:
+                return "UPDATE 0"
+            row["assigned_endpoint_id"] = params[1]
+            row["updated_at"] = params[2]
+            return "UPDATE 1"
         return "OK"
 
 
@@ -218,7 +228,6 @@ def test_list_endpoint_workers_uses_registry_backed_summaries():
             worker_id="endpoint-worker-1",
             runtime_instance_id="runtime-1",
             status="listening",
-            assigned_endpoint_id="endpoint-1",
             hostname="host-1",
             pid=101,
             now=now,
@@ -227,7 +236,6 @@ def test_list_endpoint_workers_uses_registry_backed_summaries():
             worker_id="endpoint-worker-2",
             runtime_instance_id="runtime-2",
             status="preparing",
-            assigned_endpoint_id="endpoint-1",
             hostname="host-2",
             pid=102,
             now=now,
@@ -240,6 +248,9 @@ def test_list_endpoint_workers_uses_registry_backed_summaries():
             pid=103,
             now=now,
         )
+
+        await services._set_endpoint_worker_assignment("endpoint-worker-1", "endpoint-1")
+        await services._set_endpoint_worker_assignment("endpoint-worker-2", "endpoint-1")
 
         await services.mark_stale_endpoint_workers(now=now + timedelta(seconds=16))
         await services.heartbeat_endpoint_worker(
@@ -322,10 +333,13 @@ def test_reconcile_endpoint_worker_assignments_uses_registered_workers_without_s
 
         await services.reconcile_endpoint_worker_assignments()
 
-        assignment_2 = json.loads(services.redis.values[f"dspy-trainer:endpoint-worker-assignments:{registered_2['worker_id']}"])
+        workers = await services.list_endpoint_worker_registrations(now=now)
         inventory_2 = json.loads(services.redis.values[f"dspy-trainer:endpoint-worker-inventory:{registered_2['worker_id']}"])
 
-        assert assignment_2 == {"worker_id": registered_2["worker_id"], "endpoint_id": "endpoint-1"}
+        assert workers[0]["worker_id"] == registered_1["worker_id"]
+        assert workers[0]["assigned_endpoint_id"] is None
+        assert workers[1]["worker_id"] == registered_2["worker_id"]
+        assert workers[1]["assigned_endpoint_id"] == "endpoint-1"
         assert inventory_2["endpoint_id"] == "endpoint-1"
         assert inventory_2["desired_revision_id"] == "rev-1"
         assert f"dspy-trainer:endpoint-worker-assignments:{registered_1['worker_id']}" not in services.redis.values
@@ -379,11 +393,61 @@ def test_reconcile_endpoint_worker_assignments_prioritizes_live_workers_over_new
         await services.mark_stale_endpoint_workers(now=reconcile_at)
         await services.reconcile_endpoint_worker_assignments()
         ordered_worker_ids = await services._registered_endpoint_worker_ids_for_assignment(now=reconcile_at)
-
-        assignment = json.loads(services.redis.values[f"dspy-trainer:endpoint-worker-assignments:{live_worker['worker_id']}"])
+        workers = await services.list_endpoint_worker_registrations(now=reconcile_at)
 
         assert ordered_worker_ids[:2] == [live_worker["worker_id"], stale_worker["worker_id"]]
-        assert assignment == {"worker_id": live_worker["worker_id"], "endpoint_id": "endpoint-1"}
+        assert next(item for item in workers if item["worker_id"] == live_worker["worker_id"])["assigned_endpoint_id"] == "endpoint-1"
+        assert next(item for item in workers if item["worker_id"] == stale_worker["worker_id"])["assigned_endpoint_id"] is None
         assert f"dspy-trainer:endpoint-worker-assignments:{stale_worker['worker_id']}" not in services.redis.values
+
+    asyncio.run(scenario())
+
+
+def test_registry_assignment_remains_control_plane_owned_across_worker_heartbeats():
+    async def scenario() -> None:
+        services = _make_services()
+        now = datetime(2099, 1, 1, tzinfo=timezone.utc)
+
+        async def list_all_bundle_endpoints():
+            return [{"id": "endpoint-1", "pinned_worker_count": 1, "created_at": now.isoformat()}]
+
+        async def get_bundle_endpoint(endpoint_id: str):
+            return {"id": endpoint_id, "module_import_id": "mod-1"}
+
+        async def resolve_module_execution_state(module_id: str):
+            return {"module_id": module_id, "bundle_revision_id": "rev-1"}
+
+        services.list_all_bundle_endpoints = list_all_bundle_endpoints  # type: ignore[method-assign]
+        services.get_bundle_endpoint = get_bundle_endpoint  # type: ignore[method-assign]
+        services.resolve_module_execution_state = resolve_module_execution_state  # type: ignore[method-assign]
+
+        worker = await services.register_endpoint_worker(
+            runtime_instance_id="runtime-1",
+            status="idle",
+            hostname="host-1",
+            pid=101,
+            now=now,
+        )
+        await services.heartbeat_endpoint_worker(
+            worker["worker_id"],
+            runtime_instance_id="runtime-1",
+            status="listening",
+            assigned_endpoint_id="endpoint-2",
+            runtime_metadata={"endpoint_id": "endpoint-1", "desired_revision_id": "rev-1", "warmed_revision_id": "rev-1"},
+            now=now + timedelta(seconds=1),
+        )
+
+        assignment = await services.get_endpoint_worker_assignment(worker["worker_id"])
+        registration = await services._get_endpoint_worker_registration(worker["worker_id"], now=now + timedelta(seconds=1))
+
+        assert assignment == {
+            "worker_id": worker["worker_id"],
+            "endpoint_id": "endpoint-1",
+            "desired_revision_id": "rev-1",
+            "is_live": True,
+        }
+        assert registration is not None
+        assert registration["assigned_endpoint_id"] == "endpoint-1"
+        assert registration["endpoint_id"] == "endpoint-1"
 
     asyncio.run(scenario())
