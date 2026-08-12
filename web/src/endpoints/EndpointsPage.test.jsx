@@ -14,8 +14,9 @@ describe("EndpointsPage", () => {
       }
       if (String(url).endsWith("/endpoint-workers") && init?.method === "GET") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ items: [
-          { worker_id: "endpoint-worker-1", endpoint_id: "ep-1", status: "listening" },
-          { worker_id: "endpoint-worker-2", endpoint_id: "ep-1", status: "running" },
+          { worker_id: "endpoint-worker-1", endpoint_id: "ep-1", status: "listening", deploy_state: "ready", desired_revision_id: "rev-22222222", warmed_revision_id: "rev-22222222", state_summary: "Ready for traffic on revision rev-2222." },
+          { worker_id: "endpoint-worker-2", endpoint_id: "ep-1", status: "stale", deploy_state: "revision_mismatch", desired_revision_id: "rev-22222222", warmed_revision_id: "rev-11111111", state_summary: "Assigned endpoint expects revision rev-2222; worker is still warmed on rev-1111." },
+          { worker_id: "endpoint-worker-3", endpoint_id: null, status: "idle", deploy_state: "unassigned", desired_revision_id: null, warmed_revision_id: null, state_summary: "Waiting for an endpoint assignment." },
         ] }) });
       }
       if (String(url).endsWith("/bundle-endpoints/ep-1") && init?.method === "DELETE") {
@@ -38,13 +39,46 @@ describe("EndpointsPage", () => {
     expect(within(endpointCard).getByText(/Pinned workers 2/)).toBeInTheDocument();
     expect(within(endpointCard).getByRole("button", { name: "Copy curl" })).toBeInTheDocument();
     expect(screen.getByText("Endpoint workers")).toBeInTheDocument();
-    expect(screen.getByText(/1 ready of 2 total/)).toBeInTheDocument();
+    expect(screen.getByText(/1 ready of 3 total · 1 stale · 1 idle/)).toBeInTheDocument();
     expect(screen.getByText("endpoint-worker-1")).toBeInTheDocument();
     expect(screen.getByText("endpoint-worker-2")).toBeInTheDocument();
-    expect(screen.getByText("Ready for assigned endpoint traffic")).toBeInTheDocument();
-    expect(screen.getByText("Busy")).toBeInTheDocument();
+    expect(screen.getByText("endpoint-worker-3")).toBeInTheDocument();
+    expect(screen.getByText("Ready for traffic on revision rev-2222.")).toBeInTheDocument();
+    expect(screen.getByText("Assigned endpoint expects revision rev-2222; worker is still warmed on rev-1111.")).toBeInTheDocument();
+    expect(screen.getByText("Waiting for an endpoint assignment.")).toBeInTheDocument();
+    expect(screen.getByText("revision_mismatch")).toBeInTheDocument();
+    expect(screen.getAllByText("rev-2222").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("rev-1111").length).toBeGreaterThan(0);
     await userEvent.click(within(endpointCard).getByRole("button", { name: "Delete" }));
     expect(await screen.findByText("No endpoints yet")).toBeInTheDocument();
+  });
+
+  it("does not count listening revision mismatches as ready in the worker summary", async () => {
+    const fetchMock = vi.fn((url, init) => {
+      if (String(url).endsWith("/bundle-endpoints") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([
+          { id: "ep-1", name: "Customer API", module_import_id: "mod-1", module_bundle_name: "agentic-chat", pinned_worker_count: 2, key_preview: "abc123" },
+        ]) });
+      }
+      if (String(url).endsWith("/endpoint-workers") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ items: [
+          { worker_id: "endpoint-worker-1", endpoint_id: "ep-1", status: "listening", deploy_state: "revision_mismatch", desired_revision_id: "rev-22222222", warmed_revision_id: "rev-11111111", state_summary: "Heartbeat says listening, but desired revision rev-2222 does not match warmed revision rev-1111." },
+          { worker_id: "endpoint-worker-2", endpoint_id: "ep-1", status: "listening", deploy_state: "ready", desired_revision_id: "rev-22222222", warmed_revision_id: "rev-22222222", state_summary: "Ready for traffic on revision rev-2222." },
+          { worker_id: "endpoint-worker-3", endpoint_id: null, status: "idle", deploy_state: "unassigned", desired_revision_id: null, warmed_revision_id: null, state_summary: "Waiting for an endpoint assignment." },
+        ] }) });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter>
+        <EndpointsPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText(/1 ready of 3 total · 1 stale · 1 idle/)).toBeInTheDocument();
+    expect(screen.getByText("Heartbeat says listening, but desired revision rev-2222 does not match warmed revision rev-1111.")).toBeInTheDocument();
   });
 
   it("copies curl command from the list page", async () => {

@@ -856,6 +856,116 @@ class AppServices:
             "busy_workers": max(0, reported_workers - available_workers),
         }
 
+    @staticmethod
+    def _format_revision_label(revision_id: Any) -> str:
+        normalized = str(revision_id or "").strip()
+        return normalized[:8] if normalized else "unknown"
+
+    @classmethod
+    def _describe_endpoint_worker_visibility(cls, worker: dict[str, Any]) -> dict[str, Any]:
+        status = str(worker.get("status") or "unknown").strip().lower() or "unknown"
+        endpoint_id = str(worker.get("endpoint_id") or "").strip() or None
+        desired_revision_id = str(worker.get("desired_revision_id") or "").strip() or None
+        warmed_revision_id = str(worker.get("warmed_revision_id") or "").strip() or None
+        task_id = str(worker.get("task_id") or "").strip() or None
+        revision_matches = bool(desired_revision_id and warmed_revision_id and desired_revision_id == warmed_revision_id)
+
+        if status == "idle":
+            return {
+                "operator_state": "idle",
+                "state_label": "Idle",
+                "deploy_state": "unassigned",
+                "state_summary": "Waiting for an endpoint assignment.",
+                "is_revision_ready": False,
+            }
+        if status == "preparing":
+            if warmed_revision_id:
+                summary = (
+                    f"Installing dependencies for desired revision {cls._format_revision_label(desired_revision_id)} "
+                    f"(currently warmed on {cls._format_revision_label(warmed_revision_id)})."
+                )
+            else:
+                summary = f"Installing dependencies for desired revision {cls._format_revision_label(desired_revision_id)}."
+            return {
+                "operator_state": "preparing",
+                "state_label": "Preparing",
+                "deploy_state": "warming",
+                "state_summary": summary,
+                "is_revision_ready": False,
+            }
+        if status == "stale":
+            warmed_text = cls._format_revision_label(warmed_revision_id) if warmed_revision_id else "none"
+            return {
+                "operator_state": "stale",
+                "state_label": "Stale",
+                "deploy_state": "revision_mismatch",
+                "state_summary": (
+                    f"Assigned endpoint expects revision {cls._format_revision_label(desired_revision_id)}; "
+                    f"worker is still warmed on {warmed_text}."
+                ),
+                "is_revision_ready": False,
+            }
+        if status == "listening":
+            if endpoint_id and revision_matches:
+                summary = f"Ready for traffic on revision {cls._format_revision_label(desired_revision_id)}."
+                deploy_state = "ready"
+            elif endpoint_id and desired_revision_id:
+                summary = (
+                    f"Heartbeat says listening, but desired revision {cls._format_revision_label(desired_revision_id)} "
+                    f"does not match warmed revision {cls._format_revision_label(warmed_revision_id)}."
+                )
+                deploy_state = "revision_mismatch"
+            else:
+                summary = "Ready, but no endpoint revision is currently assigned."
+                deploy_state = "ready"
+            return {
+                "operator_state": "listening",
+                "state_label": "Listening",
+                "deploy_state": deploy_state,
+                "state_summary": summary,
+                "is_revision_ready": bool(endpoint_id and revision_matches),
+            }
+        if status == "running":
+            if revision_matches:
+                summary = f"Serving an invocation on revision {cls._format_revision_label(desired_revision_id)}."
+                deploy_state = "serving"
+            elif desired_revision_id or warmed_revision_id:
+                summary = (
+                    f"Serving an invocation while desired revision {cls._format_revision_label(desired_revision_id)} "
+                    f"differs from warmed revision {cls._format_revision_label(warmed_revision_id)}."
+                )
+                deploy_state = "serving_stale_revision"
+            else:
+                summary = "Serving an invocation."
+                deploy_state = "serving"
+            if task_id:
+                summary = f"{summary} Task {task_id}."
+            return {
+                "operator_state": "running",
+                "state_label": "Running",
+                "deploy_state": deploy_state,
+                "state_summary": summary,
+                "is_revision_ready": revision_matches,
+            }
+        if status == "failed":
+            summary = "Warmup or invocation failed."
+            if desired_revision_id:
+                summary = f"Warmup or invocation failed while targeting revision {cls._format_revision_label(desired_revision_id)}."
+            return {
+                "operator_state": "failed",
+                "state_label": "Failed",
+                "deploy_state": "failed",
+                "state_summary": summary,
+                "is_revision_ready": False,
+            }
+        return {
+            "operator_state": status,
+            "state_label": status.title() if status else "Unknown",
+            "deploy_state": "unknown",
+            "state_summary": "Heartbeat reported.",
+            "is_revision_ready": False,
+        }
+
     async def _list_registered_workers(self, prefix: str) -> list[dict[str, Any]]:
         if self.redis is None:
             return []
@@ -871,24 +981,29 @@ class AppServices:
             except json.JSONDecodeError:
                 continue
             worker_id = payload.get("worker_id") or key.replace(redis_prefix, "", 1)
-            workers.append(
-                {
-                    "worker_id": str(worker_id),
-                    "status": str(payload.get("status") or "unknown"),
-                    "task_id": payload.get("task_id"),
-                    "last_seen": payload.get("last_seen"),
-                    "kind": str(payload.get("kind") or "worker"),
-                    "endpoint_id": payload.get("endpoint_id"),
-                    "desired_revision_id": payload.get("desired_revision_id"),
-                    "warmed_revision_id": payload.get("warmed_revision_id"),
-                }
-            )
+            worker = {
+                "worker_id": str(worker_id),
+                "status": str(payload.get("status") or "unknown"),
+                "task_id": payload.get("task_id"),
+                "last_seen": payload.get("last_seen"),
+                "kind": str(payload.get("kind") or "worker"),
+                "endpoint_id": payload.get("endpoint_id"),
+                "desired_revision_id": payload.get("desired_revision_id"),
+                "warmed_revision_id": payload.get("warmed_revision_id"),
+            }
+            if worker["kind"] == "endpoint":
+                worker.update(self._describe_endpoint_worker_visibility(worker))
+            workers.append(worker)
         workers.sort(key=lambda item: item["worker_id"])
         return workers
 
     async def list_endpoint_workers(self) -> dict[str, Any]:
         workers = await self._list_registered_workers(self.settings.endpoint_worker_registry_prefix)
-        available_workers = sum(1 for item in workers if item["status"] in {"listening", "idle"})
+        available_workers = sum(
+            1
+            for item in workers
+            if item.get("deploy_state") in {"ready", "unassigned"}
+        )
         reported_workers = len(workers)
         total_workers = max(reported_workers, max(0, int(self.settings.total_endpoint_workers)))
         return {

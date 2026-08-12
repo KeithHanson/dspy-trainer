@@ -61,13 +61,19 @@ function EndpointWorkerStatusPill({ status }) {
   return <span className={`plans-status ${toneClass}`}>{status || "unknown"}</span>;
 }
 
-function describeEndpointWorkerState(status, taskId, endpointId) {
+function describeEndpointWorkerState(status, taskId, endpointId, stateSummary) {
+  if (stateSummary) return stateSummary;
   if (status === "listening") return endpointId ? "Ready for assigned endpoint traffic" : "Ready";
   if (status === "idle") return "Waiting for an endpoint assignment";
   if (status === "preparing") return "Installing bundle dependencies";
+  if (status === "stale") return "Assigned revision does not match the warmed bundle yet";
   if (status === "running") return taskId ? "Processing endpoint invocation" : "Busy";
   if (status === "failed") return "Warmup or execution failed";
   return "Heartbeat reported";
+}
+
+function formatRevision(value) {
+  return value ? String(value).slice(0, 8) : "-";
 }
 
 function formatWorkerLastSeen(value) {
@@ -84,9 +90,11 @@ function formatWorkerLastSeen(value) {
 function EndpointWorkersSection({ endpointWorkers, endpoints }) {
   const workers = Array.isArray(endpointWorkers) ? endpointWorkers : [];
   const totalWorkers = workers.length;
-  const readyWorkers = workers.filter((worker) => worker?.status === "listening").length;
+  const readyWorkers = workers.filter((worker) => worker?.deploy_state === "ready").length;
   const busyWorkers = workers.filter((worker) => worker?.status === "running").length;
   const preparingWorkers = workers.filter((worker) => worker?.status === "preparing").length;
+  const staleWorkers = workers.filter((worker) => worker?.deploy_state === "revision_mismatch" || worker?.status === "stale").length;
+  const idleWorkers = workers.filter((worker) => worker?.status === "idle").length;
   const failedWorkers = workers.filter((worker) => worker?.status === "failed").length;
   const endpointNameById = new Map((Array.isArray(endpoints) ? endpoints : []).map((endpoint) => [endpoint.id, endpoint.name || endpoint.id]));
 
@@ -97,8 +105,10 @@ function EndpointWorkersSection({ endpointWorkers, endpoints }) {
           <h3 className="t-h2" style={{ marginBottom: 6 }}>Endpoint workers</h3>
           <p className="muted t-sm">
             {readyWorkers} ready of {totalWorkers} total
-            {busyWorkers ? ` · ${busyWorkers} busy` : ""}
+            {busyWorkers ? ` · ${busyWorkers} running` : ""}
             {preparingWorkers ? ` · ${preparingWorkers} preparing` : ""}
+            {staleWorkers ? ` · ${staleWorkers} stale` : ""}
+            {idleWorkers ? ` · ${idleWorkers} idle` : ""}
             {failedWorkers ? ` · ${failedWorkers} failed` : ""}
           </p>
         </div>
@@ -129,7 +139,19 @@ function EndpointWorkersSection({ endpointWorkers, endpoints }) {
                   </div>
                   <div>
                     <dt>State</dt>
-                    <dd>{describeEndpointWorkerState(worker.status, worker.task_id, worker.endpoint_id)}</dd>
+                    <dd>{describeEndpointWorkerState(worker.status, worker.task_id, worker.endpoint_id, worker.state_summary)}</dd>
+                  </div>
+                  <div>
+                    <dt>Deploy</dt>
+                    <dd>{worker.deploy_state || (worker.endpoint_id ? "assigned" : "unassigned")}</dd>
+                  </div>
+                  <div>
+                    <dt>Desired rev</dt>
+                    <dd className="mono">{formatRevision(worker.desired_revision_id)}</dd>
+                  </div>
+                  <div>
+                    <dt>Warmed rev</dt>
+                    <dd className="mono">{formatRevision(worker.warmed_revision_id)}</dd>
                   </div>
                   <div>
                     <dt>Assignment</dt>
@@ -232,6 +254,7 @@ export function EndpointsPage() {
           <div className="col gap-1">
             <h1 className="t-display" style={{ fontSize: 22 }}>Endpoints</h1>
             <p className="muted t-sm">Manage named bundle endpoints for synchronous JSON and SSE streaming access.</p>
+            <p className="muted t-xs">Worker cards show readiness state plus desired and warmed bundle revisions so deploy mismatches are visible without checking container logs.</p>
           </div>
           <div className="row gap-2">
             <Button onClick={loadEndpoints} disabled={isLoading}>{isLoading ? "Refreshing..." : "Refresh"}</Button>
