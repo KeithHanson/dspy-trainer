@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import secrets
 import json
@@ -1071,7 +1071,240 @@ class AppServices:
         worker.update(self._describe_endpoint_worker_visibility(worker))
         return worker
 
-    async def list_endpoint_workers(self) -> dict[str, Any]:
+    def _endpoint_worker_heartbeat_expires_at(self, now: datetime | None = None) -> datetime:
+        base = now or datetime.now(timezone.utc)
+        return base + timedelta(seconds=max(1, int(self.settings.endpoint_worker_heartbeat_ttl_seconds)))
+
+    def _build_endpoint_worker_registry_payload(self, row: Any, *, now: datetime | None = None) -> dict[str, Any]:
+        as_of = now or datetime.now(timezone.utc)
+        heartbeat_expires_at = row["heartbeat_expires_at"]
+        is_stale = heartbeat_expires_at is None or heartbeat_expires_at <= as_of
+        status = "stale" if is_stale else str(row["status"] or "unknown")
+        endpoint_id = row["assigned_endpoint_id"]
+        runtime_metadata = row["runtime_metadata"] or {}
+        if not isinstance(runtime_metadata, dict):
+            runtime_metadata = {}
+        payload = {
+            "worker_id": str(row["worker_id"]),
+            "runtime_instance_id": str(row["runtime_instance_id"]),
+            "status": status,
+            "raw_status": str(row["status"] or "unknown"),
+            "task_id": row["task_id"],
+            "endpoint_id": endpoint_id,
+            "assigned_endpoint_id": endpoint_id,
+            "last_seen": row["last_seen_at"].isoformat() if row["last_seen_at"] else None,
+            "last_seen_at": row["last_seen_at"].isoformat() if row["last_seen_at"] else None,
+            "heartbeat_expires_at": heartbeat_expires_at.isoformat() if heartbeat_expires_at else None,
+            "hostname": row["hostname"],
+            "pid": row["pid"],
+            "runtime_metadata": runtime_metadata,
+            "last_error": row["last_error"],
+            "desired_revision_id": _clean_optional_text(runtime_metadata.get("desired_revision_id")),
+            "warmed_revision_id": _clean_optional_text(runtime_metadata.get("warmed_revision_id")),
+            "kind": "endpoint",
+            "is_stale": is_stale,
+            "is_live": not is_stale,
+        }
+        payload.update(self._describe_endpoint_worker_visibility(payload))
+        return payload
+
+    def _summarize_endpoint_workers(self, workers: list[dict[str, Any]]) -> dict[str, int]:
+        live_workers = sum(1 for item in workers if item["is_live"])
+        stale_workers = len(workers) - live_workers
+        assigned_workers = sum(1 for item in workers if item.get("assigned_endpoint_id"))
+        unassigned_workers = len(workers) - assigned_workers
+        ready_workers = sum(1 for item in workers if item["is_live"] and item["raw_status"] in {"idle", "listening"})
+        warming_workers = sum(1 for item in workers if item["is_live"] and item["raw_status"] == "preparing")
+        running_workers = sum(1 for item in workers if item["is_live"] and item["raw_status"] == "running")
+        failed_workers = sum(1 for item in workers if item["raw_status"] == "failed")
+        return {
+            "live_workers": live_workers,
+            "stale_workers": stale_workers,
+            "assigned_workers": assigned_workers,
+            "unassigned_workers": unassigned_workers,
+            "ready_workers": ready_workers,
+            "warming_workers": warming_workers,
+            "running_workers": running_workers,
+            "failed_workers": failed_workers,
+        }
+
+    async def register_endpoint_worker(
+        self,
+        *,
+        runtime_instance_id: str,
+        worker_id: str | None = None,
+        status: str = "idle",
+        assigned_endpoint_id: str | None = None,
+        task_id: str | None = None,
+        hostname: str | None = None,
+        pid: int | None = None,
+        runtime_metadata: dict[str, Any] | None = None,
+        last_error: str | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        registration_time = now or datetime.now(timezone.utc)
+        effective_worker_id = _clean_optional_text(worker_id) or f"endpoint-worker-{uuid4()}"
+        runtime_id = _clean_optional_text(runtime_instance_id)
+        if not runtime_id:
+            raise ValueError("runtime_instance_id is required")
+        async with self.postgres_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                insert into endpoint_worker_registrations (
+                  worker_id,
+                  runtime_instance_id,
+                  status,
+                  assigned_endpoint_id,
+                  task_id,
+                  last_seen_at,
+                  heartbeat_expires_at,
+                  hostname,
+                  pid,
+                  runtime_metadata,
+                  last_error,
+                  created_at,
+                  updated_at
+                )
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $12)
+                on conflict (worker_id) do update set
+                  runtime_instance_id = excluded.runtime_instance_id,
+                  status = excluded.status,
+                  assigned_endpoint_id = excluded.assigned_endpoint_id,
+                  task_id = excluded.task_id,
+                  last_seen_at = excluded.last_seen_at,
+                  heartbeat_expires_at = excluded.heartbeat_expires_at,
+                  hostname = excluded.hostname,
+                  pid = excluded.pid,
+                  runtime_metadata = excluded.runtime_metadata,
+                  last_error = excluded.last_error,
+                  updated_at = excluded.updated_at
+                returning worker_id, runtime_instance_id, status, assigned_endpoint_id, task_id, last_seen_at,
+                          heartbeat_expires_at, hostname, pid, runtime_metadata, last_error, created_at, updated_at
+                """,
+                effective_worker_id,
+                runtime_id,
+                str(status or "idle"),
+                _clean_optional_text(assigned_endpoint_id),
+                _clean_optional_text(task_id),
+                registration_time,
+                self._endpoint_worker_heartbeat_expires_at(registration_time),
+                _clean_optional_text(hostname),
+                pid,
+                json.dumps(runtime_metadata or {}),
+                _clean_optional_text(last_error),
+                registration_time,
+            )
+        return self._build_endpoint_worker_registry_payload(row, now=registration_time)
+
+    async def heartbeat_endpoint_worker(
+        self,
+        worker_id: str,
+        *,
+        runtime_instance_id: str | None = None,
+        status: str,
+        assigned_endpoint_id: str | None = None,
+        task_id: str | None = None,
+        hostname: str | None = None,
+        pid: int | None = None,
+        runtime_metadata: dict[str, Any] | None = None,
+        last_error: str | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        heartbeat_time = now or datetime.now(timezone.utc)
+        params: list[Any] = [
+            str(worker_id),
+            _clean_optional_text(runtime_instance_id),
+            str(status or "idle"),
+            _clean_optional_text(assigned_endpoint_id),
+            _clean_optional_text(task_id),
+            heartbeat_time,
+            self._endpoint_worker_heartbeat_expires_at(heartbeat_time),
+            _clean_optional_text(hostname),
+            pid,
+            json.dumps(runtime_metadata or {}),
+            _clean_optional_text(last_error),
+        ]
+        runtime_clause = ""
+        if params[1]:
+            runtime_clause = " and runtime_instance_id = $2"
+        async with self.postgres_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"""
+                update endpoint_worker_registrations
+                set runtime_instance_id = coalesce($2, runtime_instance_id),
+                    status = $3,
+                    assigned_endpoint_id = $4,
+                    task_id = $5,
+                    last_seen_at = $6,
+                    heartbeat_expires_at = $7,
+                    hostname = $8,
+                    pid = $9,
+                    runtime_metadata = $10::jsonb,
+                    last_error = $11,
+                    updated_at = $6
+                where worker_id = $1{runtime_clause}
+                returning worker_id, runtime_instance_id, status, assigned_endpoint_id, task_id, last_seen_at,
+                          heartbeat_expires_at, hostname, pid, runtime_metadata, last_error, created_at, updated_at
+                """,
+                *params,
+            )
+        if row is None:
+            return None
+        return self._build_endpoint_worker_registry_payload(row, now=heartbeat_time)
+
+    async def mark_stale_endpoint_workers(self, *, now: datetime | None = None) -> int:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        stale_time = now or datetime.now(timezone.utc)
+        async with self.postgres_pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                update endpoint_worker_registrations
+                set status = 'stale', updated_at = $1
+                where heartbeat_expires_at <= $1 and status <> 'stale'
+                """,
+                stale_time,
+            )
+        try:
+            return int(str(result).split()[-1])
+        except Exception:
+            return 0
+
+    async def list_endpoint_worker_registrations(self, *, now: datetime | None = None) -> list[dict[str, Any]]:
+        if self.postgres_pool is None:
+            return []
+        as_of = now or datetime.now(timezone.utc)
+        async with self.postgres_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                select worker_id, runtime_instance_id, status, assigned_endpoint_id, task_id, last_seen_at,
+                       heartbeat_expires_at, hostname, pid, runtime_metadata, last_error, created_at, updated_at
+                from endpoint_worker_registrations
+                order by created_at asc, worker_id asc
+                """
+            )
+        return [self._build_endpoint_worker_registry_payload(row, now=as_of) for row in rows]
+
+    async def list_endpoint_workers(self, *, now: datetime | None = None) -> dict[str, Any]:
+        if self.postgres_pool is not None:
+            workers = await self.list_endpoint_worker_registrations(now=now)
+            summary = self._summarize_endpoint_workers(workers)
+            reported_workers = len(workers)
+            available_workers = summary["ready_workers"]
+            return {
+                "items": workers,
+                "total_workers": reported_workers,
+                "reported_workers": reported_workers,
+                "available_workers": available_workers,
+                "busy_workers": max(0, reported_workers - available_workers),
+                "missing_workers": 0,
+                **summary,
+            }
+
         worker_ids = self._expected_endpoint_worker_ids()
         if self.redis is None:
             return {
@@ -1247,6 +1480,38 @@ class AppServices:
             await conn.execute("alter table bundle_endpoints add column if not exists lm_profile_id text references lm_profiles(id) on delete set null;")
             await conn.execute("alter table bundle_endpoints add column if not exists pinned_worker_count int not null default 1;")
             await conn.execute("create index if not exists idx_bundle_endpoints_module_import_id on bundle_endpoints(module_import_id, created_at desc);")
+            await conn.execute(
+                """
+                create table if not exists endpoint_worker_registrations (
+                  worker_id text primary key,
+                  runtime_instance_id text not null,
+                  status text not null,
+                  assigned_endpoint_id text references bundle_endpoints(id) on delete set null,
+                  task_id text,
+                  last_seen_at timestamptz not null,
+                  heartbeat_expires_at timestamptz not null,
+                  hostname text,
+                  pid int,
+                  runtime_metadata jsonb not null default '{}'::jsonb,
+                  last_error text,
+                  created_at timestamptz not null,
+                  updated_at timestamptz not null
+                );
+                """
+            )
+            await conn.execute("alter table endpoint_worker_registrations add column if not exists assigned_endpoint_id text references bundle_endpoints(id) on delete set null;")
+            await conn.execute("alter table endpoint_worker_registrations add column if not exists task_id text;")
+            await conn.execute("alter table endpoint_worker_registrations add column if not exists last_seen_at timestamptz;")
+            await conn.execute("alter table endpoint_worker_registrations add column if not exists heartbeat_expires_at timestamptz;")
+            await conn.execute("alter table endpoint_worker_registrations add column if not exists hostname text;")
+            await conn.execute("alter table endpoint_worker_registrations add column if not exists pid int;")
+            await conn.execute("alter table endpoint_worker_registrations add column if not exists runtime_metadata jsonb not null default '{}'::jsonb;")
+            await conn.execute("alter table endpoint_worker_registrations add column if not exists last_error text;")
+            await conn.execute("alter table endpoint_worker_registrations add column if not exists created_at timestamptz;")
+            await conn.execute("alter table endpoint_worker_registrations add column if not exists updated_at timestamptz;")
+            await conn.execute("create index if not exists idx_endpoint_worker_registrations_heartbeat_expires_at on endpoint_worker_registrations(heartbeat_expires_at asc);")
+            await conn.execute("create index if not exists idx_endpoint_worker_registrations_assigned_endpoint_id on endpoint_worker_registrations(assigned_endpoint_id, created_at asc);")
+            await conn.execute("create index if not exists idx_endpoint_worker_registrations_status on endpoint_worker_registrations(status, created_at asc);")
             await conn.execute(
                 """
                 create table if not exists optimization_datasets (

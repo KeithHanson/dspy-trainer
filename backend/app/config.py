@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     endpoint_worker_inventory_prefix: str = Field(default="dspy-trainer:endpoint-worker-inventory")
     endpoint_worker_ids: str = Field(default="")
     total_endpoint_workers: int = Field(default=2)
+    endpoint_worker_heartbeat_ttl_seconds: int = Field(default=15)
     endpoint_queue_prefix: str = Field(default="dspy-trainer:endpoint-queues")
     endpoint_worker_assignment_prefix: str = Field(default="dspy-trainer:endpoint-worker-assignments")
     endpoint_invocation_channel_prefix: str = Field(default="dspy-trainer:endpoint-invocations")
@@ -47,6 +48,13 @@ class Settings(BaseSettings):
         if configured_ids:
             return configured_ids
         return [f"endpoint-worker-{index}" for index in range(1, self.total_endpoint_workers + 1)]
+
+    @field_validator("endpoint_worker_heartbeat_ttl_seconds")
+    @classmethod
+    def validate_endpoint_worker_heartbeat_ttl_seconds(cls, value: int) -> int:
+        if int(value) < 1:
+            raise ValueError("DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS must be at least 1")
+        return int(value)
 
     def cors_origins_list(self) -> list[str]:
         return get_cors_origins_from_values(
