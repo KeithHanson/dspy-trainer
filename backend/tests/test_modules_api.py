@@ -87,13 +87,43 @@ async def fake_readiness(self):
 async def fake_list_endpoint_workers(self):
     return {
         "items": [
-            {"worker_id": "endpoint-worker-1", "status": "listening", "endpoint_id": "endpoint-1", "task_id": None, "last_seen": None, "kind": "endpoint"},
-            {"worker_id": "endpoint-worker-2", "status": "running", "endpoint_id": "endpoint-1", "task_id": "inv-1", "last_seen": None, "kind": "endpoint"},
+            {
+                "worker_id": "endpoint-worker-1",
+                "status": "listening",
+                "raw_status": "listening",
+                "endpoint_id": "endpoint-1",
+                "assigned_endpoint_id": "endpoint-1",
+                "task_id": None,
+                "last_seen": None,
+                "kind": "endpoint",
+                "is_live": True,
+                "is_stale": False,
+            },
+            {
+                "worker_id": "endpoint-worker-2",
+                "status": "running",
+                "raw_status": "running",
+                "endpoint_id": "endpoint-1",
+                "assigned_endpoint_id": "endpoint-1",
+                "task_id": "inv-1",
+                "last_seen": None,
+                "kind": "endpoint",
+                "is_live": True,
+                "is_stale": False,
+            },
         ],
         "total_workers": 2,
         "reported_workers": 2,
         "available_workers": 1,
         "busy_workers": 1,
+        "live_workers": 2,
+        "stale_workers": 0,
+        "assigned_workers": 2,
+        "unassigned_workers": 0,
+        "ready_workers": 1,
+        "warming_workers": 0,
+        "running_workers": 1,
+        "failed_workers": 0,
     }
 
 
@@ -938,4 +968,6 @@ def test_endpoint_workers_listing(monkeypatch):
     assert response.status_code == 200
     payload = response.json()
     assert payload["total_workers"] == 2
+    assert payload["live_workers"] == 2
+    assert payload["assigned_workers"] == 2
     assert payload["items"][0]["worker_id"] == "endpoint-worker-1"
