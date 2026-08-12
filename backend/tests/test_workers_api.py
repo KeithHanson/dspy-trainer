@@ -125,7 +125,6 @@ def test_list_endpoint_workers_exposes_revision_state(monkeypatch):
     payload = asyncio.run(services.list_endpoint_workers())
 
     assert payload["available_workers"] == 2
-    assert payload["missing_workers"] == 0
     assert payload["live_workers"] == 4
     assert payload["stale_workers"] == 0
     assert payload["assigned_workers"] == 3
@@ -195,7 +194,6 @@ def test_list_endpoint_workers_does_not_count_listening_revision_mismatch_as_ava
 
     assert payload["available_workers"] == 2
     assert payload["busy_workers"] == 1
-    assert payload["missing_workers"] == 0
     assert payload["live_workers"] == 3
     assert payload["stale_workers"] == 0
     assert payload["assigned_workers"] == 2

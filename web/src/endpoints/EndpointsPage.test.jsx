@@ -13,7 +13,7 @@ describe("EndpointsPage", () => {
         ]) });
       }
       if (String(url).endsWith("/endpoint-workers") && init?.method === "GET") {
-        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ total_workers: 3, missing_workers: 0, live_workers: 2, stale_workers: 1, assigned_workers: 2, unassigned_workers: 1, ready_workers: 1, warming_workers: 0, running_workers: 0, failed_workers: 0, items: [
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ total_workers: 3, live_workers: 2, stale_workers: 1, assigned_workers: 2, unassigned_workers: 1, ready_workers: 1, warming_workers: 0, running_workers: 0, failed_workers: 0, items: [
           { worker_id: "endpoint-worker-1", endpoint_id: "ep-1", assigned_endpoint_id: "ep-1", is_live: true, state_label: "Listening", status: "listening", deploy_state: "ready", desired_revision_id: "rev-22222222", warmed_revision_id: "rev-22222222", state_summary: "Ready for traffic on revision rev-2222." },
           { worker_id: "endpoint-worker-2", endpoint_id: "ep-1", assigned_endpoint_id: "ep-1", is_live: false, state_label: "Stale", status: "stale", deploy_state: "revision_mismatch", desired_revision_id: "rev-22222222", warmed_revision_id: "rev-11111111", state_summary: "Assigned endpoint expects revision rev-2222; worker is still warmed on rev-1111." },
           { worker_id: "endpoint-worker-3", endpoint_id: null, assigned_endpoint_id: null, is_live: true, state_label: "Idle", status: "idle", deploy_state: "unassigned", desired_revision_id: null, warmed_revision_id: null, state_summary: "Waiting for an endpoint assignment." },
@@ -65,7 +65,7 @@ describe("EndpointsPage", () => {
         ]) });
       }
       if (String(url).endsWith("/endpoint-workers") && init?.method === "GET") {
-        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ total_workers: 3, missing_workers: 0, live_workers: 3, stale_workers: 0, assigned_workers: 2, unassigned_workers: 1, ready_workers: 1, warming_workers: 0, running_workers: 0, failed_workers: 0, items: [
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ total_workers: 3, live_workers: 3, stale_workers: 0, assigned_workers: 2, unassigned_workers: 1, ready_workers: 1, warming_workers: 0, running_workers: 0, failed_workers: 0, items: [
           { worker_id: "endpoint-worker-1", endpoint_id: "ep-1", assigned_endpoint_id: "ep-1", is_live: true, state_label: "Listening", status: "listening", deploy_state: "revision_mismatch", desired_revision_id: "rev-22222222", warmed_revision_id: "rev-11111111", state_summary: "Heartbeat says listening, but desired revision rev-2222 does not match warmed revision rev-1111." },
           { worker_id: "endpoint-worker-2", endpoint_id: "ep-1", assigned_endpoint_id: "ep-1", is_live: true, state_label: "Listening", status: "listening", deploy_state: "ready", desired_revision_id: "rev-22222222", warmed_revision_id: "rev-22222222", state_summary: "Ready for traffic on revision rev-2222." },
           { worker_id: "endpoint-worker-3", endpoint_id: null, assigned_endpoint_id: null, is_live: true, state_label: "Idle", status: "idle", deploy_state: "unassigned", desired_revision_id: null, warmed_revision_id: null, state_summary: "Waiting for an endpoint assignment." },
@@ -85,7 +85,7 @@ describe("EndpointsPage", () => {
     expect(screen.getByText("Heartbeat says listening, but desired revision rev-2222 does not match warmed revision rev-1111.")).toBeInTheDocument();
   });
 
-  it("shows the authoritative inventory roster when one worker stops heartbeating", async () => {
+  it("shows the authoritative registry roster when one worker stops heartbeating", async () => {
     const fetchMock = vi.fn((url, init) => {
       if (String(url).endsWith("/bundle-endpoints") && init?.method === "GET") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([
@@ -93,9 +93,9 @@ describe("EndpointsPage", () => {
         ]) });
       }
       if (String(url).endsWith("/endpoint-workers") && init?.method === "GET") {
-        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ total_workers: 2, reported_workers: 1, missing_workers: 1, live_workers: 1, stale_workers: 1, assigned_workers: 2, unassigned_workers: 0, ready_workers: 1, warming_workers: 0, running_workers: 0, failed_workers: 0, items: [
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ total_workers: 2, reported_workers: 2, live_workers: 1, stale_workers: 1, assigned_workers: 2, unassigned_workers: 0, ready_workers: 1, warming_workers: 0, running_workers: 0, failed_workers: 0, items: [
           { worker_id: "endpoint-worker-1", endpoint_id: "ep-1", assigned_endpoint_id: "ep-1", is_live: true, state_label: "Listening", status: "listening", deploy_state: "ready", desired_revision_id: "rev-22222222", warmed_revision_id: "rev-22222222", state_summary: "Ready for traffic on revision rev-2222." },
-          { worker_id: "endpoint-worker-2", endpoint_id: null, assigned_endpoint_id: "ep-1", is_live: false, state_label: "Missing", status: "missing", deploy_state: "missing", desired_revision_id: "rev-33333333", warmed_revision_id: "rev-11111111", state_summary: "Missing heartbeat since 2025-12-31T23:59:00+00:00; assigned endpoint expects revision rev-3333 while the last warmed revision was rev-1111.", last_seen: "2025-12-31T23:59:00+00:00" },
+          { worker_id: "endpoint-worker-2", endpoint_id: "ep-1", assigned_endpoint_id: "ep-1", is_live: false, state_label: "Stale", status: "stale", deploy_state: "revision_mismatch", desired_revision_id: "rev-33333333", warmed_revision_id: "rev-11111111", state_summary: "Assigned endpoint expects revision rev-3333; worker is still warmed on rev-1111.", last_seen: "2025-12-31T23:59:00+00:00" },
         ] }) });
       }
       return Promise.reject(new Error(`Unexpected URL ${url}`));
@@ -108,12 +108,12 @@ describe("EndpointsPage", () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByText(/1 ready of 2 total · 1 live · 1 stale · 2 assigned · 0 unassigned · 1 missing/)).toBeInTheDocument();
+    expect(await screen.findByText(/1 ready of 2 total · 1 live · 1 stale · 2 assigned · 0 unassigned/)).toBeInTheDocument();
     expect(screen.getByText("endpoint-worker-1")).toBeInTheDocument();
     expect(screen.getByText("endpoint-worker-2")).toBeInTheDocument();
     expect(screen.queryByText("ephemeral-worker-99")).not.toBeInTheDocument();
-    expect(screen.getByText(/Missing heartbeat since 2025-12-31T23:59:00\+00:00/)).toBeInTheDocument();
-    expect(screen.getAllByText("missing").length).toBeGreaterThan(0);
+    expect(screen.getByText("Assigned endpoint expects revision rev-3333; worker is still warmed on rev-1111.")).toBeInTheDocument();
+    expect(screen.getAllByText("Stale").length).toBeGreaterThan(0);
   });
 
   it("copies curl command from the list page", async () => {
@@ -126,7 +126,7 @@ describe("EndpointsPage", () => {
         ]) });
       }
       if (String(url).endsWith("/endpoint-workers") && init?.method === "GET") {
-        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ items: [], total_workers: 0, missing_workers: 0 }) });
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ items: [], total_workers: 0 }) });
       }
       return Promise.reject(new Error(`Unexpected URL ${url}`));
     });
@@ -150,7 +150,7 @@ describe("EndpointsPage", () => {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([]) });
       }
       if (String(url).endsWith("/endpoint-workers") && init?.method === "GET") {
-        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ items: [], total_workers: 0, missing_workers: 0 }) });
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ items: [], total_workers: 0 }) });
       }
       return Promise.reject(new Error(`Unexpected URL ${url}`));
     });
@@ -163,7 +163,7 @@ describe("EndpointsPage", () => {
     );
 
     expect(await screen.findByText("No endpoints yet")).toBeInTheDocument();
-    expect(screen.getByText("No endpoint worker inventory configured yet.")).toBeInTheDocument();
+    expect(screen.getByText("No endpoint workers registered yet.")).toBeInTheDocument();
   });
 
   it("creates a new endpoint from the editor page", async () => {
