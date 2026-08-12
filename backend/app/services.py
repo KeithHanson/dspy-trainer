@@ -1032,16 +1032,21 @@ class AppServices:
         if self.postgres_pool is None:
             return self._expected_endpoint_worker_ids()
         workers = await self.list_endpoint_worker_registrations(now=now)
-        ranked_workers = sorted(
-            workers,
-            key=lambda item: (
+
+        def _worker_rank(item: dict[str, Any]) -> tuple[int, int, float, str]:
+            last_seen_raw = str(item.get("last_seen_at") or item.get("last_seen") or "").strip()
+            try:
+                last_seen_rank = -datetime.fromisoformat(last_seen_raw.replace("Z", "+00:00")).timestamp() if last_seen_raw else float("inf")
+            except ValueError:
+                last_seen_rank = float("inf")
+            return (
                 0 if item.get("is_live") else 1,
                 0 if item.get("raw_status") in {"idle", "listening", "preparing", "running", "failed"} else 1,
-                str(item.get("last_seen_at") or item.get("last_seen") or ""),
+                last_seen_rank,
                 str(item.get("worker_id") or ""),
-            ),
-            reverse=True,
-        )
+            )
+
+        ranked_workers = sorted(workers, key=_worker_rank)
         return [str(item.get("worker_id") or "").strip() for item in ranked_workers if str(item.get("worker_id") or "").strip()]
 
     async def _list_endpoint_worker_inventory(self) -> dict[str, dict[str, Any]]:

@@ -331,3 +331,59 @@ def test_reconcile_endpoint_worker_assignments_uses_registered_workers_without_s
         assert f"dspy-trainer:endpoint-worker-assignments:{registered_1['worker_id']}" not in services.redis.values
 
     asyncio.run(scenario())
+
+
+def test_reconcile_endpoint_worker_assignments_prioritizes_live_workers_over_newer_stale_workers():
+    async def scenario() -> None:
+        services = _make_services()
+        services.redis = _Redis()
+        now = datetime(2099, 1, 1, tzinfo=timezone.utc)
+
+        async def list_all_bundle_endpoints():
+            return [{"id": "endpoint-1", "pinned_worker_count": 1, "created_at": now.isoformat()}]
+
+        async def get_bundle_endpoint(endpoint_id: str):
+            return {"id": endpoint_id, "module_import_id": "mod-1"}
+
+        async def resolve_module_execution_state(module_id: str):
+            return {"module_id": module_id, "bundle_revision_id": "rev-1"}
+
+        services.list_all_bundle_endpoints = list_all_bundle_endpoints  # type: ignore[method-assign]
+        services.get_bundle_endpoint = get_bundle_endpoint  # type: ignore[method-assign]
+        services.resolve_module_execution_state = resolve_module_execution_state  # type: ignore[method-assign]
+
+        live_worker = await services.register_endpoint_worker(
+            runtime_instance_id="runtime-1",
+            status="idle",
+            hostname="host-1",
+            pid=101,
+            now=now,
+        )
+        stale_worker = await services.register_endpoint_worker(
+            runtime_instance_id="runtime-2",
+            status="idle",
+            hostname="host-2",
+            pid=102,
+            now=now + timedelta(seconds=1),
+        )
+        await services.heartbeat_endpoint_worker(
+            live_worker["worker_id"],
+            runtime_instance_id="runtime-1",
+            status="idle",
+            hostname="host-1",
+            pid=101,
+            now=now + timedelta(seconds=10),
+        )
+
+        reconcile_at = now + timedelta(seconds=17)
+        await services.mark_stale_endpoint_workers(now=reconcile_at)
+        await services.reconcile_endpoint_worker_assignments()
+        ordered_worker_ids = await services._registered_endpoint_worker_ids_for_assignment(now=reconcile_at)
+
+        assignment = json.loads(services.redis.values[f"dspy-trainer:endpoint-worker-assignments:{live_worker['worker_id']}"])
+
+        assert ordered_worker_ids[:2] == [live_worker["worker_id"], stale_worker["worker_id"]]
+        assert assignment == {"worker_id": live_worker["worker_id"], "endpoint_id": "endpoint-1"}
+        assert f"dspy-trainer:endpoint-worker-assignments:{stale_worker['worker_id']}" not in services.redis.values
+
+    asyncio.run(scenario())
