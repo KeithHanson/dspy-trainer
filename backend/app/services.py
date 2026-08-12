@@ -1136,7 +1136,9 @@ class AppServices:
         stale_workers = len(workers) - live_workers
         assigned_workers = sum(1 for item in workers if item.get("assigned_endpoint_id"))
         unassigned_workers = len(workers) - assigned_workers
-        ready_workers = sum(1 for item in workers if item["is_live"] and item["raw_status"] in {"idle", "listening"})
+        ready_workers = sum(
+            1 for item in workers if item["is_live"] and item.get("deploy_state") in {"ready", "unassigned"}
+        )
         warming_workers = sum(1 for item in workers if item["is_live"] and item["raw_status"] == "preparing")
         running_workers = sum(1 for item in workers if item["is_live"] and item["raw_status"] == "running")
         failed_workers = sum(1 for item in workers if item["raw_status"] == "failed")
