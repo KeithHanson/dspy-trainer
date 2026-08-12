@@ -394,7 +394,8 @@ async def run_endpoint_worker() -> None:
     warmed_revision_id: str | None = None
     try:
         while True:
-            await services.reconcile_endpoint_worker_assignments()
+            if services.postgres_pool is None:
+                await services.reconcile_endpoint_worker_assignments()
             assignment = await services.get_endpoint_worker_assignment(worker_id)
             endpoint_id = str(assignment.get("endpoint_id") or "").strip() if assignment else ""
             if not endpoint_id:
