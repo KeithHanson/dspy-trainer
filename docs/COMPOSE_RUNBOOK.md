@@ -55,8 +55,7 @@ LM Profile setup note:
 
 Managed endpoint worker note:
 - Compose-backed `endpoint-worker` containers self-register with the backend's durable endpoint-worker registry.
-- Operator assignment and readiness are driven by that live registry inventory, not by an env-defined logical worker roster.
-- Short-lived compatibility note: legacy `DSPY_TRAINER_TOTAL_ENDPOINT_WORKERS` / `DSPY_TRAINER_ENDPOINT_WORKER_IDS` overrides may still exist for fallback paths outside the normal Compose operator model, but new Compose deployments should treat them as deprecated.
+- Operator assignment and readiness are driven directly by that live registry, not by an env-defined logical worker roster.
 
 Bundle runtime note:
 - If a tracked bundle contains `requirements.txt`, backend and worker install those dependencies automatically before executing the bundle.

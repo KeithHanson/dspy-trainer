@@ -544,7 +544,7 @@ Key variables in `.env`:
 | `DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY` | Encrypts module environment entries and LM Profile provider API keys stored in Postgres | Required for module env UI and LM Profile API key storage |
 | `DSPY_TRAINER_TOTAL_WORKERS` | Number of general worker containers in Compose | Optional |
 | `DSPY_TRAINER_TOTAL_ENDPOINT_WORKER_REPLICAS` | Number of dedicated endpoint worker containers in Compose | Optional |
-| `DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS` | Seconds before a missing endpoint-worker heartbeat is marked stale | Optional |
+| `DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS` | Seconds before an endpoint-worker heartbeat is marked stale | Optional |
 | `DSPY_TRAINER_POSTGRES_DSN` | Postgres connection | ✅ (auto in Compose) |
 | `DSPY_TRAINER_REDIS_URL` | Redis connection | ✅ (auto in Compose) |
 
@@ -574,14 +574,13 @@ Managed bundle endpoints do not execute inside the backend container. The backen
 
 - Set `DSPY_TRAINER_TOTAL_WORKERS` in `.env` to control the number of general worker containers Compose starts.
 - Set `DSPY_TRAINER_TOTAL_ENDPOINT_WORKER_REPLICAS` in `.env` to control how many dedicated endpoint-worker containers Compose starts.
-- Compose-backed endpoint workers now self-register into the backend's durable endpoint-worker registry; operator-facing assignment comes from that live inventory rather than from an env-defined logical roster.
-- Set `DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS` in `.env` if you need to tune how quickly missing endpoint-worker heartbeats become `stale` in operator views.
+- Compose-backed endpoint workers now self-register into the backend's durable endpoint-worker registry; operator-facing assignment and readiness come directly from those live registry records rather than from an env-defined logical roster.
+- Set `DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS` in `.env` if you need to tune how quickly endpoint-worker heartbeats become `stale` in operator views.
 - Each endpoint stores a `pinned_worker_count`.
-- Endpoint workers are assigned deterministically to endpoints based on those pinned counts and the current registry-backed worker inventory.
+- Endpoint workers are assigned deterministically to endpoints based on those pinned counts and the current registry-backed worker set.
 - Only workers assigned to a given endpoint consume that endpoint's invocation queue.
-- `GET /endpoint-workers` exposes operator-facing readiness details for each endpoint worker from the durable endpoint-worker inventory, including `deploy_state`, `state_summary`, and the desired versus warmed bundle revisions.
-- Common endpoint worker states: `idle` (unassigned), `stale` (assigned but warmed on an older revision), `missing` (assignment still exists but live heartbeats stopped), `preparing` (installing the desired revision), `listening` (ready), `running` (serving traffic), and `failed` (warmup or invocation failure).
-- Short-lived compatibility note: legacy `DSPY_TRAINER_TOTAL_ENDPOINT_WORKERS` / `DSPY_TRAINER_ENDPOINT_WORKER_IDS` overrides may still be honored by non-Compose fallback code paths, but new operator deployments should treat them as deprecated and avoid wiring roster membership through env.
+- `GET /endpoint-workers` exposes operator-facing readiness details for each endpoint worker from the durable endpoint-worker registry, including `deploy_state`, `state_summary`, and the desired versus warmed bundle revisions.
+- Common endpoint worker states: `idle` (unassigned), `stale` (heartbeat expired or assigned revision does not match the warmed bundle), `preparing` (installing the desired revision), `listening` (ready), `running` (serving traffic), and `failed` (warmup or invocation failure).
 
 ---
 

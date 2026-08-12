@@ -349,7 +349,6 @@ def test_list_endpoint_workers_registry_summary_excludes_listening_revision_mism
 def test_reconcile_endpoint_worker_assignments_uses_registered_workers_without_static_ids():
     async def scenario() -> None:
         services = _make_services()
-        services.redis = _Redis()
         now = datetime(2099, 1, 1, tzinfo=timezone.utc)
 
         async def list_all_bundle_endpoints():
@@ -383,15 +382,11 @@ def test_reconcile_endpoint_worker_assignments_uses_registered_workers_without_s
         await services.reconcile_endpoint_worker_assignments()
 
         workers = await services.list_endpoint_worker_registrations(now=now)
-        inventory_2 = json.loads(services.redis.values[f"dspy-trainer:endpoint-worker-inventory:{registered_2['worker_id']}"])
 
         assert workers[0]["worker_id"] == registered_1["worker_id"]
         assert workers[0]["assigned_endpoint_id"] is None
         assert workers[1]["worker_id"] == registered_2["worker_id"]
         assert workers[1]["assigned_endpoint_id"] == "endpoint-1"
-        assert inventory_2["endpoint_id"] == "endpoint-1"
-        assert inventory_2["desired_revision_id"] == "rev-1"
-        assert f"dspy-trainer:endpoint-worker-assignments:{registered_1['worker_id']}" not in services.redis.values
 
     asyncio.run(scenario())
 
@@ -399,7 +394,6 @@ def test_reconcile_endpoint_worker_assignments_uses_registered_workers_without_s
 def test_reconcile_endpoint_worker_assignments_prioritizes_live_workers_over_newer_stale_workers():
     async def scenario() -> None:
         services = _make_services()
-        services.redis = _Redis()
         now = datetime(2099, 1, 1, tzinfo=timezone.utc)
 
         async def list_all_bundle_endpoints():
@@ -447,7 +441,6 @@ def test_reconcile_endpoint_worker_assignments_prioritizes_live_workers_over_new
         assert ordered_worker_ids[:2] == [live_worker["worker_id"], stale_worker["worker_id"]]
         assert next(item for item in workers if item["worker_id"] == live_worker["worker_id"])["assigned_endpoint_id"] == "endpoint-1"
         assert next(item for item in workers if item["worker_id"] == stale_worker["worker_id"])["assigned_endpoint_id"] is None
-        assert f"dspy-trainer:endpoint-worker-assignments:{stale_worker['worker_id']}" not in services.redis.values
 
     asyncio.run(scenario())
 

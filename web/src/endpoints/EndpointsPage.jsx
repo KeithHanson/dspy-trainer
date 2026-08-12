@@ -69,7 +69,6 @@ function describeEndpointWorkerState(status, taskId, endpointId, stateSummary) {
   if (status === "stale") return "Assigned revision does not match the warmed bundle yet";
   if (status === "running") return taskId ? "Processing endpoint invocation" : "Busy";
   if (status === "failed") return "Warmup or execution failed";
-  if (status === "missing") return "Worker is missing from live heartbeats";
   return "Heartbeat reported";
 }
 
@@ -100,7 +99,6 @@ function EndpointWorkersSection({ endpointWorkers, endpoints }) {
   const preparingWorkers = Number(workersPayload.warming_workers ?? workers.filter((worker) => worker?.status === "preparing").length);
   const runningWorkers = Number(workersPayload.running_workers ?? workers.filter((worker) => worker?.status === "running").length);
   const failedWorkers = Number(workersPayload.failed_workers ?? workers.filter((worker) => worker?.status === "failed").length);
-  const missingWorkers = Number(workersPayload.missing_workers ?? workers.filter((worker) => worker?.status === "missing" || worker?.deploy_state === "missing").length);
   const endpointNameById = new Map((Array.isArray(endpoints) ? endpoints : []).map((endpoint) => [endpoint.id, endpoint.name || endpoint.id]));
 
   return (
@@ -115,12 +113,11 @@ function EndpointWorkersSection({ endpointWorkers, endpoints }) {
             {runningWorkers ? ` · ${runningWorkers} running` : ""}
             {preparingWorkers ? ` · ${preparingWorkers} warming` : ""}
             {failedWorkers ? ` · ${failedWorkers} failed` : ""}
-            {missingWorkers ? ` · ${missingWorkers} missing` : ""}
           </p>
         </div>
       </div>
       {!workers.length ? (
-        <div className="dashboard-zero">No endpoint worker inventory configured yet.</div>
+        <div className="dashboard-zero">No endpoint workers registered yet.</div>
       ) : (
         <div className="runs-workers-grid">
           {workers.map((worker) => {
@@ -183,7 +180,7 @@ export function EndpointsPage() {
   const apiBase = useMemo(() => normalizeApiBaseUrl(), []);
   const publicApiBase = useMemo(() => buildAbsoluteApiUrl(""), []);
   const [endpoints, setEndpoints] = useState([]);
-  const [endpointWorkers, setEndpointWorkers] = useState({ items: [], total_workers: 0, missing_workers: 0 });
+  const [endpointWorkers, setEndpointWorkers] = useState({ items: [], total_workers: 0 });
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
   const [deletingId, setDeletingId] = useState("");
@@ -196,9 +193,9 @@ export function EndpointsPage() {
         throw new Error(`Could not load endpoint workers (${response.status})`);
       }
       const payload = await response.json();
-      setEndpointWorkers(payload && typeof payload === "object" ? payload : { items: [], total_workers: 0, missing_workers: 0 });
+      setEndpointWorkers(payload && typeof payload === "object" ? payload : { items: [], total_workers: 0 });
     } catch {
-      setEndpointWorkers({ items: [], total_workers: 0, missing_workers: 0 });
+      setEndpointWorkers({ items: [], total_workers: 0 });
     }
   };
 
