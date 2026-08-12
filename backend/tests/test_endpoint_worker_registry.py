@@ -52,14 +52,14 @@ class _RegistryConn:
                 {
                     "runtime_instance_id": runtime_instance_id or row["runtime_instance_id"],
                     "status": params[2],
-                    "task_id": params[4],
-                    "last_seen_at": params[5],
-                    "heartbeat_expires_at": params[6],
-                    "hostname": params[7],
-                    "pid": params[8],
-                    "runtime_metadata": json.loads(params[9]),
-                    "last_error": params[10],
-                    "updated_at": params[5],
+                    "task_id": params[3],
+                    "last_seen_at": params[4],
+                    "heartbeat_expires_at": params[5],
+                    "hostname": params[6],
+                    "pid": params[7],
+                    "runtime_metadata": json.loads(params[8]),
+                    "last_error": params[9],
+                    "updated_at": params[4],
                 }
             )
             return dict(row)
@@ -215,6 +215,83 @@ def test_endpoint_worker_registry_register_heartbeat_and_stale_transition():
         assert workers[0]["raw_status"] == "stale"
         assert workers[0]["is_live"] is False
         assert workers[0]["is_stale"] is True
+
+    asyncio.run(scenario())
+
+
+def test_endpoint_worker_heartbeat_sql_uses_contiguous_parameters_without_assignment_hole():
+    async def scenario() -> None:
+        services = _make_services()
+        now = datetime(2099, 1, 1, tzinfo=timezone.utc)
+
+        await services.register_endpoint_worker(
+            worker_id="endpoint-worker-1",
+            runtime_instance_id="runtime-1",
+            status="idle",
+            now=now,
+        )
+
+        heartbeat = await services.heartbeat_endpoint_worker(
+            "endpoint-worker-1",
+            runtime_instance_id="runtime-1",
+            status="listening",
+            assigned_endpoint_id="endpoint-1",
+            runtime_metadata={"endpoint_id": "endpoint-1"},
+            now=now + timedelta(seconds=1),
+        )
+
+        assert heartbeat is not None
+        assert heartbeat["assigned_endpoint_id"] is None
+        update_query = " ".join(
+            next(
+                query
+                for query in reversed(services.postgres_pool.conn.queries)
+                if "update endpoint_worker_registrations" in query.lower()
+            ).split()
+        )
+        assert "task_id = $4" in update_query
+        assert "updated_at = $5" in update_query
+        assert "$10" in update_query
+        assert "$11" not in update_query
+
+    asyncio.run(scenario())
+
+
+class _ReadinessRedis:
+    def __init__(self, *, ping_result=True, ping_error: Exception | None = None):
+        self.ping_result = ping_result
+        self.ping_error = ping_error
+        self.ping_awaited = False
+
+    async def ping(self):
+        self.ping_awaited = True
+        if self.ping_error is not None:
+            raise self.ping_error
+        return self.ping_result
+
+
+def test_readiness_awaits_redis_ping():
+    async def scenario() -> None:
+        services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+        services.redis = _ReadinessRedis(ping_result=True)
+
+        readiness = await services.readiness()
+
+        assert readiness.redis is True
+        assert services.redis.ping_awaited is True
+
+    asyncio.run(scenario())
+
+
+def test_readiness_reports_redis_failure_when_ping_raises():
+    async def scenario() -> None:
+        services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+        services.redis = _ReadinessRedis(ping_error=RuntimeError("redis unavailable"))
+
+        readiness = await services.readiness()
+
+        assert readiness.redis is False
+        assert services.redis.ping_awaited is True
 
     asyncio.run(scenario())
 

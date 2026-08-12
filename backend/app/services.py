@@ -798,7 +798,7 @@ class AppServices:
 
         if self.redis is not None:
             try:
-                redis_ok = bool(self.redis.ping())
+                redis_ok = bool(await self.redis.ping())
             except Exception:
                 redis_ok = False
 
@@ -1171,7 +1171,6 @@ class AppServices:
             str(worker_id),
             _clean_optional_text(runtime_instance_id),
             str(status or "idle"),
-            _clean_optional_text(assigned_endpoint_id),
             _clean_optional_text(task_id),
             heartbeat_time,
             self._endpoint_worker_heartbeat_expires_at(heartbeat_time),
@@ -1189,14 +1188,14 @@ class AppServices:
                 update endpoint_worker_registrations
                 set runtime_instance_id = coalesce($2, runtime_instance_id),
                     status = $3,
-                    task_id = $5,
-                    last_seen_at = $6,
-                    heartbeat_expires_at = $7,
-                    hostname = $8,
-                    pid = $9,
-                    runtime_metadata = $10::jsonb,
-                    last_error = $11,
-                    updated_at = $6
+                    task_id = $4,
+                    last_seen_at = $5,
+                    heartbeat_expires_at = $6,
+                    hostname = $7,
+                    pid = $8,
+                    runtime_metadata = $9::jsonb,
+                    last_error = $10,
+                    updated_at = $5
                 where worker_id = $1{runtime_clause}
                 returning worker_id, runtime_instance_id, status, assigned_endpoint_id, task_id, last_seen_at,
                           heartbeat_expires_at, hostname, pid, runtime_metadata, last_error, created_at, updated_at
