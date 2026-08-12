@@ -544,6 +544,7 @@ Key variables in `.env`:
 | `DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY` | Encrypts module environment entries and LM Profile provider API keys stored in Postgres | Required for module env UI and LM Profile API key storage |
 | `DSPY_TRAINER_TOTAL_WORKERS` | Number of general worker containers in Compose | Optional |
 | `DSPY_TRAINER_TOTAL_ENDPOINT_WORKERS` | Logical endpoint worker count used for endpoint assignment | Optional |
+| `DSPY_TRAINER_ENDPOINT_WORKER_IDS` | Optional comma-separated stable endpoint worker IDs to publish/assign instead of deriving only from the count | Optional |
 | `DSPY_TRAINER_TOTAL_ENDPOINT_WORKER_REPLICAS` | Number of dedicated endpoint worker containers in Compose | Optional |
 | `DSPY_TRAINER_POSTGRES_DSN` | Postgres connection | ✅ (auto in Compose) |
 | `DSPY_TRAINER_REDIS_URL` | Redis connection | ✅ (auto in Compose) |
@@ -574,6 +575,7 @@ Managed bundle endpoints do not execute inside the backend container. The backen
 
 - Set `DSPY_TRAINER_TOTAL_WORKERS` in `.env` to control the number of general worker containers Compose starts.
 - Set `DSPY_TRAINER_TOTAL_ENDPOINT_WORKERS` in `.env` to control the logical endpoint worker count used for endpoint assignment.
+- Optionally set `DSPY_TRAINER_ENDPOINT_WORKER_IDS` in `.env` to inject an explicit comma-separated logical endpoint-worker roster (for example `endpoint-worker-1,endpoint-worker-2`) and keep worker heartbeats aligned with the control-plane inventory.
 - Set `DSPY_TRAINER_TOTAL_ENDPOINT_WORKER_REPLICAS` in `.env` to control how many dedicated endpoint-worker containers Compose starts.
 - Each endpoint stores a `pinned_worker_count`.
 - Endpoint workers are assigned deterministically to endpoints based on those pinned counts.

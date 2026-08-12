@@ -1026,8 +1026,7 @@ class AppServices:
         return f"{self.settings.endpoint_worker_inventory_prefix}:{worker_id}"
 
     def _expected_endpoint_worker_ids(self) -> list[str]:
-        total_workers = max(0, int(self.settings.total_endpoint_workers))
-        return [f"endpoint-worker-{index}" for index in range(1, total_workers + 1)]
+        return self.settings.endpoint_worker_ids_list()
 
     async def _list_endpoint_worker_inventory(self) -> dict[str, dict[str, Any]]:
         if self.redis is None:
@@ -1073,14 +1072,15 @@ class AppServices:
         return worker
 
     async def list_endpoint_workers(self) -> dict[str, Any]:
+        worker_ids = self._expected_endpoint_worker_ids()
         if self.redis is None:
             return {
                 "items": [],
-                "total_workers": max(0, int(self.settings.total_endpoint_workers)),
+                "total_workers": len(worker_ids),
                 "reported_workers": 0,
                 "available_workers": 0,
                 "busy_workers": 0,
-                "missing_workers": max(0, int(self.settings.total_endpoint_workers)),
+                "missing_workers": len(worker_ids),
             }
         await self.reconcile_endpoint_worker_assignments()
         live_workers = {
@@ -1088,7 +1088,6 @@ class AppServices:
             for worker in await self._list_registered_workers(self.settings.endpoint_worker_registry_prefix)
         }
         inventory_by_id = await self._list_endpoint_worker_inventory()
-        worker_ids = self._expected_endpoint_worker_ids()
         workers: list[dict[str, Any]] = []
         for worker_id in worker_ids:
             inventory = dict(inventory_by_id.get(worker_id) or {
@@ -1122,7 +1121,7 @@ class AppServices:
         busy_workers = sum(1 for item in workers if item.get("status") == "running")
         missing_workers = sum(1 for item in workers if item.get("status") == "missing")
         reported_workers = sum(1 for item in workers if item.get("is_live"))
-        total_workers = max(len(workers), max(0, int(self.settings.total_endpoint_workers)))
+        total_workers = len(worker_ids)
         return {
             "items": workers,
             "total_workers": total_workers,

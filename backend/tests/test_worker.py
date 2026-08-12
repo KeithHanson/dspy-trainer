@@ -9,15 +9,22 @@ from typing import Any, cast
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from worker import process_job
-from endpoint_worker import ensure_endpoint_assignment_ready, process_endpoint_job, resolve_endpoint_worker_id
+from endpoint_worker import ensure_endpoint_assignment_ready, process_endpoint_job, resolve_configured_endpoint_worker_id, resolve_endpoint_worker_id
 
 
 class FakeRedis:
     def __init__(self):
         self.calls = []
+        self.values = {}
 
-    async def set(self, key, value, ex=None):
-        self.calls.append((key, value, ex))
+    async def set(self, key, value, ex=None, nx=False, xx=False):
+        self.calls.append((key, value, ex, nx, xx))
+        if nx and key in self.values:
+            return False
+        if xx and key not in self.values:
+            return False
+        self.values[key] = value
+        return True
 
 
 class FakeServices:
@@ -115,12 +122,37 @@ def test_resolve_endpoint_worker_id_prefers_explicit_id():
     assert resolve_endpoint_worker_id("endpoint-worker-9", hostname="stack-endpoint-worker-2", pid=1234) == "endpoint-worker-9"
 
 
-def test_resolve_endpoint_worker_id_derives_stable_logical_id_from_compose_hostname():
-    assert resolve_endpoint_worker_id(None, hostname="dspy-trainer-endpoint-worker-2", pid=1234) == "endpoint-worker-2"
-
-
-def test_resolve_endpoint_worker_id_falls_back_when_hostname_is_not_a_worker_replica():
+def test_resolve_endpoint_worker_id_falls_back_to_hostname_and_pid():
     assert resolve_endpoint_worker_id(None, hostname="devbox-7", pid=1234) == "devbox-7-1234"
+
+
+def test_resolve_configured_endpoint_worker_id_claims_first_configured_logical_id():
+    services = FakeServices()
+    services.settings = SimpleNamespace(
+        endpoint_worker_registry_prefix="dspy-trainer:endpoint-workers",
+        endpoint_worker_ids_list=lambda: ["endpoint-worker-1", "endpoint-worker-2"],
+    )
+
+    worker_id, claim_owner_token = asyncio.run(resolve_configured_endpoint_worker_id(cast(Any, services), None))
+
+    assert worker_id == "endpoint-worker-1"
+    assert claim_owner_token is not None
+    assert services.redis.values["dspy-trainer:endpoint-workers:claims:endpoint-worker-1"] == claim_owner_token
+
+
+def test_resolve_configured_endpoint_worker_id_skips_already_claimed_logical_ids():
+    services = FakeServices()
+    services.settings = SimpleNamespace(
+        endpoint_worker_registry_prefix="dspy-trainer:endpoint-workers",
+        endpoint_worker_ids_list=lambda: ["endpoint-worker-1", "endpoint-worker-2"],
+    )
+    services.redis.values["dspy-trainer:endpoint-workers:claims:endpoint-worker-1"] = "claimed"
+
+    worker_id, claim_owner_token = asyncio.run(resolve_configured_endpoint_worker_id(cast(Any, services), None))
+
+    assert worker_id == "endpoint-worker-2"
+    assert claim_owner_token is not None
+    assert services.redis.values["dspy-trainer:endpoint-workers:claims:endpoint-worker-2"] == claim_owner_token
 
 
 def test_process_endpoint_job_runs_endpoint_invocation_and_restores_listening():
@@ -142,8 +174,8 @@ def test_process_endpoint_job_runs_endpoint_invocation_and_restores_listening():
     )
 
     assert services.endpoint_invocations == [("inv-1", "endpoint-1", {"question": "hello"}, "endpoint-worker-1", True)]
-    live_calls = [json.loads(value) for key, value, _ in services.redis.calls if key.startswith("dspy-trainer:endpoint-workers:")]
-    inventory_calls = [json.loads(value) for key, value, _ in services.redis.calls if key.startswith("dspy-trainer:endpoint-worker-inventory:")]
+    live_calls = [json.loads(value) for key, value, *_ in services.redis.calls if key.startswith("dspy-trainer:endpoint-workers:")]
+    inventory_calls = [json.loads(value) for key, value, *_ in services.redis.calls if key.startswith("dspy-trainer:endpoint-worker-inventory:")]
     assert live_calls[0]["status"] == "running"
     assert live_calls[0]["warmed_revision_id"] == "rev-1"
     assert live_calls[-1]["status"] == "listening"
@@ -162,7 +194,7 @@ def test_ensure_endpoint_assignment_ready_preinstalls_dependencies_and_marks_lis
 
     assert ready_revision_id == "rev-1"
     assert services.bundle_requirement_installs == ["/tmp/bundle"]
-    live_calls = [json.loads(value) for key, value, _ in services.redis.calls if key.startswith("dspy-trainer:endpoint-workers:")]
+    live_calls = [json.loads(value) for key, value, *_ in services.redis.calls if key.startswith("dspy-trainer:endpoint-workers:")]
     assert live_calls[0]["status"] == "stale"
     assert live_calls[1]["status"] == "preparing"
     assert live_calls[-1]["status"] == "listening"
@@ -181,7 +213,7 @@ def test_ensure_endpoint_assignment_ready_rewarms_when_revision_changes():
         ensure_endpoint_assignment_ready(cast(Any, services), "endpoint-worker-1", "endpoint-1", warmed_revision_id="rev-1")
     )
 
-    live_calls = [json.loads(value) for key, value, _ in services.redis.calls if key.startswith("dspy-trainer:endpoint-workers:")]
+    live_calls = [json.loads(value) for key, value, *_ in services.redis.calls if key.startswith("dspy-trainer:endpoint-workers:")]
     statuses = [payload["status"] for payload in live_calls]
     assert ready_revision_id == "rev-2"
     assert statuses == ["stale", "preparing", "listening"]
@@ -203,5 +235,5 @@ def test_ensure_endpoint_assignment_ready_skips_warmup_when_revision_matches():
 
     assert ready_revision_id == "rev-1"
     assert services.bundle_requirement_installs == []
-    live_calls = [json.loads(value) for key, value, _ in services.redis.calls if key.startswith("dspy-trainer:endpoint-workers:")]
+    live_calls = [json.loads(value) for key, value, *_ in services.redis.calls if key.startswith("dspy-trainer:endpoint-workers:")]
     assert [payload["status"] for payload in live_calls] == ["listening"]

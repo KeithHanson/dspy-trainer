@@ -135,6 +135,31 @@ def test_list_endpoint_workers_keeps_inventory_rows_for_missing_heartbeats():
     assert "last warmed revision was rev-1111" in payload["items"][1]["state_summary"]
 
 
+def test_list_endpoint_workers_uses_configured_logical_worker_ids():
+    services = AppServices(
+        Settings(
+            postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer",
+            endpoint_worker_ids="endpoint-worker-a,endpoint-worker-b",
+            total_endpoint_workers=99,
+        )
+    )
+    setattr(
+        services,
+        "redis",
+        FakeRedis(
+            {
+                "dspy-trainer:endpoint-workers:endpoint-worker-a": '{"worker_id":"endpoint-worker-a","status":"idle","endpoint_id":null,"desired_revision_id":null,"warmed_revision_id":null,"last_seen":"2026-01-01T00:00:00+00:00","kind":"endpoint"}',
+                "dspy-trainer:endpoint-worker-inventory:endpoint-worker-b": '{"worker_id":"endpoint-worker-b","status":"stale","last_heartbeat_status":"stale","endpoint_id":"endpoint-2","desired_revision_id":"rev-33333333","warmed_revision_id":"rev-11111111","last_seen":"2025-12-31T23:59:00+00:00","kind":"endpoint"}',
+            }
+        ),
+    )
+
+    payload = asyncio.run(services.list_endpoint_workers())
+
+    assert payload["total_workers"] == 2
+    assert [item["worker_id"] for item in payload["items"]] == ["endpoint-worker-a", "endpoint-worker-b"]
+
+
 def test_enqueue_endpoint_invocation_succeeds_once_worker_is_listening_on_current_revision(monkeypatch):
     services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
     redis = FakeRedis(
