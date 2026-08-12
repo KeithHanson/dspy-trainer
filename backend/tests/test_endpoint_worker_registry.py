@@ -286,6 +286,16 @@ def test_list_endpoint_workers_uses_registry_backed_summaries():
         assert payload["warming_workers"] == 1
         assert payload["running_workers"] == 0
         assert payload["failed_workers"] == 0
+        assert payload["summary"] == {
+            "live_workers": 2,
+            "stale_workers": 1,
+            "assigned_workers": 2,
+            "unassigned_workers": 1,
+            "ready_workers": 1,
+            "warming_workers": 1,
+            "running_workers": 0,
+            "failed_workers": 0,
+        }
         assert [item["worker_id"] for item in payload["items"]] == [
             "endpoint-worker-1",
             "endpoint-worker-2",

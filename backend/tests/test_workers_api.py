@@ -67,6 +67,24 @@ def test_list_endpoint_workers_exposes_revision_state():
 
     assert payload["available_workers"] == 2
     assert payload["missing_workers"] == 0
+    assert payload["live_workers"] == 4
+    assert payload["stale_workers"] == 0
+    assert payload["assigned_workers"] == 3
+    assert payload["unassigned_workers"] == 1
+    assert payload["ready_workers"] == 2
+    assert payload["warming_workers"] == 1
+    assert payload["running_workers"] == 0
+    assert payload["failed_workers"] == 0
+    assert payload["summary"] == {
+        "live_workers": 4,
+        "stale_workers": 0,
+        "assigned_workers": 3,
+        "unassigned_workers": 1,
+        "ready_workers": 2,
+        "warming_workers": 1,
+        "running_workers": 0,
+        "failed_workers": 0,
+    }
     assert payload["items"][0]["desired_revision_id"] == "rev-22222222"
     assert payload["items"][0]["deploy_state"] == "ready"
     assert payload["items"][0]["is_revision_ready"] is True
@@ -97,6 +115,11 @@ def test_list_endpoint_workers_does_not_count_listening_revision_mismatch_as_ava
     assert payload["available_workers"] == 2
     assert payload["busy_workers"] == 0
     assert payload["missing_workers"] == 0
+    assert payload["live_workers"] == 3
+    assert payload["stale_workers"] == 0
+    assert payload["assigned_workers"] == 2
+    assert payload["unassigned_workers"] == 1
+    assert payload["ready_workers"] == 2
     assert payload["items"][0]["deploy_state"] == "revision_mismatch"
     assert payload["items"][0]["is_revision_ready"] is False
     assert payload["items"][1]["deploy_state"] == "ready"
@@ -124,6 +147,11 @@ def test_list_endpoint_workers_keeps_inventory_rows_for_missing_heartbeats():
     assert payload["reported_workers"] == 1
     assert payload["missing_workers"] == 1
     assert payload["available_workers"] == 1
+    assert payload["live_workers"] == 1
+    assert payload["stale_workers"] == 1
+    assert payload["assigned_workers"] == 2
+    assert payload["unassigned_workers"] == 0
+    assert payload["ready_workers"] == 1
     assert [item["worker_id"] for item in payload["items"]] == ["endpoint-worker-1", "endpoint-worker-2"]
     assert payload["items"][0]["status"] == "listening"
     assert payload["items"][0]["desired_revision_id"] == "rev-22222222"
@@ -157,6 +185,10 @@ def test_list_endpoint_workers_uses_configured_logical_worker_ids():
     payload = asyncio.run(services.list_endpoint_workers())
 
     assert payload["total_workers"] == 2
+    assert payload["live_workers"] == 1
+    assert payload["stale_workers"] == 1
+    assert payload["assigned_workers"] == 1
+    assert payload["unassigned_workers"] == 1
     assert [item["worker_id"] for item in payload["items"]] == ["endpoint-worker-a", "endpoint-worker-b"]
 
 

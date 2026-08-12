@@ -1336,18 +1336,30 @@ class AppServices:
             summary = self._summarize_endpoint_workers(workers)
             reported_workers = len(workers)
             available_workers = summary["ready_workers"]
+            busy_workers = max(0, reported_workers - available_workers)
             return {
                 "items": workers,
                 "total_workers": reported_workers,
                 "reported_workers": reported_workers,
                 "available_workers": available_workers,
-                "busy_workers": max(0, reported_workers - available_workers),
+                "busy_workers": busy_workers,
                 "missing_workers": 0,
+                "summary": summary,
                 **summary,
             }
 
         worker_ids = self._expected_endpoint_worker_ids()
         if self.redis is None:
+            summary = {
+                "live_workers": 0,
+                "stale_workers": len(worker_ids),
+                "assigned_workers": 0,
+                "unassigned_workers": len(worker_ids),
+                "ready_workers": 0,
+                "warming_workers": 0,
+                "running_workers": 0,
+                "failed_workers": 0,
+            }
             return {
                 "items": [],
                 "total_workers": len(worker_ids),
@@ -1355,6 +1367,8 @@ class AppServices:
                 "available_workers": 0,
                 "busy_workers": 0,
                 "missing_workers": len(worker_ids),
+                "summary": summary,
+                **summary,
             }
         await self.reconcile_endpoint_worker_assignments()
         live_workers = {
@@ -1401,6 +1415,16 @@ class AppServices:
         missing_workers = sum(1 for item in workers if item.get("status") == "missing")
         reported_workers = sum(1 for item in workers if item.get("is_live"))
         total_workers = len(worker_ids)
+        summary = {
+            "live_workers": reported_workers,
+            "stale_workers": total_workers - reported_workers,
+            "assigned_workers": sum(1 for item in workers if item.get("assigned_endpoint_id")),
+            "unassigned_workers": sum(1 for item in workers if not item.get("assigned_endpoint_id")),
+            "ready_workers": sum(1 for item in workers if item.get("deploy_state") in {"ready", "unassigned"}),
+            "warming_workers": sum(1 for item in workers if item.get("status") == "preparing"),
+            "running_workers": sum(1 for item in workers if item.get("status") == "running"),
+            "failed_workers": sum(1 for item in workers if item.get("status") == "failed"),
+        }
         return {
             "items": workers,
             "total_workers": total_workers,
@@ -1408,6 +1432,8 @@ class AppServices:
             "available_workers": available_workers,
             "busy_workers": busy_workers,
             "missing_workers": missing_workers,
+            "summary": summary,
+            **summary,
         }
 
     async def init_db(self) -> None:
