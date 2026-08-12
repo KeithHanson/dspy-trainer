@@ -1088,26 +1088,35 @@ class AppServices:
             for worker in await self._list_registered_workers(self.settings.endpoint_worker_registry_prefix)
         }
         inventory_by_id = await self._list_endpoint_worker_inventory()
-        worker_ids = sorted({*self._expected_endpoint_worker_ids(), *inventory_by_id.keys(), *live_workers.keys()})
+        worker_ids = self._expected_endpoint_worker_ids()
         workers: list[dict[str, Any]] = []
         for worker_id in worker_ids:
+            inventory = dict(inventory_by_id.get(worker_id) or {
+                "worker_id": worker_id,
+                "endpoint_id": None,
+                "desired_revision_id": None,
+                "warmed_revision_id": None,
+                "last_seen": None,
+                "task_id": None,
+                "status": "missing",
+                "last_heartbeat_status": None,
+                "kind": "endpoint",
+            })
+            inventory["worker_id"] = worker_id
             live_worker = live_workers.get(worker_id)
-            if live_worker is not None:
-                workers.append(live_worker)
+            if live_worker is None:
+                workers.append(self._build_missing_endpoint_worker_record(inventory))
                 continue
-            inventory = inventory_by_id.get(worker_id)
-            if inventory is None:
-                inventory = {
-                    "worker_id": worker_id,
-                    "endpoint_id": None,
-                    "desired_revision_id": None,
-                    "warmed_revision_id": None,
-                    "last_seen": None,
-                    "task_id": None,
-                    "status": "missing",
-                    "last_heartbeat_status": None,
-                }
-            workers.append(self._build_missing_endpoint_worker_record(inventory))
+            worker = {
+                **inventory,
+                **live_worker,
+                "worker_id": worker_id,
+                "kind": "endpoint",
+                "is_live": True,
+                "last_heartbeat_status": live_worker.get("status") or inventory.get("last_heartbeat_status") or inventory.get("status"),
+            }
+            worker.update(self._describe_endpoint_worker_visibility(worker))
+            workers.append(worker)
         workers.sort(key=lambda item: item["worker_id"])
         available_workers = sum(1 for item in workers if item.get("deploy_state") in {"ready", "unassigned"})
         busy_workers = sum(1 for item in workers if item.get("status") == "running")

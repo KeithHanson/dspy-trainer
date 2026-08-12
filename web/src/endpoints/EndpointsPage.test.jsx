@@ -81,7 +81,7 @@ describe("EndpointsPage", () => {
     expect(screen.getByText("Heartbeat says listening, but desired revision rev-2222 does not match warmed revision rev-1111.")).toBeInTheDocument();
   });
 
-  it("shows missing workers from durable inventory", async () => {
+  it("shows the authoritative inventory roster when one worker stops heartbeating", async () => {
     const fetchMock = vi.fn((url, init) => {
       if (String(url).endsWith("/bundle-endpoints") && init?.method === "GET") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([
@@ -105,7 +105,9 @@ describe("EndpointsPage", () => {
     );
 
     expect(await screen.findByText(/1 ready of 2 total · 1 missing/)).toBeInTheDocument();
+    expect(screen.getByText("endpoint-worker-1")).toBeInTheDocument();
     expect(screen.getByText("endpoint-worker-2")).toBeInTheDocument();
+    expect(screen.queryByText("ephemeral-worker-99")).not.toBeInTheDocument();
     expect(screen.getByText(/Missing heartbeat since 2025-12-31T23:59:00\+00:00/)).toBeInTheDocument();
     expect(screen.getAllByText("missing").length).toBeGreaterThan(0);
   });

@@ -111,7 +111,8 @@ def test_list_endpoint_workers_keeps_inventory_rows_for_missing_heartbeats():
         FakeRedis(
             {
                 "dspy-trainer:endpoint-workers:endpoint-worker-1": '{"worker_id":"endpoint-worker-1","status":"listening","endpoint_id":"endpoint-1","desired_revision_id":"rev-22222222","warmed_revision_id":"rev-22222222","last_seen":"2026-01-01T00:00:00+00:00","kind":"endpoint"}',
-                "dspy-trainer:endpoint-worker-inventory:endpoint-worker-1": '{"worker_id":"endpoint-worker-1","status":"listening","last_heartbeat_status":"listening","endpoint_id":"endpoint-1","desired_revision_id":"rev-22222222","warmed_revision_id":"rev-22222222","last_seen":"2026-01-01T00:00:00+00:00","kind":"endpoint"}',
+                "dspy-trainer:endpoint-workers:ephemeral-worker-99": '{"worker_id":"ephemeral-worker-99","status":"listening","endpoint_id":"endpoint-2","desired_revision_id":"rev-99999999","warmed_revision_id":"rev-99999999","last_seen":"2026-01-01T00:00:00+00:00","kind":"endpoint"}',
+                "dspy-trainer:endpoint-worker-inventory:endpoint-worker-1": '{"worker_id":"endpoint-worker-1","status":"stale","last_heartbeat_status":"stale","endpoint_id":"endpoint-1","desired_revision_id":"rev-11111111","warmed_revision_id":"rev-11111111","last_seen":"2025-12-31T23:58:00+00:00","kind":"endpoint"}',
                 "dspy-trainer:endpoint-worker-inventory:endpoint-worker-2": '{"worker_id":"endpoint-worker-2","status":"stale","last_heartbeat_status":"stale","endpoint_id":"endpoint-2","desired_revision_id":"rev-33333333","warmed_revision_id":"rev-11111111","last_seen":"2025-12-31T23:59:00+00:00","kind":"endpoint"}',
             }
         ),
@@ -123,6 +124,10 @@ def test_list_endpoint_workers_keeps_inventory_rows_for_missing_heartbeats():
     assert payload["reported_workers"] == 1
     assert payload["missing_workers"] == 1
     assert payload["available_workers"] == 1
+    assert [item["worker_id"] for item in payload["items"]] == ["endpoint-worker-1", "endpoint-worker-2"]
+    assert payload["items"][0]["status"] == "listening"
+    assert payload["items"][0]["desired_revision_id"] == "rev-22222222"
+    assert payload["items"][0]["last_heartbeat_status"] == "listening"
     assert payload["items"][1]["worker_id"] == "endpoint-worker-2"
     assert payload["items"][1]["status"] == "missing"
     assert payload["items"][1]["deploy_state"] == "missing"
