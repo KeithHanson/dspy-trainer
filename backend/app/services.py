@@ -774,6 +774,8 @@ class AppServices:
         self.postgres_pool = await asyncpg.create_pool(dsn=self.settings.postgres_dsn, min_size=1, max_size=3)
         self.http_client = httpx.AsyncClient(timeout=5.0)
         await self.init_db()
+        cleared_registrations = await self.clear_endpoint_worker_registrations()
+        logger.info("Cleared %s endpoint worker registrations during backend startup", cleared_registrations)
 
     async def disconnect(self) -> None:
         if self.http_client is not None:
@@ -1205,6 +1207,16 @@ class AppServices:
         if row is None:
             return None
         return self._build_endpoint_worker_registry_payload(row, now=heartbeat_time)
+
+    async def clear_endpoint_worker_registrations(self) -> int:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            result = await conn.execute("delete from endpoint_worker_registrations")
+        try:
+            return int(str(result).split()[-1])
+        except Exception:
+            return 0
 
     async def mark_stale_endpoint_workers(self, *, now: datetime | None = None) -> int:
         if self.postgres_pool is None:

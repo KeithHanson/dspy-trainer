@@ -84,6 +84,10 @@ class _RegistryConn:
     async def execute(self, query, *params):
         self.queries.append(query)
         normalized = " ".join(query.strip().lower().split())
+        if normalized.startswith("delete from endpoint_worker_registrations"):
+            count = len(self.state["workers"])
+            self.state["workers"].clear()
+            return f"DELETE {count}"
         if normalized.startswith("update endpoint_worker_registrations set status = 'stale', updated_at = $1"):
             count = 0
             stale_time = params[0]
@@ -123,6 +127,9 @@ class _RegistryPool:
     def acquire(self):
         return _Acquire(self.conn)
 
+    async def close(self):
+        return None
+
 
 class _Redis:
     def __init__(self):
@@ -147,6 +154,9 @@ class _Redis:
         prefix = pattern[:-1] if pattern.endswith("*") else pattern
         return [key for key in self.values if key.startswith(prefix)]
 
+    async def aclose(self):
+        return None
+
 
 def _make_services() -> AppServices:
     services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
@@ -169,6 +179,77 @@ def test_init_db_creates_endpoint_worker_registry_schema_and_indexes():
     assert any("idx_endpoint_worker_registrations_heartbeat_expires_at" in query for query in queries)
     assert any("idx_endpoint_worker_registrations_assigned_endpoint_id" in query for query in queries)
     assert any("idx_endpoint_worker_registrations_status" in query for query in queries)
+
+
+def test_backend_startup_clears_endpoint_worker_registrations_before_runtime_reregistration():
+    async def scenario() -> None:
+        services = _make_services()
+        registered_at = datetime(2099, 1, 1, tzinfo=timezone.utc)
+        await services.register_endpoint_worker(
+            worker_id="endpoint-worker-1",
+            runtime_instance_id="runtime-1",
+            status="idle",
+            now=registered_at,
+        )
+        await services.register_endpoint_worker(
+            worker_id="endpoint-worker-2",
+            runtime_instance_id="runtime-2",
+            status="running",
+            now=registered_at + timedelta(seconds=1),
+        )
+
+        cleared = await services.clear_endpoint_worker_registrations()
+
+        assert cleared == 2
+        assert await services.list_endpoint_worker_registrations(now=registered_at + timedelta(seconds=2)) == []
+
+    asyncio.run(scenario())
+
+
+def test_connect_clears_stale_endpoint_worker_registrations_on_backend_startup(monkeypatch):
+    async def scenario() -> None:
+        seeded_pool = _RegistryPool()
+        seeded_pool.state["workers"]["stale-worker"] = {
+            "worker_id": "stale-worker",
+            "runtime_instance_id": "runtime-stale",
+            "status": "stale",
+            "assigned_endpoint_id": None,
+            "task_id": None,
+            "last_seen_at": datetime(2099, 1, 1, tzinfo=timezone.utc),
+            "heartbeat_expires_at": datetime(2099, 1, 1, tzinfo=timezone.utc),
+            "hostname": "host-stale",
+            "pid": 1,
+            "runtime_metadata": {"boot": "old"},
+            "last_error": None,
+            "created_at": datetime(2099, 1, 1, tzinfo=timezone.utc),
+            "updated_at": datetime(2099, 1, 1, tzinfo=timezone.utc),
+        }
+
+        async def fake_create_pool(*args, **kwargs):
+            del args, kwargs
+            return seeded_pool
+
+        class _HttpClient:
+            def __init__(self, timeout):
+                self.timeout = timeout
+
+            async def aclose(self):
+                return None
+
+        monkeypatch.setattr("app.services.redis.Redis.from_url", lambda *args, **kwargs: _Redis())
+        monkeypatch.setattr("app.services.asyncpg.create_pool", fake_create_pool)
+        monkeypatch.setattr("app.services.httpx.AsyncClient", _HttpClient)
+
+        services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+        await services.connect()
+
+        workers = await services.list_endpoint_worker_registrations(now=datetime(2099, 1, 1, tzinfo=timezone.utc))
+        assert workers == []
+        assert any("delete from endpoint_worker_registrations" in query.lower() for query in seeded_pool.conn.queries)
+
+        await services.disconnect()
+
+    asyncio.run(scenario())
 
 
 def test_endpoint_worker_registry_register_heartbeat_and_stale_transition():
