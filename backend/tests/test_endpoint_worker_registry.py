@@ -405,6 +405,51 @@ def test_endpoint_worker_registry_marks_only_heartbeat_expiry_as_stale():
     asyncio.run(scenario())
 
 
+def test_endpoint_worker_heartbeat_preserves_revision_metadata_when_later_payloads_are_minimal():
+    async def scenario() -> None:
+        services = _make_services()
+        now = datetime(2099, 1, 1, tzinfo=timezone.utc)
+
+        await services.register_endpoint_worker(
+            worker_id="endpoint-worker-1",
+            runtime_instance_id="runtime-1",
+            status="listening",
+            hostname="host-1",
+            pid=101,
+            runtime_metadata={
+                "endpoint_id": "endpoint-1",
+                "desired_revision_id": "rev-1",
+                "warmed_revision_id": "rev-1",
+                "platform": {"python_executable": "/venv/bin/python", "argv": ["endpoint-worker.py"]},
+            },
+            now=now,
+        )
+        await services._set_endpoint_worker_assignment("endpoint-worker-1", "endpoint-1")
+
+        heartbeat = await services.heartbeat_endpoint_worker(
+            "endpoint-worker-1",
+            runtime_instance_id="runtime-1",
+            status="listening",
+            hostname="host-1",
+            pid=101,
+            runtime_metadata={"platform": {"argv": ["endpoint-worker.py", "--heartbeat"]}},
+            now=now + timedelta(seconds=1),
+        )
+        payload = await services.list_endpoint_workers(now=now + timedelta(seconds=1))
+
+        assert heartbeat is not None
+        assert heartbeat["desired_revision_id"] == "rev-1"
+        assert heartbeat["warmed_revision_id"] == "rev-1"
+        assert heartbeat["runtime_metadata"]["platform"]["python_executable"] == "/venv/bin/python"
+        assert heartbeat["runtime_metadata"]["platform"]["argv"] == ["endpoint-worker.py", "--heartbeat"]
+        assert payload["ready_workers"] == 1
+        assert payload["items"][0]["deploy_state"] == "ready"
+        assert payload["items"][0]["desired_revision_id"] == "rev-1"
+        assert payload["items"][0]["warmed_revision_id"] == "rev-1"
+
+    asyncio.run(scenario())
+
+
 def test_endpoint_worker_heartbeat_sql_uses_contiguous_parameters_without_assignment_hole():
     async def scenario() -> None:
         services = _make_services()

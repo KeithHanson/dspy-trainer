@@ -211,6 +211,41 @@ def test_endpoint_worker_heartbeats_update_registry_status_and_assignment_metada
     assert heartbeat["runtime_metadata"]["warmed_revision_id"] == "rev-1"
 
 
+def test_endpoint_worker_heartbeat_preserves_revision_metadata_across_minimal_heartbeats():
+    services = FakeServices()
+    services.postgres_pool = object()
+    runtime_identity = _build_runtime_identity(explicit_worker_id="endpoint-worker-1")
+    asyncio.run(
+        _heartbeat(cast(Any, services), "endpoint-worker-1", "idle", runtime_identity=runtime_identity, registration=True)
+    )
+
+    asyncio.run(
+        _heartbeat(
+            cast(Any, services),
+            "endpoint-worker-1",
+            "listening",
+            endpoint_id="endpoint-1",
+            desired_revision_id="rev-1",
+            warmed_revision_id="rev-1",
+            runtime_identity=runtime_identity,
+        )
+    )
+    asyncio.run(
+        _heartbeat(
+            cast(Any, services),
+            "endpoint-worker-1",
+            "listening",
+            endpoint_id="endpoint-1",
+            runtime_identity=runtime_identity,
+        )
+    )
+
+    heartbeat = services.registry_calls[-1][1]
+    assert heartbeat["runtime_metadata"]["desired_revision_id"] == "rev-1"
+    assert heartbeat["runtime_metadata"]["warmed_revision_id"] == "rev-1"
+    assert heartbeat["runtime_metadata"]["endpoint_id"] == "endpoint-1"
+
+
 def test_process_endpoint_job_runs_endpoint_invocation_and_restores_listening():
     services = FakeServices()
     services.postgres_pool = object()

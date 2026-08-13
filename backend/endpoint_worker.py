@@ -18,6 +18,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [endpo
 logger = logging.getLogger(__name__)
 
 
+_UNSET = object()
+
+
 def _build_runtime_identity(*, explicit_worker_id: str | None = None) -> dict[str, object]:
     hostname = socket.gethostname()
     pid = os.getpid()
@@ -47,22 +50,39 @@ def _build_runtime_identity(*, explicit_worker_id: str | None = None) -> dict[st
 def _heartbeat_runtime_metadata(
     runtime_identity: dict[str, object],
     *,
-    desired_revision_id: str | None = None,
-    warmed_revision_id: str | None = None,
-    endpoint_id: str | None = None,
+    desired_revision_id: object = _UNSET,
+    warmed_revision_id: object = _UNSET,
+    endpoint_id: object = _UNSET,
 ) -> dict[str, object]:
     runtime_metadata = dict(runtime_identity.get("runtime_metadata") or {})
+    heartbeat_state = dict(runtime_identity.get("heartbeat_state") or {})
+
+    def _resolve_field(name: str, value: object) -> object:
+        return heartbeat_state.get(name) if value is _UNSET else value
+
+    resolved_endpoint_id = _resolve_field("endpoint_id", endpoint_id)
+    resolved_desired_revision_id = _resolve_field("desired_revision_id", desired_revision_id)
+    resolved_warmed_revision_id = _resolve_field("warmed_revision_id", warmed_revision_id)
+    heartbeat_state.update(
+        {
+            "endpoint_id": resolved_endpoint_id,
+            "desired_revision_id": resolved_desired_revision_id,
+            "warmed_revision_id": resolved_warmed_revision_id,
+        }
+    )
+    runtime_identity["heartbeat_state"] = heartbeat_state
     runtime_metadata.update(
         {
             "booted_at": runtime_identity.get("booted_at"),
             "hostname": runtime_identity.get("hostname"),
             "pid": runtime_identity.get("pid"),
             "session_id": runtime_identity.get("session_id"),
-            "endpoint_id": endpoint_id,
-            "desired_revision_id": desired_revision_id,
-            "warmed_revision_id": warmed_revision_id,
+            "endpoint_id": resolved_endpoint_id,
+            "desired_revision_id": resolved_desired_revision_id,
+            "warmed_revision_id": resolved_warmed_revision_id,
         }
     )
+    runtime_identity["runtime_metadata"] = runtime_metadata
     return runtime_metadata
 
 
@@ -86,9 +106,9 @@ async def _heartbeat(
     status: str,
     *,
     task_id: str | None = None,
-    endpoint_id: str | None = None,
-    desired_revision_id: str | None = None,
-    warmed_revision_id: str | None = None,
+    endpoint_id: object = _UNSET,
+    desired_revision_id: object = _UNSET,
+    warmed_revision_id: object = _UNSET,
     runtime_identity: dict[str, object] | None = None,
     registration: bool = False,
     last_error: str | None = None,
@@ -98,7 +118,7 @@ async def _heartbeat(
         payload = {
             "runtime_instance_id": str(effective_runtime_identity.get("runtime_instance_id") or "").strip() or None,
             "status": status,
-            "assigned_endpoint_id": endpoint_id,
+            "assigned_endpoint_id": endpoint_id if endpoint_id is not _UNSET else None,
             "task_id": task_id,
             "hostname": str(effective_runtime_identity.get("hostname") or "").strip() or None,
             "pid": effective_runtime_identity.get("pid") if isinstance(effective_runtime_identity.get("pid"), int) else None,
@@ -129,9 +149,9 @@ async def _heartbeat_loop(
     status: str,
     *,
     task_id: str | None = None,
-    endpoint_id: str | None = None,
-    desired_revision_id: str | None = None,
-    warmed_revision_id: str | None = None,
+    endpoint_id: object = _UNSET,
+    desired_revision_id: object = _UNSET,
+    warmed_revision_id: object = _UNSET,
     runtime_identity: dict[str, object] | None = None,
 ) -> None:
     while True:

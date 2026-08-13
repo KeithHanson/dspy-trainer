@@ -60,6 +60,18 @@ def _clean_optional_text(value: Any) -> str | None:
     return text or None
 
 
+def _merge_runtime_metadata(existing: Any, incoming: Any) -> dict[str, Any]:
+    existing_dict = existing if isinstance(existing, dict) else {}
+    incoming_dict = incoming if isinstance(incoming, dict) else {}
+    merged = dict(existing_dict)
+    for key, value in incoming_dict.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_runtime_metadata(merged.get(key), value)
+        else:
+            merged[key] = value
+    return merged
+
+
 def _normalize_module_environment_entries(entries: Any) -> list[dict[str, Any]]:
     if entries in (None, ""):
         return []
@@ -1198,24 +1210,25 @@ class AppServices:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
         heartbeat_time = now or datetime.now(timezone.utc)
-        params: list[Any] = [
-            str(worker_id),
-            _clean_optional_text(runtime_instance_id),
-            str(status or "idle"),
-            _clean_optional_text(task_id),
-            heartbeat_time,
-            self._endpoint_worker_heartbeat_expires_at(heartbeat_time),
-            _clean_optional_text(hostname),
-            pid,
-            json.dumps(runtime_metadata or {}),
-            _clean_optional_text(last_error),
-        ]
-        runtime_clause = ""
-        if params[1]:
-            runtime_clause = " and runtime_instance_id = $2"
         async with self.postgres_pool.acquire() as conn:
+            existing_row = await conn.fetchrow(
+                """
+                select worker_id, runtime_instance_id, status, assigned_endpoint_id, task_id, last_seen_at,
+                       heartbeat_expires_at, hostname, pid, runtime_metadata, last_error, created_at, updated_at
+                from endpoint_worker_registrations
+                where worker_id = $1
+                """,
+                str(worker_id),
+            )
+            if existing_row is None:
+                return None
+            existing_runtime_instance_id = _clean_optional_text(existing_row["runtime_instance_id"])
+            requested_runtime_instance_id = _clean_optional_text(runtime_instance_id)
+            if requested_runtime_instance_id and requested_runtime_instance_id != existing_runtime_instance_id:
+                return None
+            merged_runtime_metadata = _merge_runtime_metadata(existing_row["runtime_metadata"], runtime_metadata or {})
             row = await conn.fetchrow(
-                f"""
+                """
                 update endpoint_worker_registrations
                 set runtime_instance_id = coalesce($2, runtime_instance_id),
                     status = $3,
@@ -1227,11 +1240,20 @@ class AppServices:
                     runtime_metadata = $9::jsonb,
                     last_error = $10,
                     updated_at = $5
-                where worker_id = $1{runtime_clause}
+                where worker_id = $1
                 returning worker_id, runtime_instance_id, status, assigned_endpoint_id, task_id, last_seen_at,
                           heartbeat_expires_at, hostname, pid, runtime_metadata, last_error, created_at, updated_at
                 """,
-                *params,
+                str(worker_id),
+                requested_runtime_instance_id,
+                str(status or "idle"),
+                _clean_optional_text(task_id),
+                heartbeat_time,
+                self._endpoint_worker_heartbeat_expires_at(heartbeat_time),
+                _clean_optional_text(hostname),
+                pid,
+                json.dumps(merged_runtime_metadata),
+                _clean_optional_text(last_error),
             )
         if row is None:
             return None
