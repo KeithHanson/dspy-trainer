@@ -66,7 +66,7 @@ function describeEndpointWorkerState(status, taskId, endpointId, stateSummary) {
   if (status === "listening") return endpointId ? "Ready for assigned endpoint traffic" : "Ready";
   if (status === "idle") return "Waiting for an endpoint assignment";
   if (status === "preparing") return "Installing bundle dependencies";
-  if (status === "stale") return "Assigned revision does not match the warmed bundle yet";
+  if (status === "stale") return "Heartbeat expired";
   if (status === "running") return taskId ? "Processing endpoint invocation" : "Busy";
   if (status === "failed") return "Warmup or execution failed";
   return "Heartbeat reported";

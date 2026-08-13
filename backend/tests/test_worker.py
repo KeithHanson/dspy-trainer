@@ -252,7 +252,7 @@ def test_ensure_endpoint_assignment_ready_preinstalls_dependencies_and_marks_lis
     assert ready_revision_id == "rev-1"
     assert services.bundle_requirement_installs == ["/tmp/bundle"]
     statuses = [call[1]["status"] for call in services.registry_calls[1:]]
-    assert statuses == ["stale", "preparing", "listening"]
+    assert statuses == ["preparing", "listening"]
     assert services.registry_calls[-1][1]["runtime_metadata"]["warmed_revision_id"] == "rev-1"
 
 
@@ -277,7 +277,7 @@ def test_ensure_endpoint_assignment_ready_rewarms_when_revision_changes():
 
     statuses = [call[1]["status"] for call in services.registry_calls[1:]]
     assert ready_revision_id == "rev-2"
-    assert statuses == ["stale", "preparing", "listening"]
+    assert statuses == ["preparing", "listening"]
     assert services.bundle_requirement_installs == ["/tmp/bundle"]
     assert services.registry_calls[1][1]["runtime_metadata"]["warmed_revision_id"] == "rev-1"
     assert services.registry_calls[-1][1]["runtime_metadata"]["warmed_revision_id"] == "rev-2"

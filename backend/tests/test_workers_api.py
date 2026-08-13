@@ -87,7 +87,7 @@ def test_list_endpoint_workers_exposes_revision_state(monkeypatch):
                 "deploy_state": "revision_mismatch",
                 "is_revision_ready": False,
                 "state_summary": "Desired revision rev-2222 is not warmed yet.",
-                "state_label": "Stale",
+                "state_label": "Listening",
             },
             {
                 "worker_id": "endpoint-worker-3",

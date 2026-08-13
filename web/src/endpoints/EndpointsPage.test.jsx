@@ -15,7 +15,7 @@ describe("EndpointsPage", () => {
       if (String(url).endsWith("/endpoint-workers") && init?.method === "GET") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ total_workers: 3, live_workers: 2, stale_workers: 1, assigned_workers: 2, unassigned_workers: 1, ready_workers: 1, warming_workers: 0, running_workers: 0, failed_workers: 0, items: [
           { worker_id: "endpoint-worker-1", endpoint_id: "ep-1", assigned_endpoint_id: "ep-1", is_live: true, state_label: "Listening", status: "listening", deploy_state: "ready", desired_revision_id: "rev-22222222", warmed_revision_id: "rev-22222222", state_summary: "Ready for traffic on revision rev-2222." },
-          { worker_id: "endpoint-worker-2", endpoint_id: "ep-1", assigned_endpoint_id: "ep-1", is_live: false, state_label: "Stale", status: "stale", deploy_state: "revision_mismatch", desired_revision_id: "rev-22222222", warmed_revision_id: "rev-11111111", state_summary: "Assigned endpoint expects revision rev-2222; worker is still warmed on rev-1111." },
+          { worker_id: "endpoint-worker-2", endpoint_id: "ep-1", assigned_endpoint_id: "ep-1", is_live: false, state_label: "Stale", status: "stale", deploy_state: "revision_mismatch", desired_revision_id: "rev-22222222", warmed_revision_id: "rev-11111111", state_summary: "Heartbeat expired. Assigned endpoint expects revision rev-2222; worker was last warmed on rev-1111." },
           { worker_id: "endpoint-worker-3", endpoint_id: null, assigned_endpoint_id: null, is_live: true, state_label: "Idle", status: "idle", deploy_state: "unassigned", desired_revision_id: null, warmed_revision_id: null, state_summary: "Waiting for an endpoint assignment." },
         ] }) });
       }
@@ -44,7 +44,7 @@ describe("EndpointsPage", () => {
     expect(screen.getByText("endpoint-worker-2")).toBeInTheDocument();
     expect(screen.getByText("endpoint-worker-3")).toBeInTheDocument();
     expect(screen.getByText("Ready for traffic on revision rev-2222.")).toBeInTheDocument();
-    expect(screen.getByText("Assigned endpoint expects revision rev-2222; worker is still warmed on rev-1111.")).toBeInTheDocument();
+    expect(screen.getByText("Heartbeat expired. Assigned endpoint expects revision rev-2222; worker was last warmed on rev-1111.")).toBeInTheDocument();
     expect(screen.getByText("Waiting for an endpoint assignment.")).toBeInTheDocument();
     expect(screen.getByText("revision_mismatch")).toBeInTheDocument();
     expect(screen.getAllByText("Assigned").length).toBeGreaterThan(0);
@@ -85,6 +85,33 @@ describe("EndpointsPage", () => {
     expect(screen.getByText("Heartbeat says listening, but desired revision rev-2222 does not match warmed revision rev-1111.")).toBeInTheDocument();
   });
 
+  it("shows live warmup workers as warming instead of stale", async () => {
+    const fetchMock = vi.fn((url, init) => {
+      if (String(url).endsWith("/bundle-endpoints") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([
+          { id: "ep-1", name: "Customer API", module_import_id: "mod-1", module_bundle_name: "agentic-chat", pinned_worker_count: 1, key_preview: "abc123" },
+        ]) });
+      }
+      if (String(url).endsWith("/endpoint-workers") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ total_workers: 1, live_workers: 1, stale_workers: 0, assigned_workers: 1, unassigned_workers: 0, ready_workers: 0, warming_workers: 1, running_workers: 0, failed_workers: 0, items: [
+          { worker_id: "endpoint-worker-1", endpoint_id: "ep-1", assigned_endpoint_id: "ep-1", is_live: true, state_label: "Preparing", status: "preparing", deploy_state: "warming", desired_revision_id: "rev-22222222", warmed_revision_id: "rev-11111111", state_summary: "Installing dependencies for desired revision rev-2222 (currently warmed on rev-1111)." },
+        ] }) });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter>
+        <EndpointsPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText(/0 ready of 1 total · 1 live · 0 stale · 1 assigned · 0 unassigned · 1 warming/)).toBeInTheDocument();
+    expect(screen.getByText("Installing dependencies for desired revision rev-2222 (currently warmed on rev-1111).")).toBeInTheDocument();
+    expect(screen.queryAllByText("Stale")).toHaveLength(0);
+  });
+
   it("shows the authoritative registry roster when one worker stops heartbeating", async () => {
     const fetchMock = vi.fn((url, init) => {
       if (String(url).endsWith("/bundle-endpoints") && init?.method === "GET") {
@@ -95,7 +122,7 @@ describe("EndpointsPage", () => {
       if (String(url).endsWith("/endpoint-workers") && init?.method === "GET") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ total_workers: 2, reported_workers: 2, live_workers: 1, stale_workers: 1, assigned_workers: 2, unassigned_workers: 0, ready_workers: 1, warming_workers: 0, running_workers: 0, failed_workers: 0, items: [
           { worker_id: "endpoint-worker-1", endpoint_id: "ep-1", assigned_endpoint_id: "ep-1", is_live: true, state_label: "Listening", status: "listening", deploy_state: "ready", desired_revision_id: "rev-22222222", warmed_revision_id: "rev-22222222", state_summary: "Ready for traffic on revision rev-2222." },
-          { worker_id: "endpoint-worker-2", endpoint_id: "ep-1", assigned_endpoint_id: "ep-1", is_live: false, state_label: "Stale", status: "stale", deploy_state: "revision_mismatch", desired_revision_id: "rev-33333333", warmed_revision_id: "rev-11111111", state_summary: "Assigned endpoint expects revision rev-3333; worker is still warmed on rev-1111.", last_seen: "2025-12-31T23:59:00+00:00" },
+          { worker_id: "endpoint-worker-2", endpoint_id: "ep-1", assigned_endpoint_id: "ep-1", is_live: false, state_label: "Stale", status: "stale", deploy_state: "revision_mismatch", desired_revision_id: "rev-33333333", warmed_revision_id: "rev-11111111", state_summary: "Heartbeat expired. Assigned endpoint expects revision rev-3333; worker was last warmed on rev-1111.", last_seen: "2025-12-31T23:59:00+00:00" },
         ] }) });
       }
       return Promise.reject(new Error(`Unexpected URL ${url}`));
@@ -112,7 +139,7 @@ describe("EndpointsPage", () => {
     expect(screen.getByText("endpoint-worker-1")).toBeInTheDocument();
     expect(screen.getByText("endpoint-worker-2")).toBeInTheDocument();
     expect(screen.queryByText("ephemeral-worker-99")).not.toBeInTheDocument();
-    expect(screen.getByText("Assigned endpoint expects revision rev-3333; worker is still warmed on rev-1111.")).toBeInTheDocument();
+    expect(screen.getByText("Heartbeat expired. Assigned endpoint expects revision rev-3333; worker was last warmed on rev-1111.")).toBeInTheDocument();
     expect(screen.getAllByText("Stale").length).toBeGreaterThan(0);
   });
 

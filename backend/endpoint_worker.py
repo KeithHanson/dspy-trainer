@@ -226,16 +226,6 @@ async def ensure_endpoint_assignment_ready(
         await _heartbeat(services, worker_id, "idle", runtime_identity=runtime_identity)
         return None
     desired_revision_id = str(module_state.get("bundle_revision_id") or "").strip() or None
-    if warmed_revision_id != desired_revision_id:
-        await _heartbeat(
-            services,
-            worker_id,
-            "stale",
-            endpoint_id=endpoint_id,
-            desired_revision_id=desired_revision_id,
-            warmed_revision_id=warmed_revision_id,
-            runtime_identity=runtime_identity,
-        )
     try:
         if warmed_revision_id != desired_revision_id:
             await _heartbeat(

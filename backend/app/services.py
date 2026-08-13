@@ -903,14 +903,23 @@ class AppServices:
             }
         if status == "stale":
             warmed_text = cls._format_revision_label(warmed_revision_id) if warmed_revision_id else "none"
+            if endpoint_id and desired_revision_id and desired_revision_id != warmed_revision_id:
+                deploy_state = "revision_mismatch"
+                summary = (
+                    f"Heartbeat expired. Assigned endpoint expects revision {cls._format_revision_label(desired_revision_id)}; "
+                    f"worker was last warmed on {warmed_text}."
+                )
+            elif endpoint_id:
+                deploy_state = "offline"
+                summary = "Heartbeat expired for an assigned endpoint worker."
+            else:
+                deploy_state = "offline"
+                summary = "Heartbeat expired while waiting for an endpoint assignment."
             return {
                 "operator_state": "stale",
                 "state_label": "Stale",
-                "deploy_state": "revision_mismatch",
-                "state_summary": (
-                    f"Assigned endpoint expects revision {cls._format_revision_label(desired_revision_id)}; "
-                    f"worker is still warmed on {warmed_text}."
-                ),
+                "deploy_state": deploy_state,
+                "state_summary": summary,
                 "is_revision_ready": False,
             }
         if status == "listening":

@@ -374,6 +374,37 @@ def test_endpoint_worker_registry_register_heartbeat_and_stale_transition():
     asyncio.run(scenario())
 
 
+def test_endpoint_worker_registry_marks_only_heartbeat_expiry_as_stale():
+    async def scenario() -> None:
+        services = _make_services()
+        now = datetime(2099, 1, 1, tzinfo=timezone.utc)
+
+        await services.register_endpoint_worker(
+            worker_id="endpoint-worker-1",
+            runtime_instance_id="runtime-1",
+            status="preparing",
+            assigned_endpoint_id="endpoint-1",
+            hostname="host-1",
+            pid=101,
+            runtime_metadata={"endpoint_id": "endpoint-1", "desired_revision_id": "rev-2", "warmed_revision_id": "rev-1"},
+            now=now,
+        )
+
+        live_workers = await services.list_endpoint_worker_registrations(now=now + timedelta(minutes=4, seconds=59))
+        assert live_workers[0]["status"] == "preparing"
+        assert live_workers[0]["is_live"] is True
+        assert live_workers[0]["deploy_state"] == "warming"
+        assert live_workers[0]["state_label"] == "Preparing"
+
+        stale_workers = await services.list_endpoint_worker_registrations(now=now + timedelta(minutes=5))
+        assert stale_workers[0]["status"] == "stale"
+        assert stale_workers[0]["is_live"] is False
+        assert stale_workers[0]["deploy_state"] == "revision_mismatch"
+        assert stale_workers[0]["state_summary"] == "Heartbeat expired. Assigned endpoint expects revision rev-2; worker was last warmed on rev-1."
+
+    asyncio.run(scenario())
+
+
 def test_endpoint_worker_heartbeat_sql_uses_contiguous_parameters_without_assignment_hole():
     async def scenario() -> None:
         services = _make_services()
