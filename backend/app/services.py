@@ -2011,11 +2011,9 @@ class AppServices:
         if endpoint is None:
             return None
         deployed_revision_id = str(endpoint.get("deployed_revision_id") or "").strip()
-        if deployed_revision_id:
-            revision_state = await self.resolve_bundle_revision_execution_state(deployed_revision_id)
-            if revision_state is not None:
-                return revision_state
-        return await self.resolve_module_execution_state(str(endpoint["module_import_id"]))
+        if not deployed_revision_id:
+            return None
+        return await self.resolve_bundle_revision_execution_state(deployed_revision_id)
 
     async def import_github_module(self, github_repo_url: str, github_branch: str, github_subpath: str | None = None) -> dict[str, Any]:
         normalized_repo_url = _normalize_github_repo_url(github_repo_url)
@@ -3011,7 +3009,6 @@ class AppServices:
         if normalized_lm_profile_id is not None and await self.get_lm_profile(normalized_lm_profile_id) is None:
             raise ValueError("lm profile not found")
         reset_deployment = next_module_id != str(current.get("module_import_id") or "")
-        deployed_revision_id = str(next_module.get("current_revision_id") or "").strip() or None if reset_deployment else str(current.get("deployed_revision_id") or "").strip() or None
         now = datetime.now(timezone.utc)
         async with self.postgres_pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -3024,9 +3021,9 @@ class AppServices:
                     prepared_revision_id = case when $6 then null else prepared_revision_id end,
                     prepared_digest = case when $6 then null else prepared_digest end,
                     prepared_at = case when $6 then null else prepared_at end,
-                    deployed_revision_id = case when $6 then $7 else deployed_revision_id end,
-                    deployed_at = case when $6 then $8 else deployed_at end,
-                    updated_at = $9
+                    deployed_revision_id = case when $6 then null else deployed_revision_id end,
+                    deployed_at = case when $6 then null else deployed_at end,
+                    updated_at = $7
                 where id = $1
                 returning id, module_import_id, lm_profile_id, pinned_worker_count, name, key_preview, created_at, updated_at
                 """,
@@ -3036,8 +3033,6 @@ class AppServices:
                 normalized_lm_profile_id,
                 normalized_pinned_worker_count,
                 reset_deployment,
-                deployed_revision_id,
-                now if deployed_revision_id else None,
                 now,
             )
         if row is None:
@@ -3287,13 +3282,7 @@ class AppServices:
         endpoint = await self.get_bundle_endpoint(endpoint_id)
         if endpoint is None:
             return None
-        deployed_revision_id = str(endpoint.get("deployed_revision_id") or "").strip()
-        if deployed_revision_id:
-            return deployed_revision_id
-        module_state = await self.resolve_module_execution_state(str(endpoint["module_import_id"]))
-        if module_state is None:
-            return None
-        return str(module_state.get("bundle_revision_id") or "").strip() or None
+        return str(endpoint.get("deployed_revision_id") or "").strip() or None
 
     async def get_endpoint_routing_state(self, endpoint_id: str) -> dict[str, Any]:
         desired_revision_id = await self._get_endpoint_desired_revision_id(endpoint_id)

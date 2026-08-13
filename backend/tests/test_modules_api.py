@@ -321,14 +321,17 @@ async def fake_update_bundle_endpoint_global(self, endpoint_id, *, name=None, mo
     if module_import_id is not None:
         if module_import_id not in STORE:
             raise ValueError("module not found")
+        current_module_id = endpoint.get("module_import_id")
         endpoint["module_import_id"] = module_import_id
-        endpoint["prepared_revision_id"] = None
-        endpoint["prepared_digest"] = None
-        endpoint["prepared_at"] = None
-        endpoint["deployed_revision_id"] = _current_revision_id_for_module(module_import_id)
         endpoint["current_module_revision_id"] = _current_revision_id_for_module(module_import_id)
-        endpoint["deployed_revision_is_current"] = True
-        endpoint["prepared_revision_is_current"] = False
+        if module_import_id != current_module_id:
+            endpoint["prepared_revision_id"] = None
+            endpoint["prepared_digest"] = None
+            endpoint["prepared_at"] = None
+            endpoint["deployed_revision_id"] = None
+            endpoint["deployed_at"] = None
+            endpoint["deployed_revision_is_current"] = False
+            endpoint["prepared_revision_is_current"] = False
     if name is not None:
         endpoint["name"] = name
     if lm_profile_id is not None:
@@ -931,6 +934,20 @@ def test_bundle_endpoint_crud_and_key_rotation(monkeypatch):
         "checkout_path": "/tmp/bundle",
         "environment_entries": [],
     }
+    STORE["mod-endpoint-2"] = {
+        "id": "mod-endpoint-2",
+        "status": "validated",
+        "validation_status": "passed",
+        "smoke_status": "passed",
+        "diagnostics": [],
+        "bundle_name": "agentic-sales",
+        "bundle_version": "0.2.0",
+        "source": "upload",
+        "source_ref": "/tmp/bundle-2",
+        "checkout_path": "/tmp/bundle-2",
+        "environment_entries": [],
+        "current_revision_id": "rev-mod-endpoint-2",
+    }
 
     with TestClient(main_mod.app) as client:
         created = client.post("/bundle-endpoints", json={"name": "Public API", "module_import_id": "mod-endpoint", "lm_profile_id": "lm-1", "pinned_worker_count": 2})
@@ -964,6 +981,15 @@ def test_bundle_endpoint_crud_and_key_rotation(monkeypatch):
         assert updated.status_code == 200
         assert updated.json()["name"] == "Customer stream"
         assert updated.json()["pinned_worker_count"] == 3
+
+        changed_module = client.patch("/bundle-endpoints/endpoint-1", json={"name": "Customer stream", "module_import_id": "mod-endpoint-2", "lm_profile_id": "lm-1", "pinned_worker_count": 3})
+        assert changed_module.status_code == 200
+        assert changed_module.json()["module_import_id"] == "mod-endpoint-2"
+        assert changed_module.json()["current_module_revision_id"] == "rev-mod-endpoint-2"
+        assert changed_module.json()["prepared_revision_id"] is None
+        assert changed_module.json()["deployed_revision_id"] is None
+        assert changed_module.json()["prepared_revision_is_current"] is False
+        assert changed_module.json()["deployed_revision_is_current"] is False
 
         rotated = client.post("/bundle-endpoints/endpoint-1/regenerate-key")
         assert rotated.status_code == 200

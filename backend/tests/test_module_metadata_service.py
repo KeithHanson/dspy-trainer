@@ -112,6 +112,59 @@ class _RedisPublisher:
         self.messages.append((channel, payload))
 
 
+class _EndpointConn:
+    def __init__(self, state):
+        self.state = state
+
+    async def fetchrow(self, query, *params):
+        normalized = " ".join(query.strip().lower().split())
+        if normalized.startswith("update bundle_endpoints set name = $2, module_import_id = $3"):
+            endpoint = self.state["endpoints"].get(str(params[0]))
+            if endpoint is None:
+                return None
+            endpoint["name"] = params[1]
+            endpoint["module_import_id"] = params[2]
+            endpoint["lm_profile_id"] = params[3]
+            endpoint["pinned_worker_count"] = params[4]
+            if params[5]:
+                endpoint["prepared_revision_id"] = None
+                endpoint["prepared_digest"] = None
+                endpoint["prepared_at"] = None
+                endpoint["deployed_revision_id"] = None
+                endpoint["deployed_at"] = None
+            endpoint["updated_at"] = params[6]
+            return {
+                "id": endpoint["id"],
+                "module_import_id": endpoint["module_import_id"],
+                "lm_profile_id": endpoint.get("lm_profile_id"),
+                "pinned_worker_count": endpoint["pinned_worker_count"],
+                "name": endpoint["name"],
+                "key_preview": endpoint.get("key_preview"),
+                "created_at": endpoint.get("created_at"),
+                "updated_at": endpoint.get("updated_at"),
+            }
+        return None
+
+
+class _EndpointAcquire:
+    def __init__(self, state):
+        self.conn = _EndpointConn(state)
+
+    async def __aenter__(self):
+        return self.conn
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _EndpointPool:
+    def __init__(self, state):
+        self.state = state
+
+    def acquire(self):
+        return _EndpointAcquire(self.state)
+
+
 def test_set_module_bundle_metadata_updates_saved_bundle_toml(tmp_path):
     bundle_root = tmp_path / "bundle"
     bundle_root.mkdir()
@@ -145,6 +198,103 @@ def test_set_module_bundle_metadata_updates_saved_bundle_toml(tmp_path):
     last_revision = revisions[-1]
     assert last_revision["commit_sha"] == "abc123"
     assert last_revision["bundle_version"] == "2.0.0"
+
+
+def test_update_bundle_endpoint_global_clears_revision_metadata_when_module_changes(monkeypatch):
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+    state = {
+        "modules": {
+            "mod-1": {"id": "mod-1", "current_revision_id": "rev-old"},
+            "mod-2": {"id": "mod-2", "current_revision_id": "rev-new"},
+        },
+        "endpoints": {
+            "endpoint-1": {
+                "id": "endpoint-1",
+                "module_import_id": "mod-1",
+                "lm_profile_id": "lm-1",
+                "pinned_worker_count": 2,
+                "name": "Customer API",
+                "key_preview": "abc123",
+                "prepared_revision_id": "rev-old",
+                "prepared_digest": "digest-rev-old",
+                "prepared_at": "2025-01-01T00:00:00+00:00",
+                "deployed_revision_id": "rev-old",
+                "deployed_at": "2025-01-01T00:05:00+00:00",
+                "created_at": None,
+                "updated_at": None,
+                "current_module_revision_id": "rev-old",
+            }
+        },
+    }
+    services.postgres_pool = _EndpointPool(state)
+
+    async def fake_get_bundle_endpoint(endpoint_id):
+        endpoint = state["endpoints"].get(endpoint_id)
+        if endpoint is None:
+            return None
+        current_module_revision_id = state["modules"].get(endpoint["module_import_id"], {}).get("current_revision_id")
+        prepared_revision_id = endpoint.get("prepared_revision_id")
+        deployed_revision_id = endpoint.get("deployed_revision_id")
+        return {
+            **endpoint,
+            "current_module_revision_id": current_module_revision_id,
+            "prepared_revision_is_current": bool(prepared_revision_id and prepared_revision_id == current_module_revision_id),
+            "deployed_revision_is_current": bool(deployed_revision_id and deployed_revision_id == current_module_revision_id),
+        }
+
+    async def fake_get_module(module_id):
+        return state["modules"].get(module_id)
+
+    async def fake_get_lm_profile(profile_id):
+        return {"id": profile_id} if profile_id == "lm-2" else None
+
+    async def fake_reconcile_endpoint_worker_assignments():
+        return None
+
+    monkeypatch.setattr(services, "get_bundle_endpoint", fake_get_bundle_endpoint)
+    monkeypatch.setattr(services, "get_module", fake_get_module)
+    monkeypatch.setattr(services, "get_lm_profile", fake_get_lm_profile)
+    monkeypatch.setattr(services, "reconcile_endpoint_worker_assignments", fake_reconcile_endpoint_worker_assignments)
+
+    payload = asyncio.run(
+        services.update_bundle_endpoint_global(
+            "endpoint-1",
+            name="Customer Stream",
+            module_import_id="mod-2",
+            lm_profile_id="lm-2",
+            pinned_worker_count=4,
+        )
+    )
+
+    assert payload is not None
+    assert payload["module_import_id"] == "mod-2"
+    assert payload["current_module_revision_id"] == "rev-new"
+    assert payload["prepared_revision_id"] is None
+    assert payload["deployed_revision_id"] is None
+    assert payload["prepared_revision_is_current"] is False
+    assert payload["deployed_revision_is_current"] is False
+    assert state["endpoints"]["endpoint-1"]["prepared_digest"] is None
+    assert state["endpoints"]["endpoint-1"]["deployed_at"] is None
+
+
+def test_resolve_bundle_endpoint_execution_state_requires_deployed_revision(monkeypatch):
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+
+    async def fake_get_bundle_endpoint(endpoint_id):
+        return {"id": endpoint_id, "module_import_id": "mod-1", "deployed_revision_id": None}
+
+    async def fake_resolve_bundle_revision_execution_state(revision_id):
+        raise AssertionError("bundle revision lookup should not run without a deployed revision")
+
+    async def fake_resolve_module_execution_state(module_id):
+        raise AssertionError("module execution fallback should not run without a deployed revision")
+
+    monkeypatch.setattr(services, "get_bundle_endpoint", fake_get_bundle_endpoint)
+    monkeypatch.setattr(services, "resolve_bundle_revision_execution_state", fake_resolve_bundle_revision_execution_state)
+    monkeypatch.setattr(services, "resolve_module_execution_state", fake_resolve_module_execution_state)
+
+    assert asyncio.run(services.resolve_bundle_endpoint_execution_state("endpoint-1")) is None
+    assert asyncio.run(services._get_endpoint_desired_revision_id("endpoint-1")) is None
 
 
 def test_build_module_payload_includes_github_and_revision_metadata():

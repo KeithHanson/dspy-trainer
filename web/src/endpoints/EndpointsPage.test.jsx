@@ -306,7 +306,7 @@ describe("EndpointsPage", () => {
     });
   });
 
-  it("loads and updates an existing endpoint", async () => {
+  it("keeps edited endpoints in a pending rebuild/deploy state when the module changes", async () => {
     const fetchMock = vi.fn((url, init) => {
       if (String(url).endsWith("/modules") && init?.method === "GET") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([
@@ -324,7 +324,18 @@ describe("EndpointsPage", () => {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ id: "ep-1", name: "Customer API", module_import_id: "mod-1", lm_profile_id: "lm-1", pinned_worker_count: 2 }) });
       }
       if (String(url).endsWith("/bundle-endpoints/ep-1") && init?.method === "PATCH") {
-        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ id: "ep-1", name: "Customer Stream", module_import_id: "mod-2", lm_profile_id: "lm-2", pinned_worker_count: 4 }) });
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({
+          id: "ep-1",
+          name: "Customer Stream",
+          module_import_id: "mod-2",
+          lm_profile_id: "lm-2",
+          pinned_worker_count: 4,
+          current_module_revision_id: "rev-22222222",
+          prepared_revision_id: null,
+          deployed_revision_id: null,
+          prepared_revision_is_current: false,
+          deployed_revision_is_current: false,
+        }) });
       }
       if (String(url).endsWith("/bundle-endpoints/ep-1/regenerate-key") && init?.method === "POST") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ api_key: "bep-rotated" }) });
@@ -359,6 +370,8 @@ describe("EndpointsPage", () => {
     expect(await screen.findByText("bep-rotated")).toBeInTheDocument();
     expect(screen.getAllByText("Backup LM").length).toBeGreaterThan(0);
     expect(screen.getByText("4")).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalledWith(expect.stringContaining("/bundle-endpoints/ep-1/rebuild"), expect.anything());
+    expect(fetchMock).not.toHaveBeenCalledWith(expect.stringContaining("/bundle-endpoints/ep-1/deploy"), expect.anything());
     expect(screen.getByText(/curl -X POST/)).toBeInTheDocument();
     expect(screen.getByText(/curl -N -X POST/)).toBeInTheDocument();
     expect(screen.getAllByText(/bundle-endpoints\/ep-1\/invoke/).length).toBeGreaterThan(0);
