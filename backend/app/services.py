@@ -774,6 +774,11 @@ class AppServices:
         self.postgres_pool = await asyncpg.create_pool(dsn=self.settings.postgres_dsn, min_size=1, max_size=3)
         self.http_client = httpx.AsyncClient(timeout=5.0)
         await self.init_db()
+
+    async def connect_backend(self) -> None:
+        await self.connect()
+        if self.postgres_pool is None:
+            return
         cleared_registrations = await self.clear_endpoint_worker_registrations()
         logger.info("Cleared %s endpoint worker registrations during backend startup", cleared_registrations)
 

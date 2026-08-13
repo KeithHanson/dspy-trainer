@@ -206,7 +206,7 @@ def test_backend_startup_clears_endpoint_worker_registrations_before_runtime_rer
     asyncio.run(scenario())
 
 
-def test_connect_clears_stale_endpoint_worker_registrations_on_backend_startup(monkeypatch):
+def test_connect_backend_clears_stale_endpoint_worker_registrations_on_backend_startup(monkeypatch):
     async def scenario() -> None:
         seeded_pool = _RegistryPool()
         seeded_pool.state["workers"]["stale-worker"] = {
@@ -241,11 +241,72 @@ def test_connect_clears_stale_endpoint_worker_registrations_on_backend_startup(m
         monkeypatch.setattr("app.services.httpx.AsyncClient", _HttpClient)
 
         services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
-        await services.connect()
+        await services.connect_backend()
 
         workers = await services.list_endpoint_worker_registrations(now=datetime(2099, 1, 1, tzinfo=timezone.utc))
         assert workers == []
         assert any("delete from endpoint_worker_registrations" in query.lower() for query in seeded_pool.conn.queries)
+
+        await services.disconnect()
+
+    asyncio.run(scenario())
+
+
+def test_connect_does_not_clear_endpoint_worker_registrations_for_non_backend_startup(monkeypatch):
+    async def scenario() -> None:
+        seeded_pool = _RegistryPool()
+        seeded_pool.state["workers"]["worker-1"] = {
+            "worker_id": "worker-1",
+            "runtime_instance_id": "runtime-1",
+            "status": "idle",
+            "assigned_endpoint_id": None,
+            "task_id": None,
+            "last_seen_at": datetime(2099, 1, 1, tzinfo=timezone.utc),
+            "heartbeat_expires_at": datetime(2099, 1, 1, tzinfo=timezone.utc),
+            "hostname": "host-1",
+            "pid": 1,
+            "runtime_metadata": {"boot": "current"},
+            "last_error": None,
+            "created_at": datetime(2099, 1, 1, tzinfo=timezone.utc),
+            "updated_at": datetime(2099, 1, 1, tzinfo=timezone.utc),
+        }
+        seeded_pool.state["workers"]["worker-2"] = {
+            "worker_id": "worker-2",
+            "runtime_instance_id": "runtime-2",
+            "status": "running",
+            "assigned_endpoint_id": None,
+            "task_id": "task-2",
+            "last_seen_at": datetime(2099, 1, 1, tzinfo=timezone.utc),
+            "heartbeat_expires_at": datetime(2099, 1, 1, tzinfo=timezone.utc),
+            "hostname": "host-2",
+            "pid": 2,
+            "runtime_metadata": {"boot": "current"},
+            "last_error": None,
+            "created_at": datetime(2099, 1, 1, tzinfo=timezone.utc),
+            "updated_at": datetime(2099, 1, 1, tzinfo=timezone.utc),
+        }
+
+        async def fake_create_pool(*args, **kwargs):
+            del args, kwargs
+            return seeded_pool
+
+        class _HttpClient:
+            def __init__(self, timeout):
+                self.timeout = timeout
+
+            async def aclose(self):
+                return None
+
+        monkeypatch.setattr("app.services.redis.Redis.from_url", lambda *args, **kwargs: _Redis())
+        monkeypatch.setattr("app.services.asyncpg.create_pool", fake_create_pool)
+        monkeypatch.setattr("app.services.httpx.AsyncClient", _HttpClient)
+
+        services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+        await services.connect()
+
+        workers = await services.list_endpoint_worker_registrations(now=datetime(2099, 1, 1, tzinfo=timezone.utc))
+        assert [worker["worker_id"] for worker in workers] == ["worker-1", "worker-2"]
+        assert not any("delete from endpoint_worker_registrations" in query.lower() for query in seeded_pool.conn.queries)
 
         await services.disconnect()
 

@@ -21,7 +21,7 @@ from app.validator import validate_bundle
 async def lifespan(app: FastAPI):
     settings = get_settings()
     services = AppServices(settings)
-    await services.connect()
+    await services.connect_backend()
     app.state.services = services
     yield
     await services.disconnect()
