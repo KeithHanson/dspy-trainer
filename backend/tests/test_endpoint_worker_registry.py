@@ -693,6 +693,36 @@ def test_list_endpoint_workers_registry_marks_assigned_listening_workers_without
     asyncio.run(scenario())
 
 
+def test_list_endpoint_workers_registry_parses_string_runtime_metadata_for_ready_workers():
+    async def scenario() -> None:
+        services = _make_services()
+        now = datetime(2099, 1, 1, tzinfo=timezone.utc)
+
+        await services.register_endpoint_worker(
+            worker_id="endpoint-worker-1",
+            runtime_instance_id="runtime-1",
+            status="listening",
+            assigned_endpoint_id="endpoint-1",
+            hostname="host-1",
+            pid=101,
+            runtime_metadata={"endpoint_id": "endpoint-1", "desired_revision_id": "rev-1", "warmed_revision_id": "rev-1"},
+            now=now,
+        )
+        services.postgres_pool.conn.state["workers"]["endpoint-worker-1"]["runtime_metadata"] = json.dumps(
+            services.postgres_pool.conn.state["workers"]["endpoint-worker-1"]["runtime_metadata"]
+        )
+
+        payload = await services.list_endpoint_workers(now=now)
+
+        assert payload["items"][0]["deploy_state"] == "ready"
+        assert payload["items"][0]["desired_revision_id"] == "rev-1"
+        assert payload["items"][0]["warmed_revision_id"] == "rev-1"
+        assert payload["items"][0]["is_revision_ready"] is True
+        assert payload["ready_workers"] == 1
+
+    asyncio.run(scenario())
+
+
 def test_reconcile_endpoint_worker_assignments_uses_registered_workers_without_static_ids():
     async def scenario() -> None:
         services = _make_services()

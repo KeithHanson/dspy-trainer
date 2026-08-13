@@ -60,9 +60,27 @@ def _clean_optional_text(value: Any) -> str | None:
     return text or None
 
 
+def _coerce_runtime_metadata(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return dict(decoded) if isinstance(decoded, dict) else {}
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            decoded = json.loads(value.decode())
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return {}
+        return dict(decoded) if isinstance(decoded, dict) else {}
+    return {}
+
+
 def _merge_runtime_metadata(existing: Any, incoming: Any) -> dict[str, Any]:
-    existing_dict = existing if isinstance(existing, dict) else {}
-    incoming_dict = incoming if isinstance(incoming, dict) else {}
+    existing_dict = _coerce_runtime_metadata(existing)
+    incoming_dict = _coerce_runtime_metadata(incoming)
     merged = dict(existing_dict)
     for key, value in incoming_dict.items():
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
@@ -1072,9 +1090,7 @@ class AppServices:
         is_stale = heartbeat_expires_at is None or heartbeat_expires_at <= as_of
         status = "stale" if is_stale else str(row["status"] or "unknown")
         assigned_endpoint_id = _clean_optional_text(row["assigned_endpoint_id"])
-        runtime_metadata = row["runtime_metadata"] or {}
-        if not isinstance(runtime_metadata, dict):
-            runtime_metadata = {}
+        runtime_metadata = _coerce_runtime_metadata(row["runtime_metadata"])
         endpoint_id = _clean_optional_text(runtime_metadata.get("endpoint_id")) or assigned_endpoint_id
         payload = {
             "worker_id": str(row["worker_id"]),
