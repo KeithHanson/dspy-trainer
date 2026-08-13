@@ -17,6 +17,9 @@ from typing import Any, Callable
 
 import dspy
 
+from app.bundle_preparation import activate_bundle_preparation
+from app.config import get_settings
+
 
 AZURE_RESPONSES_COMPAT_CLASS_PATH = "app.lm.AzureResponsesCompatLM"
 
@@ -246,6 +249,7 @@ def _build_lm_from_profile(lm_profile: dict[str, Any]) -> Any:
 
 def _load_bundle(bundle_path: str) -> tuple[Path, float, str | None, list[str] | None, ModuleType, ModuleType]:
     root = Path(bundle_path).expanduser().resolve()
+    activate_bundle_preparation(str(root), get_settings().checkout_root)
     pass_threshold = 0.5
     optimized_program_state: str | None = None
     target_output_fields: list[str] | None = None

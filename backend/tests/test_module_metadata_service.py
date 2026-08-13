@@ -12,6 +12,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from app.bundle_preparation import activate_bundle_preparation, bundle_preparation_cache_root, inspect_bundle_preparation
 from app.config import Settings
 from app.services import AppServices, _classify_sync_status, _json_ready
 
@@ -349,7 +350,7 @@ def test_classify_sync_status_covers_sync_relationships():
 
 
 def test_ensure_bundle_requirements_installed_skips_when_missing(tmp_path, monkeypatch):
-    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer", checkout_root=str(tmp_path / "checkouts")))
     bundle_root = tmp_path / "bundle"
     bundle_root.mkdir()
 
@@ -374,7 +375,7 @@ def test_ensure_bundle_requirements_installed_skips_when_missing(tmp_path, monke
 
 
 def test_ensure_bundle_requirements_installed_caches_by_requirements_hash(tmp_path, monkeypatch):
-    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer", checkout_root=str(tmp_path / "checkouts")))
     bundle_root = tmp_path / "bundle"
     bundle_root.mkdir()
     requirements = bundle_root / "requirements.txt"
@@ -395,11 +396,66 @@ def test_ensure_bundle_requirements_installed_caches_by_requirements_hash(tmp_pa
     asyncio.run(services.ensure_bundle_requirements_installed(str(bundle_root)))
 
     assert len(calls) == 2
+    assert calls[0][0:5] == [sys.executable, "-m", "pip", "install", "--disable-pip-version-check"]
+    assert "--target" in calls[0]
     assert calls[0][-2:] == ["-r", str(requirements)]
 
 
+def test_inspect_bundle_preparation_digest_changes_for_local_requirement_inputs(tmp_path):
+    bundle_root = tmp_path / "bundle"
+    bundle_root.mkdir()
+    package_dir = bundle_root / "pkg"
+    package_dir.mkdir()
+    (package_dir / "pyproject.toml").write_text("[project]\nname='pkg'\nversion='0.1.0'\n", encoding="utf-8")
+    (package_dir / "module.py").write_text("VALUE = 'before'\n", encoding="utf-8")
+    wheel_path = bundle_root / "dist.whl"
+    wheel_path.write_bytes(b"wheel-v1")
+    nested = bundle_root / "nested.txt"
+    nested.write_text("./dist.whl\n", encoding="utf-8")
+    (bundle_root / "requirements.txt").write_text("-e ./pkg\n-r nested.txt\n", encoding="utf-8")
+
+    initial = inspect_bundle_preparation(str(bundle_root)).digest
+    (package_dir / "module.py").write_text("VALUE = 'after'\n", encoding="utf-8")
+    assert inspect_bundle_preparation(str(bundle_root)).digest != initial
+
+    second = inspect_bundle_preparation(str(bundle_root)).digest
+    wheel_path.write_bytes(b"wheel-v2")
+    assert inspect_bundle_preparation(str(bundle_root)).digest != second
+
+
+def test_ensure_bundle_requirements_installed_rebuilds_when_local_requirement_input_changes(tmp_path, monkeypatch):
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer", checkout_root=str(tmp_path / "checkouts")))
+    bundle_root = tmp_path / "bundle"
+    bundle_root.mkdir()
+    package_dir = bundle_root / "pkg"
+    package_dir.mkdir()
+    (package_dir / "pyproject.toml").write_text("[project]\nname='pkg'\nversion='0.1.0'\n", encoding="utf-8")
+    local_module = package_dir / "module.py"
+    local_module.write_text("VALUE = 'before'\n", encoding="utf-8")
+    requirements = bundle_root / "requirements.txt"
+    requirements.write_text("-e ./pkg\n", encoding="utf-8")
+
+    calls: list[list[str]] = []
+
+    async def fake_exec(*args, **kwargs):
+        del kwargs
+        calls.append(list(args))
+        return _FakeAsyncProcess()
+
+    monkeypatch.setattr("app.services.asyncio.create_subprocess_exec", fake_exec)
+
+    asyncio.run(services.ensure_bundle_requirements_installed(str(bundle_root)))
+    asyncio.run(services.ensure_bundle_requirements_installed(str(bundle_root)))
+    local_module.write_text("VALUE = 'after'\n", encoding="utf-8")
+    asyncio.run(services.ensure_bundle_requirements_installed(str(bundle_root)))
+
+    assert len(calls) == 2
+    assert calls[0][-2:] == ["-r", str(requirements)]
+    assert calls[1][-2:] == ["-r", str(requirements)]
+
+
 def test_ensure_bundle_requirements_installed_runs_system_commands_before_pip(tmp_path, monkeypatch):
-    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer", checkout_root=str(tmp_path / "checkouts")))
     bundle_root = tmp_path / "bundle"
     bundle_root.mkdir()
     (bundle_root / "bundle.toml").write_text(
@@ -409,16 +465,14 @@ def test_ensure_bundle_requirements_installed_runs_system_commands_before_pip(tm
     requirements = bundle_root / "requirements.txt"
     requirements.write_text("httpx==0.27.0\n", encoding="utf-8")
 
-    calls: list[tuple[str, list[str] | str]] = []
+    calls: list[tuple[str, list[str] | str, str | None]] = []
 
     async def fake_shell(command, **kwargs):
-        del kwargs
-        calls.append(("shell", command))
+        calls.append(("shell", command, kwargs.get("cwd")))
         return _FakeAsyncProcess()
 
     async def fake_exec(*args, **kwargs):
-        del kwargs
-        calls.append(("exec", list(args)))
+        calls.append(("exec", list(args), kwargs.get("cwd")))
         return _FakeAsyncProcess()
 
     monkeypatch.setattr("app.services.asyncio.create_subprocess_shell", fake_shell)
@@ -426,13 +480,105 @@ def test_ensure_bundle_requirements_installed_runs_system_commands_before_pip(tm
 
     asyncio.run(services.ensure_bundle_requirements_installed(str(bundle_root)))
 
-    assert calls[0] == ("shell", "echo system-1")
-    assert calls[1] == ("shell", "echo system-2")
-    assert calls[2] == ("exec", [sys.executable, "-m", "pip", "install", "--disable-pip-version-check", "-r", str(requirements)])
+    assert calls[0] == ("shell", "echo system-1", str(bundle_root))
+    assert calls[1] == ("shell", "echo system-2", str(bundle_root))
+    assert calls[2][0] == "exec"
+    assert calls[2][1][0:5] == [sys.executable, "-m", "pip", "install", "--disable-pip-version-check"]
+    assert "--target" in calls[2][1]
+    assert calls[2][1][-2:] == ["-r", str(requirements)]
+    assert calls[2][2] == str(bundle_root)
+
+
+def test_ensure_bundle_requirements_installed_reuses_shared_preparation_artifact_across_service_instances(tmp_path, monkeypatch):
+    settings = Settings(
+        postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer",
+        checkout_root=str(tmp_path / "checkouts"),
+    )
+    bundle_root = tmp_path / "bundle"
+    bundle_root.mkdir()
+    requirements = bundle_root / "requirements.txt"
+    requirements.write_text("httpx==0.27.0\n", encoding="utf-8")
+
+    calls: list[list[str]] = []
+
+    async def fake_exec(*args, **kwargs):
+        del kwargs
+        calls.append(list(args))
+        return _FakeAsyncProcess()
+
+    monkeypatch.setattr("app.services.asyncio.create_subprocess_exec", fake_exec)
+
+    asyncio.run(AppServices(settings).ensure_bundle_requirements_installed(str(bundle_root)))
+    asyncio.run(AppServices(settings).ensure_bundle_requirements_installed(str(bundle_root)))
+
+    assert len(calls) == 1
+
+
+def test_activate_bundle_preparation_loads_prepared_shared_artifact(tmp_path, monkeypatch):
+    checkout_root = tmp_path / "checkouts"
+    bundle_root = tmp_path / "bundle"
+    bundle_root.mkdir()
+    (bundle_root / "requirements.txt").write_text("httpx==0.27.0\n", encoding="utf-8")
+    spec = inspect_bundle_preparation(str(bundle_root))
+    cache_root = bundle_preparation_cache_root(str(checkout_root))
+    site_packages_dir = cache_root / spec.digest / "site-packages"
+    site_packages_dir.mkdir(parents=True)
+    (site_packages_dir / "prepared_bundle_marker.py").write_text("VALUE = 'shared-artifact'\n", encoding="utf-8")
+    (cache_root / spec.digest / "prepared.json").write_text("{}", encoding="utf-8")
+
+    added: list[str] = []
+    monkeypatch.setattr("app.bundle_preparation.site.addsitedir", lambda path: added.append(path))
+
+    activated = activate_bundle_preparation(str(bundle_root), str(checkout_root))
+
+    assert activated == site_packages_dir
+    assert added == [str(site_packages_dir)]
+
+
+def test_ensure_bundle_requirements_installed_allows_single_shared_builder_for_concurrent_calls(tmp_path, monkeypatch):
+    settings = Settings(
+        postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer",
+        checkout_root=str(tmp_path / "checkouts"),
+    )
+    bundle_root = tmp_path / "bundle"
+    bundle_root.mkdir()
+    requirements = bundle_root / "requirements.txt"
+    requirements.write_text("httpx==0.27.0\n", encoding="utf-8")
+
+    calls: list[list[str]] = []
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class _BlockingFakeAsyncProcess(_FakeAsyncProcess):
+        async def wait(self):
+            started.set()
+            await release.wait()
+            return await super().wait()
+
+    async def fake_exec(*args, **kwargs):
+        del kwargs
+        calls.append(list(args))
+        return _BlockingFakeAsyncProcess()
+
+    monkeypatch.setattr("app.services.asyncio.create_subprocess_exec", fake_exec)
+
+    async def run_test():
+        services_a = AppServices(settings)
+        services_b = AppServices(settings)
+        task_a = asyncio.create_task(services_a.ensure_bundle_requirements_installed(str(bundle_root)))
+        await started.wait()
+        task_b = asyncio.create_task(services_b.ensure_bundle_requirements_installed(str(bundle_root)))
+        await asyncio.sleep(0.3)
+        release.set()
+        await asyncio.gather(task_a, task_b)
+
+    asyncio.run(run_test())
+
+    assert len(calls) == 1
 
 
 def test_ensure_bundle_requirements_installed_surfaces_system_command_failure(tmp_path, monkeypatch):
-    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer", checkout_root=str(tmp_path / "checkouts")))
     bundle_root = tmp_path / "bundle"
     bundle_root.mkdir()
     (bundle_root / "bundle.toml").write_text(
