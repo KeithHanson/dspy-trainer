@@ -822,6 +822,98 @@ def test_reconcile_endpoint_worker_assignments_prioritizes_live_workers_over_new
     asyncio.run(scenario())
 
 
+def test_reconcile_endpoint_worker_assignments_preserves_ready_assigned_workers_over_newer_idle_workers():
+    async def scenario() -> None:
+        services = _make_services()
+        now = datetime(2099, 1, 1, tzinfo=timezone.utc)
+
+        async def list_all_bundle_endpoints():
+            return [{"id": "endpoint-1", "pinned_worker_count": 1, "created_at": now.isoformat()}]
+
+        async def get_bundle_endpoint(endpoint_id: str):
+            return {"id": endpoint_id, "module_import_id": "mod-1"}
+
+        async def resolve_module_execution_state(module_id: str):
+            return {"module_id": module_id, "bundle_revision_id": "rev-1"}
+
+        services.list_all_bundle_endpoints = list_all_bundle_endpoints  # type: ignore[method-assign]
+        services.get_bundle_endpoint = get_bundle_endpoint  # type: ignore[method-assign]
+        services.resolve_module_execution_state = resolve_module_execution_state  # type: ignore[method-assign]
+
+        ready_worker = await services.register_endpoint_worker(
+            runtime_instance_id="runtime-1",
+            status="listening",
+            assigned_endpoint_id="endpoint-1",
+            hostname="host-1",
+            pid=101,
+            runtime_metadata={"endpoint_id": "endpoint-1", "desired_revision_id": "rev-1", "warmed_revision_id": "rev-1"},
+            now=now,
+        )
+        idle_worker = await services.register_endpoint_worker(
+            runtime_instance_id="runtime-2",
+            status="idle",
+            hostname="host-2",
+            pid=102,
+            now=now + timedelta(seconds=1),
+        )
+
+        await services.reconcile_endpoint_worker_assignments()
+        workers = await services.list_endpoint_worker_registrations(now=now + timedelta(seconds=1))
+
+        assert next(item for item in workers if item["worker_id"] == ready_worker["worker_id"])["assigned_endpoint_id"] == "endpoint-1"
+        assert next(item for item in workers if item["worker_id"] == idle_worker["worker_id"])["assigned_endpoint_id"] is None
+
+    asyncio.run(scenario())
+
+
+def test_endpoint_ready_for_invocation_survives_reconcile_with_newer_idle_worker():
+    async def scenario() -> None:
+        services = _make_services()
+        now = datetime(2099, 1, 1, tzinfo=timezone.utc)
+
+        async def list_all_bundle_endpoints():
+            return [{"id": "endpoint-1", "pinned_worker_count": 1, "created_at": now.isoformat()}]
+
+        async def get_bundle_endpoint(endpoint_id: str):
+            return {"id": endpoint_id, "module_import_id": "mod-1"}
+
+        async def resolve_module_execution_state(module_id: str):
+            return {"module_id": module_id, "bundle_revision_id": "rev-1"}
+
+        services.list_all_bundle_endpoints = list_all_bundle_endpoints  # type: ignore[method-assign]
+        services.get_bundle_endpoint = get_bundle_endpoint  # type: ignore[method-assign]
+        services.resolve_module_execution_state = resolve_module_execution_state  # type: ignore[method-assign]
+
+        await services.register_endpoint_worker(
+            runtime_instance_id="runtime-1",
+            status="listening",
+            assigned_endpoint_id="endpoint-1",
+            hostname="host-1",
+            pid=101,
+            runtime_metadata={"endpoint_id": "endpoint-1", "desired_revision_id": "rev-1", "warmed_revision_id": "rev-1"},
+            now=now,
+        )
+        await services.register_endpoint_worker(
+            runtime_instance_id="runtime-2",
+            status="idle",
+            hostname="host-2",
+            pid=102,
+            now=now + timedelta(seconds=1),
+        )
+
+        routing_state = await services.ensure_endpoint_ready_for_invocation("endpoint-1")
+
+        assert routing_state == {
+            "endpoint_id": "endpoint-1",
+            "desired_revision_id": "rev-1",
+            "assigned_workers": 1,
+            "ready_workers": 1,
+            "status_counts": {"listening": 1},
+        }
+
+    asyncio.run(scenario())
+
+
 def test_registry_assignment_remains_control_plane_owned_across_worker_heartbeats():
     async def scenario() -> None:
         services = _make_services()

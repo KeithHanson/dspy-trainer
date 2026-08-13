@@ -1059,25 +1059,27 @@ class AppServices:
         workers.sort(key=lambda item: item["worker_id"])
         return workers
 
+    def _endpoint_worker_assignment_rank(self, item: dict[str, Any]) -> tuple[int, int, int, float, str]:
+        last_seen_raw = str(item.get("last_seen_at") or item.get("last_seen") or "").strip()
+        try:
+            last_seen_rank = -datetime.fromisoformat(last_seen_raw.replace("Z", "+00:00")).timestamp() if last_seen_raw else float("inf")
+        except ValueError:
+            last_seen_rank = float("inf")
+        assigned_endpoint_id = str(item.get("assigned_endpoint_id") or "").strip()
+        endpoint_id = str(item.get("endpoint_id") or "").strip()
+        return (
+            0 if item.get("is_live") else 1,
+            0 if item.get("is_revision_ready") and assigned_endpoint_id and endpoint_id == assigned_endpoint_id else 1,
+            0 if item.get("raw_status") in {"idle", "listening", "preparing", "running", "failed"} else 1,
+            last_seen_rank,
+            str(item.get("worker_id") or ""),
+        )
+
     async def _registered_endpoint_worker_ids_for_assignment(self, *, now: datetime | None = None) -> list[str]:
         if self.postgres_pool is None:
             return []
         workers = await self.list_endpoint_worker_registrations(now=now)
-
-        def _worker_rank(item: dict[str, Any]) -> tuple[int, int, float, str]:
-            last_seen_raw = str(item.get("last_seen_at") or item.get("last_seen") or "").strip()
-            try:
-                last_seen_rank = -datetime.fromisoformat(last_seen_raw.replace("Z", "+00:00")).timestamp() if last_seen_raw else float("inf")
-            except ValueError:
-                last_seen_rank = float("inf")
-            return (
-                0 if item.get("is_live") else 1,
-                0 if item.get("raw_status") in {"idle", "listening", "preparing", "running", "failed"} else 1,
-                last_seen_rank,
-                str(item.get("worker_id") or ""),
-            )
-
-        ranked_workers = sorted(workers, key=_worker_rank)
+        ranked_workers = sorted(workers, key=self._endpoint_worker_assignment_rank)
         return [str(item.get("worker_id") or "").strip() for item in ranked_workers if str(item.get("worker_id") or "").strip()]
 
     def _endpoint_worker_heartbeat_expires_at(self, now: datetime | None = None) -> datetime:
@@ -3005,17 +3007,48 @@ class AppServices:
             await self.list_all_bundle_endpoints(),
             key=lambda item: (str(item.get("created_at") or ""), str(item.get("id") or "")),
         )
-        worker_ids = await self._registered_endpoint_worker_ids_for_assignment()
+        workers = await self.list_endpoint_worker_registrations()
         desired_assignments: list[str] = []
         for endpoint in endpoints:
             endpoint_id = str(endpoint["id"])
             desired_assignments.extend([endpoint_id] * max(1, int(endpoint.get("pinned_worker_count") or 1)))
-        assignment_by_worker_id = {
-            worker_id: desired_assignments[index] if index < len(desired_assignments) else None
-            for index, worker_id in enumerate(worker_ids)
-        }
-        for worker_id, assigned_endpoint_id in assignment_by_worker_id.items():
-            await self._set_endpoint_worker_assignment(worker_id, assigned_endpoint_id)
+
+        preserved_assignments: list[tuple[str, str]] = []
+        preserved_worker_ids: set[str] = set()
+        remaining_slots = list(desired_assignments)
+        for endpoint_id in desired_assignments:
+            candidates = sorted(
+                (
+                    worker
+                    for worker in workers
+                    if str(worker.get("worker_id") or "").strip() not in preserved_worker_ids
+                    and str(worker.get("assigned_endpoint_id") or "").strip() == endpoint_id
+                    and bool(worker.get("is_revision_ready"))
+                ),
+                key=self._endpoint_worker_assignment_rank,
+            )
+            if not candidates:
+                continue
+            worker_id = str(candidates[0].get("worker_id") or "").strip()
+            preserved_assignments.append((worker_id, endpoint_id))
+            preserved_worker_ids.add(worker_id)
+            remaining_slots.remove(endpoint_id)
+
+        remaining_workers = sorted(
+            (
+                worker for worker in workers if str(worker.get("worker_id") or "").strip() not in preserved_worker_ids
+            ),
+            key=self._endpoint_worker_assignment_rank,
+        )
+        assignment_by_worker_id = {worker_id: endpoint_id for worker_id, endpoint_id in preserved_assignments}
+        for worker, endpoint_id in zip(remaining_workers, remaining_slots):
+            worker_id = str(worker.get("worker_id") or "").strip()
+            if worker_id:
+                assignment_by_worker_id[worker_id] = endpoint_id
+        for worker in workers:
+            worker_id = str(worker.get("worker_id") or "").strip()
+            if worker_id:
+                await self._set_endpoint_worker_assignment(worker_id, assignment_by_worker_id.get(worker_id))
 
 
     async def count_endpoint_workers_assigned(self, endpoint_id: str) -> int:
