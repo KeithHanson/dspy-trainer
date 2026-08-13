@@ -568,7 +568,7 @@ class AppServices:
                                 "-r",
                                 str(spec.requirements_path),
                             ],
-                            cwd=temp_artifact_dir,
+                            cwd=spec.bundle_root,
                         )
                         (temp_artifact_dir / "prepared.json").write_text(
                             json.dumps(
