@@ -1513,6 +1513,11 @@ class AppServices:
                   name text not null,
                   key_hash text not null,
                   key_preview text not null,
+                  prepared_revision_id text references bundle_revisions(id) on delete set null,
+                  prepared_digest text,
+                  prepared_at timestamptz,
+                  deployed_revision_id text references bundle_revisions(id) on delete set null,
+                  deployed_at timestamptz,
                   created_at timestamptz not null,
                   updated_at timestamptz not null
                 );
@@ -1520,6 +1525,11 @@ class AppServices:
             )
             await conn.execute("alter table bundle_endpoints add column if not exists lm_profile_id text references lm_profiles(id) on delete set null;")
             await conn.execute("alter table bundle_endpoints add column if not exists pinned_worker_count int not null default 1;")
+            await conn.execute("alter table bundle_endpoints add column if not exists prepared_revision_id text references bundle_revisions(id) on delete set null;")
+            await conn.execute("alter table bundle_endpoints add column if not exists prepared_digest text;")
+            await conn.execute("alter table bundle_endpoints add column if not exists prepared_at timestamptz;")
+            await conn.execute("alter table bundle_endpoints add column if not exists deployed_revision_id text references bundle_revisions(id) on delete set null;")
+            await conn.execute("alter table bundle_endpoints add column if not exists deployed_at timestamptz;")
             await conn.execute("create index if not exists idx_bundle_endpoints_module_import_id on bundle_endpoints(module_import_id, created_at desc);")
             await conn.execute(
                 """
@@ -1957,6 +1967,55 @@ class AppServices:
             "bundle_version": str(module.get("bundle_version") or current_revision.get("bundle_version") or "").strip() or None,
             "bundle_name": str(module.get("bundle_name") or current_revision.get("bundle_name") or "").strip() or None,
         }
+
+    async def get_bundle_revision(self, revision_id: str) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                select id, module_import_id, commit_sha, checkout_path, bundle_name, bundle_version, source_event, created_at
+                from bundle_revisions
+                where id = $1
+                """,
+                revision_id,
+            )
+        if row is None:
+            return None
+        return {
+            "id": row["id"],
+            "module_import_id": row["module_import_id"],
+            "commit_sha": row["commit_sha"],
+            "checkout_path": row["checkout_path"],
+            "bundle_name": row["bundle_name"],
+            "bundle_version": row["bundle_version"],
+            "source_event": row["source_event"],
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+        }
+
+    async def resolve_bundle_revision_execution_state(self, revision_id: str) -> dict[str, Any] | None:
+        revision = await self.get_bundle_revision(revision_id)
+        if revision is None:
+            return None
+        return {
+            "module_id": str(revision.get("module_import_id") or "").strip() or None,
+            "bundle_path": str(revision.get("checkout_path") or "").strip() or None,
+            "bundle_revision_id": str(revision.get("id") or "").strip() or None,
+            "bundle_commit_sha": str(revision.get("commit_sha") or "").strip() or None,
+            "bundle_version": str(revision.get("bundle_version") or "").strip() or None,
+            "bundle_name": str(revision.get("bundle_name") or "").strip() or None,
+        }
+
+    async def resolve_bundle_endpoint_execution_state(self, endpoint_id: str) -> dict[str, Any] | None:
+        endpoint = await self.get_bundle_endpoint(endpoint_id)
+        if endpoint is None:
+            return None
+        deployed_revision_id = str(endpoint.get("deployed_revision_id") or "").strip()
+        if deployed_revision_id:
+            revision_state = await self.resolve_bundle_revision_execution_state(deployed_revision_id)
+            if revision_state is not None:
+                return revision_state
+        return await self.resolve_module_execution_state(str(endpoint["module_import_id"]))
 
     async def import_github_module(self, github_repo_url: str, github_branch: str, github_subpath: str | None = None) -> dict[str, Any]:
         normalized_repo_url = _normalize_github_repo_url(github_repo_url)
@@ -2699,6 +2758,11 @@ class AppServices:
 
     @staticmethod
     def _build_bundle_endpoint_payload(row: Any) -> dict[str, Any]:
+        prepared_at = AppServices._row_value(row, "prepared_at")
+        deployed_at = AppServices._row_value(row, "deployed_at")
+        current_module_revision_id = AppServices._row_value(row, "current_module_revision_id")
+        prepared_revision_id = AppServices._row_value(row, "prepared_revision_id")
+        deployed_revision_id = AppServices._row_value(row, "deployed_revision_id")
         payload = {
             "id": row["id"],
             "module_import_id": row["module_import_id"],
@@ -2706,6 +2770,16 @@ class AppServices:
             "pinned_worker_count": int(AppServices._row_value(row, "pinned_worker_count") or 1),
             "name": row["name"],
             "key_preview": row["key_preview"],
+            "prepared_revision_id": prepared_revision_id,
+            "prepared_digest": AppServices._row_value(row, "prepared_digest"),
+            "prepared_at": prepared_at.isoformat() if prepared_at else None,
+            "deployed_revision_id": deployed_revision_id,
+            "deployed_at": deployed_at.isoformat() if deployed_at else None,
+            "current_module_revision_id": current_module_revision_id,
+            "current_module_commit_sha": AppServices._row_value(row, "current_module_commit_sha"),
+            "current_module_bundle_version": AppServices._row_value(row, "current_module_bundle_version"),
+            "prepared_revision_is_current": bool(prepared_revision_id and current_module_revision_id and prepared_revision_id == current_module_revision_id),
+            "deployed_revision_is_current": bool(deployed_revision_id and current_module_revision_id and deployed_revision_id == current_module_revision_id),
             "created_at": row["created_at"].isoformat() if row["created_at"] else None,
             "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
         }
@@ -2723,8 +2797,14 @@ class AppServices:
         async with self.postgres_pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                select e.id, e.module_import_id, e.lm_profile_id, e.pinned_worker_count, e.name, e.key_preview, e.created_at, e.updated_at,
+                select e.id, e.module_import_id, e.lm_profile_id, e.pinned_worker_count, e.name, e.key_preview,
+                       e.prepared_revision_id, e.prepared_digest, e.prepared_at,
+                       e.deployed_revision_id, e.deployed_at,
+                       e.created_at, e.updated_at,
                        m.bundle_name as module_bundle_name,
+                       m.current_revision_id as current_module_revision_id,
+                       m.current_commit_sha as current_module_commit_sha,
+                       m.bundle_version as current_module_bundle_version,
                        lp.name as lm_profile_name
                 from bundle_endpoints e
                 join module_imports m on m.id = e.module_import_id
@@ -2741,8 +2821,14 @@ class AppServices:
         async with self.postgres_pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                select e.id, e.module_import_id, e.lm_profile_id, e.pinned_worker_count, e.name, e.key_preview, e.created_at, e.updated_at,
+                select e.id, e.module_import_id, e.lm_profile_id, e.pinned_worker_count, e.name, e.key_preview,
+                       e.prepared_revision_id, e.prepared_digest, e.prepared_at,
+                       e.deployed_revision_id, e.deployed_at,
+                       e.created_at, e.updated_at,
                        m.bundle_name as module_bundle_name,
+                       m.current_revision_id as current_module_revision_id,
+                       m.current_commit_sha as current_module_commit_sha,
+                       m.bundle_version as current_module_bundle_version,
                        lp.name as lm_profile_name
                 from bundle_endpoints e
                 join module_imports m on m.id = e.module_import_id
@@ -2764,8 +2850,14 @@ class AppServices:
         async with self.postgres_pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                select e.id, e.module_import_id, e.lm_profile_id, e.pinned_worker_count, e.name, e.key_preview, e.created_at, e.updated_at,
+                select e.id, e.module_import_id, e.lm_profile_id, e.pinned_worker_count, e.name, e.key_preview,
+                       e.prepared_revision_id, e.prepared_digest, e.prepared_at,
+                       e.deployed_revision_id, e.deployed_at,
+                       e.created_at, e.updated_at,
                        m.bundle_name as module_bundle_name,
+                       m.current_revision_id as current_module_revision_id,
+                       m.current_commit_sha as current_module_commit_sha,
+                       m.bundle_version as current_module_bundle_version,
                        lp.name as lm_profile_name
                 from bundle_endpoints e
                 join module_imports m on m.id = e.module_import_id
@@ -2801,11 +2893,17 @@ class AppServices:
         normalized_name = _normalize_bundle_endpoint_name(name)
         preview = key[-6:]
         now = datetime.now(timezone.utc)
+        deployed_revision_id = str(module.get("current_revision_id") or "").strip() or None
         async with self.postgres_pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                insert into bundle_endpoints (id, module_import_id, lm_profile_id, pinned_worker_count, name, key_hash, key_preview, created_at, updated_at)
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                insert into bundle_endpoints (
+                    id, module_import_id, lm_profile_id, pinned_worker_count, name, key_hash, key_preview,
+                    prepared_revision_id, prepared_digest, prepared_at,
+                    deployed_revision_id, deployed_at,
+                    created_at, updated_at
+                )
+                values ($1, $2, $3, $4, $5, $6, $7, null, null, null, $8, $9, $10, $11)
                 returning id, module_import_id, lm_profile_id, pinned_worker_count, name, key_preview, created_at, updated_at
                 """,
                 endpoint_id,
@@ -2815,6 +2913,8 @@ class AppServices:
                 normalized_name,
                 key_hash,
                 preview,
+                deployed_revision_id,
+                now if deployed_revision_id else None,
                 now,
                 now,
             )
@@ -2905,10 +3005,13 @@ class AppServices:
         normalized_pinned_worker_count = _normalize_pinned_worker_count(next_pinned_worker_count)
         if not next_module_id:
             raise ValueError("module_import_id is required")
-        if await self.get_module(next_module_id) is None:
+        next_module = await self.get_module(next_module_id)
+        if next_module is None:
             raise ValueError("module not found")
         if normalized_lm_profile_id is not None and await self.get_lm_profile(normalized_lm_profile_id) is None:
             raise ValueError("lm profile not found")
+        reset_deployment = next_module_id != str(current.get("module_import_id") or "")
+        deployed_revision_id = str(next_module.get("current_revision_id") or "").strip() or None if reset_deployment else str(current.get("deployed_revision_id") or "").strip() or None
         now = datetime.now(timezone.utc)
         async with self.postgres_pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -2918,7 +3021,12 @@ class AppServices:
                     module_import_id = $3,
                     lm_profile_id = $4,
                     pinned_worker_count = $5,
-                    updated_at = $6
+                    prepared_revision_id = case when $6 then null else prepared_revision_id end,
+                    prepared_digest = case when $6 then null else prepared_digest end,
+                    prepared_at = case when $6 then null else prepared_at end,
+                    deployed_revision_id = case when $6 then $7 else deployed_revision_id end,
+                    deployed_at = case when $6 then $8 else deployed_at end,
+                    updated_at = $9
                 where id = $1
                 returning id, module_import_id, lm_profile_id, pinned_worker_count, name, key_preview, created_at, updated_at
                 """,
@@ -2927,6 +3035,9 @@ class AppServices:
                 next_module_id,
                 normalized_lm_profile_id,
                 normalized_pinned_worker_count,
+                reset_deployment,
+                deployed_revision_id,
+                now if deployed_revision_id else None,
                 now,
             )
         if row is None:
@@ -3111,10 +3222,74 @@ class AppServices:
                 assigned += 1
         return assigned
 
+    async def rebuild_bundle_endpoint(self, endpoint_id: str) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        endpoint = await self.get_bundle_endpoint(endpoint_id)
+        if endpoint is None:
+            return None
+        module_state = await self.resolve_module_execution_state(str(endpoint["module_import_id"]))
+        if module_state is None:
+            raise ValueError("module execution state not found")
+        bundle_path = str(module_state.get("bundle_path") or "").strip()
+        revision_id = str(module_state.get("bundle_revision_id") or "").strip() or None
+        if not bundle_path or revision_id is None:
+            raise ValueError("module revision metadata missing")
+        await self.ensure_bundle_requirements_installed(bundle_path)
+        digest = inspect_bundle_preparation(bundle_path).digest
+        now = datetime.now(timezone.utc)
+        async with self.postgres_pool.acquire() as conn:
+            await conn.execute(
+                """
+                update bundle_endpoints
+                set prepared_revision_id = $2,
+                    prepared_digest = $3,
+                    prepared_at = $4,
+                    updated_at = $4
+                where id = $1
+                """,
+                endpoint_id,
+                revision_id,
+                digest,
+                now,
+            )
+        return await self.get_bundle_endpoint(endpoint_id)
+
+    async def deploy_bundle_endpoint(self, endpoint_id: str) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        endpoint = await self.get_bundle_endpoint(endpoint_id)
+        if endpoint is None:
+            return None
+        current_revision_id = str(endpoint.get("current_module_revision_id") or "").strip() or None
+        prepared_revision_id = str(endpoint.get("prepared_revision_id") or "").strip() or None
+        if current_revision_id is None:
+            raise ValueError("module revision metadata missing")
+        if prepared_revision_id != current_revision_id:
+            raise ValueError("rebuild required before deploy")
+        now = datetime.now(timezone.utc)
+        async with self.postgres_pool.acquire() as conn:
+            await conn.execute(
+                """
+                update bundle_endpoints
+                set deployed_revision_id = $2,
+                    deployed_at = $3,
+                    updated_at = $3
+                where id = $1
+                """,
+                endpoint_id,
+                prepared_revision_id,
+                now,
+            )
+        return await self.get_bundle_endpoint(endpoint_id)
+
     async def _get_endpoint_desired_revision_id(self, endpoint_id: str) -> str | None:
         endpoint = await self.get_bundle_endpoint(endpoint_id)
         if endpoint is None:
             return None
+        deployed_revision_id = str(endpoint.get("deployed_revision_id") or "").strip()
+        if deployed_revision_id:
+            return deployed_revision_id
         module_state = await self.resolve_module_execution_state(str(endpoint["module_import_id"]))
         if module_state is None:
             return None
@@ -3211,12 +3386,12 @@ class AppServices:
         if endpoint is None:
             await self.publish_endpoint_invocation_event(invocation_id, "error", {"error": "endpoint not found"})
             return
-        module_state = await self.resolve_module_execution_state(str(endpoint["module_import_id"]))
-        if module_state is None:
+        execution_state = await self.resolve_bundle_endpoint_execution_state(endpoint_id)
+        if execution_state is None:
             await self.publish_endpoint_invocation_event(invocation_id, "error", {"error": "bundle endpoint module not found"})
             return
         try:
-            await self.ensure_bundle_requirements_installed(module_state["bundle_path"])
+            await self.ensure_bundle_requirements_installed(execution_state["bundle_path"])
             runtime_env = await self.get_module_runtime_environment(str(endpoint["module_import_id"]))
             lm_profile = await self._get_lm_profile_record(str(endpoint["lm_profile_id"]), include_secret=True) if endpoint.get("lm_profile_id") else None
             if stream:
@@ -3232,7 +3407,7 @@ class AppServices:
 
                 output = await asyncio.to_thread(
                     stream_bundle,
-                    module_state["bundle_path"],
+                    execution_state["bundle_path"],
                     input_payload,
                     emit_event,
                     lm_profile,
@@ -3243,7 +3418,7 @@ class AppServices:
 
                 output = await asyncio.to_thread(
                     invoke_bundle,
-                    module_state["bundle_path"],
+                    execution_state["bundle_path"],
                     input_payload,
                     lm_profile,
                     runtime_env,

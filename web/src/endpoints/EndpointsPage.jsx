@@ -87,6 +87,22 @@ function formatWorkerLastSeen(value) {
   return parsed.toLocaleString();
 }
 
+function describeEndpointDeployment(endpoint) {
+  const currentRevision = endpoint?.current_module_revision_id || null;
+  const preparedRevision = endpoint?.prepared_revision_id || null;
+  const deployedRevision = endpoint?.deployed_revision_id || null;
+  if (!currentRevision) {
+    return "No module revision available yet.";
+  }
+  if (preparedRevision !== currentRevision) {
+    return `Latest bundle revision ${formatRevision(currentRevision)} needs rebuild before deploy.`;
+  }
+  if (deployedRevision !== currentRevision) {
+    return `Prepared revision ${formatRevision(currentRevision)} is ready to deploy.`;
+  }
+  return `Live on revision ${formatRevision(currentRevision)}.`;
+}
+
 function EndpointWorkersSection({ endpointWorkers, endpoints }) {
   const workersPayload = endpointWorkers && typeof endpointWorkers === "object" ? endpointWorkers : {};
   const workers = Array.isArray(workersPayload.items) ? workersPayload.items : [];
@@ -184,6 +200,8 @@ export function EndpointsPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
   const [deletingId, setDeletingId] = useState("");
+  const [actingEndpointId, setActingEndpointId] = useState("");
+  const [endpointAction, setEndpointAction] = useState("");
   const [copiedEndpointId, setCopiedEndpointId] = useState("");
 
   const loadEndpointWorkers = async () => {
@@ -242,6 +260,26 @@ export function EndpointsPage() {
     }
   };
 
+  const runEndpointAction = async (endpointId, action) => {
+    setActingEndpointId(endpointId);
+    setEndpointAction(action);
+    setError("");
+    try {
+      const response = await fetch(`${apiBase}/bundle-endpoints/${endpointId}/${action}`, { method: "POST" });
+      if (!response.ok) {
+        throw new Error(await readApiError(response, `Could not ${action} endpoint (${response.status})`));
+      }
+      const payload = await response.json();
+      setEndpoints((current) => current.map((endpoint) => (endpoint.id === endpointId ? payload : endpoint)));
+      await loadEndpointWorkers();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `Could not ${action} endpoint`);
+    } finally {
+      setActingEndpointId("");
+      setEndpointAction("");
+    }
+  };
+
   const copyCurlCommand = async (endpointId, command) => {
     if (!command) {
       return;
@@ -262,6 +300,7 @@ export function EndpointsPage() {
           <div className="col gap-1">
             <h1 className="t-display" style={{ fontSize: 22 }}>Endpoints</h1>
             <p className="muted t-sm">Manage named bundle endpoints for synchronous JSON and SSE streaming access.</p>
+            <p className="muted t-xs">Rebuild prepares the latest bundle revision once; deploy then cuts traffic over to that prepared revision without redoing dependency installation when inputs are unchanged.</p>
             <p className="muted t-xs">Worker cards show readiness state plus desired and warmed bundle revisions so deploy mismatches are visible without checking container logs.</p>
           </div>
           <div className="row gap-2">
@@ -287,6 +326,8 @@ export function EndpointsPage() {
                       </div>
                       <div className="row gap-2 lm-profiles-actions">
                         <Button size="sm" onClick={() => navigate(`/endpoints/${encodeURIComponent(endpoint.id)}/edit`)}>Edit</Button>
+                        <Button size="sm" onClick={() => runEndpointAction(endpoint.id, "rebuild")} disabled={actingEndpointId === endpoint.id}>{actingEndpointId === endpoint.id && endpointAction === "rebuild" ? "Rebuilding..." : "Rebuild"}</Button>
+                        <Button size="sm" onClick={() => runEndpointAction(endpoint.id, "deploy")} disabled={actingEndpointId === endpoint.id || !endpoint.current_module_revision_id || endpoint.prepared_revision_id !== endpoint.current_module_revision_id}>{actingEndpointId === endpoint.id && endpointAction === "deploy" ? "Deploying..." : "Deploy"}</Button>
                         <Button size="sm" onClick={() => copyCurlCommand(endpoint.id, buildSyncCurlCommand(publicApiBase, endpoint.id, `<your-endpoint-key>`))}>{copiedEndpointId === endpoint.id ? "Copied" : "Copy curl"}</Button>
                         <Button size="sm" variant="danger" className="bundles-delete-btn" onClick={() => deleteEndpoint(endpoint.id)} disabled={deletingId === endpoint.id}>
                           {deletingId === endpoint.id ? "Deleting..." : "Delete"}
@@ -296,10 +337,14 @@ export function EndpointsPage() {
                     <div className="endpoints-list-copy">
                       <span className="cap mono">Bundle {endpoint.module_bundle_name || endpoint.module_import_id || "unknown"}</span>
                       <span className="cap mono">Pinned workers {endpoint.pinned_worker_count || 1}</span>
+                      <span className="cap mono">Latest rev {formatRevision(endpoint.current_module_revision_id)}</span>
+                      <span className="cap mono">Prepared rev {formatRevision(endpoint.prepared_revision_id)}</span>
+                      <span className="cap mono">Deployed rev {formatRevision(endpoint.deployed_revision_id)}</span>
                       <span className="cap mono">Sync POST {buildApiUrl(`/bundle-endpoints/${endpoint.id}/invoke`)}</span>
                       <span className="cap mono">SSE POST {buildApiUrl(`/bundle-endpoints/${endpoint.id}/stream`)}</span>
                       <span className="cap mono">Key preview ...{endpoint.key_preview || "unknown"}</span>
                     </div>
+                    <p className="muted t-xs" style={{ marginTop: 8 }}>{describeEndpointDeployment(endpoint)}</p>
                   </div>
                 </article>
               ))}
