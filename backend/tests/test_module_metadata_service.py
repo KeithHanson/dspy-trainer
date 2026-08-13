@@ -349,7 +349,7 @@ def test_classify_sync_status_covers_sync_relationships():
 
 
 def test_ensure_bundle_requirements_installed_skips_when_missing(tmp_path, monkeypatch):
-    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer", checkout_root=str(tmp_path / "checkouts")))
     bundle_root = tmp_path / "bundle"
     bundle_root.mkdir()
 
@@ -374,7 +374,7 @@ def test_ensure_bundle_requirements_installed_skips_when_missing(tmp_path, monke
 
 
 def test_ensure_bundle_requirements_installed_caches_by_requirements_hash(tmp_path, monkeypatch):
-    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer", checkout_root=str(tmp_path / "checkouts")))
     bundle_root = tmp_path / "bundle"
     bundle_root.mkdir()
     requirements = bundle_root / "requirements.txt"
@@ -395,11 +395,13 @@ def test_ensure_bundle_requirements_installed_caches_by_requirements_hash(tmp_pa
     asyncio.run(services.ensure_bundle_requirements_installed(str(bundle_root)))
 
     assert len(calls) == 2
+    assert calls[0][0:5] == [sys.executable, "-m", "pip", "install", "--disable-pip-version-check"]
+    assert "--target" in calls[0]
     assert calls[0][-2:] == ["-r", str(requirements)]
 
 
 def test_ensure_bundle_requirements_installed_runs_system_commands_before_pip(tmp_path, monkeypatch):
-    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer", checkout_root=str(tmp_path / "checkouts")))
     bundle_root = tmp_path / "bundle"
     bundle_root.mkdir()
     (bundle_root / "bundle.toml").write_text(
@@ -428,11 +430,81 @@ def test_ensure_bundle_requirements_installed_runs_system_commands_before_pip(tm
 
     assert calls[0] == ("shell", "echo system-1")
     assert calls[1] == ("shell", "echo system-2")
-    assert calls[2] == ("exec", [sys.executable, "-m", "pip", "install", "--disable-pip-version-check", "-r", str(requirements)])
+    assert calls[2][0] == "exec"
+    assert calls[2][1][0:5] == [sys.executable, "-m", "pip", "install", "--disable-pip-version-check"]
+    assert "--target" in calls[2][1]
+    assert calls[2][1][-2:] == ["-r", str(requirements)]
+
+
+def test_ensure_bundle_requirements_installed_reuses_shared_preparation_artifact_across_service_instances(tmp_path, monkeypatch):
+    settings = Settings(
+        postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer",
+        checkout_root=str(tmp_path / "checkouts"),
+    )
+    bundle_root = tmp_path / "bundle"
+    bundle_root.mkdir()
+    requirements = bundle_root / "requirements.txt"
+    requirements.write_text("httpx==0.27.0\n", encoding="utf-8")
+
+    calls: list[list[str]] = []
+
+    async def fake_exec(*args, **kwargs):
+        del kwargs
+        calls.append(list(args))
+        return _FakeAsyncProcess()
+
+    monkeypatch.setattr("app.services.asyncio.create_subprocess_exec", fake_exec)
+
+    asyncio.run(AppServices(settings).ensure_bundle_requirements_installed(str(bundle_root)))
+    asyncio.run(AppServices(settings).ensure_bundle_requirements_installed(str(bundle_root)))
+
+    assert len(calls) == 1
+
+
+def test_ensure_bundle_requirements_installed_allows_single_shared_builder_for_concurrent_calls(tmp_path, monkeypatch):
+    settings = Settings(
+        postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer",
+        checkout_root=str(tmp_path / "checkouts"),
+    )
+    bundle_root = tmp_path / "bundle"
+    bundle_root.mkdir()
+    requirements = bundle_root / "requirements.txt"
+    requirements.write_text("httpx==0.27.0\n", encoding="utf-8")
+
+    calls: list[list[str]] = []
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class _BlockingFakeAsyncProcess(_FakeAsyncProcess):
+        async def wait(self):
+            started.set()
+            await release.wait()
+            return await super().wait()
+
+    async def fake_exec(*args, **kwargs):
+        del kwargs
+        calls.append(list(args))
+        return _BlockingFakeAsyncProcess()
+
+    monkeypatch.setattr("app.services.asyncio.create_subprocess_exec", fake_exec)
+
+    async def run_test():
+        services_a = AppServices(settings)
+        services_b = AppServices(settings)
+        task_a = asyncio.create_task(services_a.ensure_bundle_requirements_installed(str(bundle_root)))
+        await started.wait()
+        task_b = asyncio.create_task(services_b.ensure_bundle_requirements_installed(str(bundle_root)))
+        await asyncio.sleep(0.3)
+        release.set()
+        await asyncio.gather(task_a, task_b)
+
+    asyncio.run(run_test())
+
+    assert len(calls) == 1
 
 
 def test_ensure_bundle_requirements_installed_surfaces_system_command_failure(tmp_path, monkeypatch):
-    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer", checkout_root=str(tmp_path / "checkouts")))
     bundle_root = tmp_path / "bundle"
     bundle_root.mkdir()
     (bundle_root / "bundle.toml").write_text(

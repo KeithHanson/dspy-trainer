@@ -4,13 +4,14 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import fcntl
 import hashlib
-import secrets
 import json
 import logging
 import multiprocessing
 import os
 from pathlib import Path
+import secrets
 from queue import Empty, Queue
 import random
 import re
@@ -29,6 +30,13 @@ from cryptography.fernet import Fernet, InvalidToken
 import httpx
 import redis.asyncio as redis
 
+from app.bundle_preparation import (
+    bundle_preparation_artifact_dir,
+    bundle_preparation_cache_root,
+    bundle_preparation_lock_path,
+    has_prepared_bundle_artifact,
+    inspect_bundle_preparation,
+)
 from app.config import Settings
 from app.validator import read_bundle_metadata, validate_bundle
 
@@ -402,6 +410,7 @@ class AppServices:
         self.http_client: httpx.AsyncClient | None = None
         self._installed_bundle_requirements: dict[str, str] = {}
         self._bundle_requirements_lock = asyncio.Lock()
+        self._bundle_preparation_cache_root = bundle_preparation_cache_root(self.settings.checkout_root)
 
     def _get_module_env_fernet(self) -> Fernet:
         key = str(self.settings.module_env_encryption_key or "").strip()
@@ -456,72 +465,48 @@ class AppServices:
         bundle_path: str,
         cancel_check: Callable[[], Awaitable[bool]] | None = None,
     ) -> None:
-        root = Path(bundle_path).expanduser().resolve()
-        requirements_path = root / "requirements.txt"
-        bundle_toml_path = root / "bundle.toml"
-        system_dependency_commands: list[str] = []
-        if bundle_toml_path.exists() and bundle_toml_path.is_file():
-            try:
-                payload = tomllib.loads(bundle_toml_path.read_text(encoding="utf-8"))
-                runtime_payload = payload.get("runtime")
-                if isinstance(runtime_payload, dict):
-                    raw_commands = runtime_payload.get("system_dependency_commands")
-                    if isinstance(raw_commands, list):
-                        system_dependency_commands = [str(item).strip() for item in raw_commands if isinstance(item, str) and item.strip()]
-            except Exception:
-                system_dependency_commands = []
-
-        requirements_bytes = requirements_path.read_bytes() if requirements_path.exists() and requirements_path.is_file() else b""
-        if not requirements_bytes and not system_dependency_commands:
+        spec = inspect_bundle_preparation(bundle_path)
+        if not spec.has_preparation_work:
             return
 
-        digest = hashlib.sha256(
-            json.dumps(
-                {
-                    "requirements_sha256": hashlib.sha256(requirements_bytes).hexdigest() if requirements_bytes else None,
-                    "system_dependency_commands": system_dependency_commands,
-                },
-                sort_keys=True,
-            ).encode("utf-8")
-        ).hexdigest()
-        cache_key = str(root)
-        if self._installed_bundle_requirements.get(cache_key) == digest:
+        cache_key = str(spec.bundle_root)
+        if self._installed_bundle_requirements.get(cache_key) == spec.digest:
             logger.info(
                 "bundle_requirements_install_skipped_cached bundle_path=%s requirements_path=%s",
-                root,
-                requirements_path,
+                spec.bundle_root,
+                spec.requirements_path,
             )
             return
 
         async with self._bundle_requirements_lock:
-            if self._installed_bundle_requirements.get(cache_key) == digest:
+            if self._installed_bundle_requirements.get(cache_key) == spec.digest:
                 logger.info(
                     "bundle_requirements_install_skipped_cached bundle_path=%s requirements_path=%s",
-                    root,
-                    requirements_path,
+                    spec.bundle_root,
+                    spec.requirements_path,
                 )
                 return
 
-            logger.info(
-                "bundle_requirements_install_started bundle_path=%s requirements_path=%s",
-                root,
-                requirements_path,
-            )
+            self._bundle_preparation_cache_root.mkdir(parents=True, exist_ok=True)
+            lock_path = bundle_preparation_lock_path(self._bundle_preparation_cache_root, spec.digest)
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_file = lock_path.open("a+", encoding="utf-8")
 
-            async def run_command(argv: list[str], *, use_shell: bool = False) -> None:
+            async def run_command(argv: list[str], *, cwd: Path | None = None, use_shell: bool = False) -> None:
                 if cancel_check is not None and await cancel_check():
                     raise RuntimeError("eval run canceled by operator")
+                command_cwd = str(cwd or spec.bundle_root)
                 if use_shell:
                     process = await asyncio.create_subprocess_shell(
                         argv[0],
-                        cwd=str(root),
+                        cwd=command_cwd,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                     )
                 else:
                     process = await asyncio.create_subprocess_exec(
                         *argv,
-                        cwd=str(root),
+                        cwd=command_cwd,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                     )
@@ -544,33 +529,99 @@ class AppServices:
                     raise RuntimeError(detail)
 
             try:
-                for command in system_dependency_commands:
+                while True:
+                    try:
+                        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if cancel_check is not None and await cancel_check():
+                            raise RuntimeError("eval run canceled by operator")
+                        await asyncio.sleep(0.25)
+
+                logger.info(
+                    "bundle_requirements_install_started bundle_path=%s requirements_path=%s digest=%s",
+                    spec.bundle_root,
+                    spec.requirements_path,
+                    spec.digest,
+                )
+
+                for command in spec.system_dependency_commands:
                     await run_command([command], use_shell=True)
 
-                if requirements_bytes:
-                    await run_command(
-                        [
-                            sys.executable,
-                            "-m",
-                            "pip",
-                            "install",
-                            "--disable-pip-version-check",
-                            "-r",
-                            str(requirements_path),
-                        ]
+                if spec.has_requirements and not has_prepared_bundle_artifact(self._bundle_preparation_cache_root, spec.digest):
+                    artifact_dir = bundle_preparation_artifact_dir(self._bundle_preparation_cache_root, spec.digest)
+                    temp_artifact_dir = artifact_dir.parent / f".{artifact_dir.name}.tmp-{os.getpid()}-{secrets.token_hex(4)}"
+                    try:
+                        if temp_artifact_dir.exists():
+                            shutil.rmtree(temp_artifact_dir)
+                        site_packages_dir_tmp = temp_artifact_dir / "site-packages"
+                        site_packages_dir_tmp.mkdir(parents=True, exist_ok=True)
+                        await run_command(
+                            [
+                                sys.executable,
+                                "-m",
+                                "pip",
+                                "install",
+                                "--disable-pip-version-check",
+                                "--target",
+                                str(site_packages_dir_tmp),
+                                "-r",
+                                str(spec.requirements_path),
+                            ],
+                            cwd=temp_artifact_dir,
+                        )
+                        (temp_artifact_dir / "prepared.json").write_text(
+                            json.dumps(
+                                {
+                                    "digest": spec.digest,
+                                    "bundle_path": str(spec.bundle_root),
+                                    "requirements_path": str(spec.requirements_path),
+                                    "requirements_sha256": hashlib.sha256(spec.requirements_bytes).hexdigest(),
+                                    "system_dependency_commands": spec.system_dependency_commands,
+                                },
+                                sort_keys=True,
+                            ),
+                            encoding="utf-8",
+                        )
+                        if artifact_dir.exists():
+                            shutil.rmtree(artifact_dir)
+                        temp_artifact_dir.replace(artifact_dir)
+                    finally:
+                        if temp_artifact_dir.exists():
+                            shutil.rmtree(temp_artifact_dir)
+                    logger.info(
+                        "bundle_requirements_install_shared_cache_miss_prepared bundle_path=%s requirements_path=%s digest=%s artifact_dir=%s",
+                        spec.bundle_root,
+                        spec.requirements_path,
+                        spec.digest,
+                        artifact_dir,
+                    )
+                elif spec.has_requirements:
+                    logger.info(
+                        "bundle_requirements_install_shared_cache_hit bundle_path=%s requirements_path=%s digest=%s artifact_dir=%s",
+                        spec.bundle_root,
+                        spec.requirements_path,
+                        spec.digest,
+                        bundle_preparation_artifact_dir(self._bundle_preparation_cache_root, spec.digest),
                     )
             except Exception:
                 logger.exception(
                     "bundle_requirements_install_failed bundle_path=%s requirements_path=%s",
-                    root,
-                    requirements_path,
+                    spec.bundle_root,
+                    spec.requirements_path,
                 )
                 raise
-            self._installed_bundle_requirements[cache_key] = digest
+            finally:
+                try:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                finally:
+                    lock_file.close()
+            self._installed_bundle_requirements[cache_key] = spec.digest
             logger.info(
-                "bundle_requirements_install_succeeded bundle_path=%s requirements_path=%s",
-                root,
-                requirements_path,
+                "bundle_requirements_install_succeeded bundle_path=%s requirements_path=%s digest=%s",
+                spec.bundle_root,
+                spec.requirements_path,
+                spec.digest,
             )
 
     @staticmethod
