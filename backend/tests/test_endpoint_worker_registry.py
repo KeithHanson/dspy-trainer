@@ -330,7 +330,7 @@ def test_endpoint_worker_registry_register_heartbeat_and_stale_transition():
         assert registered["worker_id"] == "endpoint-worker-1"
         assert registered["status"] == "idle"
         assert registered["is_live"] is True
-        assert registered["heartbeat_expires_at"] == (registered_at + timedelta(seconds=15)).isoformat()
+        assert registered["heartbeat_expires_at"] == (registered_at + timedelta(minutes=5)).isoformat()
 
         heartbeat_at = registered_at + timedelta(seconds=5)
         heartbeat = await services.heartbeat_endpoint_worker(
@@ -347,10 +347,23 @@ def test_endpoint_worker_registry_register_heartbeat_and_stale_transition():
         assert heartbeat["task_id"] == "inv-1"
         assert heartbeat["last_seen_at"] == heartbeat_at.isoformat()
 
-        stale_count = await services.mark_stale_endpoint_workers(now=heartbeat_at + timedelta(seconds=16))
+        nearly_stale_at = heartbeat_at + timedelta(minutes=5) - timedelta(seconds=1)
+        stale_count = await services.mark_stale_endpoint_workers(now=nearly_stale_at)
+        assert stale_count == 0
+
+        workers = await services.list_endpoint_worker_registrations(now=nearly_stale_at)
+        assert len(workers) == 1
+        assert workers[0]["worker_id"] == "endpoint-worker-1"
+        assert workers[0]["status"] == "running"
+        assert workers[0]["raw_status"] == "running"
+        assert workers[0]["is_live"] is True
+        assert workers[0]["is_stale"] is False
+
+        stale_at = heartbeat_at + timedelta(minutes=5)
+        stale_count = await services.mark_stale_endpoint_workers(now=stale_at)
         assert stale_count == 1
 
-        workers = await services.list_endpoint_worker_registrations(now=heartbeat_at + timedelta(seconds=16))
+        workers = await services.list_endpoint_worker_registrations(now=stale_at)
         assert len(workers) == 1
         assert workers[0]["worker_id"] == "endpoint-worker-1"
         assert workers[0]["status"] == "stale"
@@ -471,7 +484,7 @@ def test_list_endpoint_workers_uses_registry_backed_summaries():
         await services._set_endpoint_worker_assignment("endpoint-worker-1", "endpoint-1")
         await services._set_endpoint_worker_assignment("endpoint-worker-2", "endpoint-1")
 
-        await services.mark_stale_endpoint_workers(now=now + timedelta(seconds=16))
+        await services.mark_stale_endpoint_workers(now=now + timedelta(minutes=5, seconds=1))
         await services.heartbeat_endpoint_worker(
             "endpoint-worker-1",
             runtime_instance_id="runtime-1",
@@ -491,7 +504,7 @@ def test_list_endpoint_workers_uses_registry_backed_summaries():
             now=now + timedelta(seconds=5),
         )
 
-        payload = await services.list_endpoint_workers(now=now + timedelta(seconds=16))
+        payload = await services.list_endpoint_workers(now=now + timedelta(minutes=5, seconds=1))
 
         assert payload["total_workers"] == 3
         assert payload["reported_workers"] == 3

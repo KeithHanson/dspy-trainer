@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     worker_registry_prefix: str = Field(default="dspy-trainer:workers")
     total_workers: int = Field(default=8)
     endpoint_worker_registry_prefix: str = Field(default="dspy-trainer:endpoint-workers")
-    endpoint_worker_heartbeat_ttl_seconds: int = Field(default=15)
+    endpoint_worker_heartbeat_ttl_seconds: int = Field(default=300)
     endpoint_queue_prefix: str = Field(default="dspy-trainer:endpoint-queues")
     endpoint_invocation_channel_prefix: str = Field(default="dspy-trainer:endpoint-invocations")
 

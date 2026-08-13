@@ -575,7 +575,7 @@ Managed bundle endpoints do not execute inside the backend container. The backen
 - Set `DSPY_TRAINER_TOTAL_WORKERS` in `.env` to control the number of general worker containers Compose starts.
 - Set `DSPY_TRAINER_TOTAL_ENDPOINT_WORKER_REPLICAS` in `.env` to control how many dedicated endpoint-worker containers Compose starts.
 - Compose-backed endpoint workers now self-register into the backend's durable endpoint-worker registry; operator-facing assignment and readiness come directly from those live registry records rather than from an env-defined logical roster.
-- Set `DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS` in `.env` if you need to tune how quickly endpoint-worker heartbeats become `stale` in operator views.
+- Endpoint-worker heartbeats default to a 5 minute stale threshold (`DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS=300`). Override it in `.env` if you need operator stale detection to move faster or slower.
 - Each endpoint stores a `pinned_worker_count`.
 - Endpoint workers are assigned deterministically to endpoints based on those pinned counts and the current registry-backed worker set.
 - Only workers assigned to a given endpoint consume that endpoint's invocation queue.
@@ -742,7 +742,7 @@ A: Set the worker replica env vars in `.env`, then recreate the stack:
 ```env
 DSPY_TRAINER_TOTAL_WORKERS=4
 DSPY_TRAINER_TOTAL_ENDPOINT_WORKER_REPLICAS=16
-DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS=15
+DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS=300
 ```
 
 **Q: Can I use this for production LLM apps?**  
