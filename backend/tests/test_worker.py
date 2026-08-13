@@ -339,3 +339,31 @@ def test_ensure_endpoint_assignment_ready_skips_warmup_when_revision_matches():
     assert ready_revision_id == "rev-1"
     assert services.bundle_requirement_installs == []
     assert [call[1]["status"] for call in services.registry_calls[1:]] == ["listening"]
+
+
+def test_ensure_endpoint_assignment_ready_marks_worker_failed_when_revision_metadata_missing():
+    services = FakeServices()
+    services.postgres_pool = object()
+    services.bundle_revision_id = None
+    runtime_identity = _build_runtime_identity(explicit_worker_id="endpoint-worker-1")
+    asyncio.run(
+        _heartbeat(cast(Any, services), "endpoint-worker-1", "idle", runtime_identity=runtime_identity, registration=True)
+    )
+
+    ready_revision_id = asyncio.run(
+        ensure_endpoint_assignment_ready(
+            cast(Any, services),
+            "endpoint-worker-1",
+            "endpoint-1",
+            warmed_revision_id="rev-1",
+            runtime_identity=runtime_identity,
+        )
+    )
+
+    assert ready_revision_id is None
+    assert services.bundle_requirement_installs == []
+    assert [call[1]["status"] for call in services.registry_calls[1:]] == ["failed"]
+    assert services.registry_calls[-1][1]["assigned_endpoint_id"] == "endpoint-1"
+    assert services.registry_calls[-1][1]["last_error"] == "revision_metadata_missing"
+    assert services.registry_calls[-1][1]["runtime_metadata"]["desired_revision_id"] is None
+    assert services.registry_calls[-1][1]["runtime_metadata"]["warmed_revision_id"] == "rev-1"

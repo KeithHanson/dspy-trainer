@@ -246,6 +246,19 @@ async def ensure_endpoint_assignment_ready(
         await _heartbeat(services, worker_id, "idle", runtime_identity=runtime_identity)
         return None
     desired_revision_id = str(module_state.get("bundle_revision_id") or "").strip() or None
+    if desired_revision_id is None:
+        logger.error("Assigned endpoint revision metadata missing: %s", endpoint_id)
+        await _heartbeat(
+            services,
+            worker_id,
+            "failed",
+            endpoint_id=endpoint_id,
+            desired_revision_id=None,
+            warmed_revision_id=warmed_revision_id,
+            runtime_identity=runtime_identity,
+            last_error="revision_metadata_missing",
+        )
+        return None
     try:
         if warmed_revision_id != desired_revision_id:
             await _heartbeat(
