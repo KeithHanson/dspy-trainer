@@ -62,7 +62,8 @@ services:
       DSPY_TRAINER_REDIS_URL: redis://redis:6379/0
       DSPY_TRAINER_QUEUE_NAME: dspy-trainer:jobs
       DSPY_TRAINER_MLFLOW_TRACKING_URI: http://mlflow:5000
-      DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS: ${DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS:-15}
+      # Optional operator override; leave unset to use the backend default heartbeat TTL.
+      DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS:
       DSPY_TRAINER_CORS_ALLOW_ORIGINS: ${DSPY_TRAINER_CORS_ALLOW_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080,http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173}
       DSPY_TRAINER_GITHUB_PAT: ${GITHUB_PAT:-}
       DSPY_TRAINER_GIT_COMMIT_NAME: ${GIT_COMMIT_NAME:-DSPy Trainer}
@@ -138,7 +139,8 @@ services:
       DSPY_TRAINER_REDIS_URL: redis://redis:6379/0
       DSPY_TRAINER_QUEUE_NAME: dspy-trainer:jobs
       DSPY_TRAINER_MLFLOW_TRACKING_URI: http://mlflow:5000
-      DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS: ${DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS:-15}
+      # Optional operator override; leave unset to use the backend default heartbeat TTL.
+      DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS:
       DSPY_TRAINER_GITHUB_PAT: ${GITHUB_PAT:-}
       DSPY_TRAINER_GIT_COMMIT_NAME: ${GIT_COMMIT_NAME:-DSPy Trainer}
       DSPY_TRAINER_GIT_COMMIT_EMAIL: ${GIT_COMMIT_EMAIL:-dspy-trainer@local}
