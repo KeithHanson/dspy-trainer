@@ -871,7 +871,8 @@ class AppServices:
     @classmethod
     def _describe_endpoint_worker_visibility(cls, worker: dict[str, Any]) -> dict[str, Any]:
         status = str(worker.get("status") or "unknown").strip().lower() or "unknown"
-        endpoint_id = str(worker.get("endpoint_id") or "").strip() or None
+        assigned_endpoint_id = str(worker.get("assigned_endpoint_id") or "").strip() or None
+        endpoint_id = str(worker.get("endpoint_id") or "").strip() or assigned_endpoint_id
         desired_revision_id = str(worker.get("desired_revision_id") or "").strip() or None
         warmed_revision_id = str(worker.get("warmed_revision_id") or "").strip() or None
         task_id = str(worker.get("task_id") or "").strip() or None
@@ -926,12 +927,26 @@ class AppServices:
             if endpoint_id and revision_matches:
                 summary = f"Ready for traffic on revision {cls._format_revision_label(desired_revision_id)}."
                 deploy_state = "ready"
-            elif endpoint_id and desired_revision_id:
+            elif endpoint_id and desired_revision_id and warmed_revision_id:
                 summary = (
                     f"Heartbeat says listening, but desired revision {cls._format_revision_label(desired_revision_id)} "
                     f"does not match warmed revision {cls._format_revision_label(warmed_revision_id)}."
                 )
                 deploy_state = "revision_mismatch"
+            elif endpoint_id:
+                if desired_revision_id:
+                    summary = (
+                        f"Listening for assigned endpoint traffic, but warmed revision metadata is missing for desired revision "
+                        f"{cls._format_revision_label(desired_revision_id)}."
+                    )
+                elif warmed_revision_id:
+                    summary = (
+                        f"Listening for assigned endpoint traffic, but desired revision metadata is missing "
+                        f"(worker last warmed on {cls._format_revision_label(warmed_revision_id)})."
+                    )
+                else:
+                    summary = "Listening for assigned endpoint traffic, but revision metadata has not been reported yet."
+                deploy_state = "revision_metadata_missing"
             else:
                 summary = "Ready, but no endpoint revision is currently assigned."
                 deploy_state = "ready"

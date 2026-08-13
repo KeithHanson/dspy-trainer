@@ -85,6 +85,34 @@ describe("EndpointsPage", () => {
     expect(screen.getByText("Heartbeat says listening, but desired revision rev-2222 does not match warmed revision rev-1111.")).toBeInTheDocument();
   });
 
+  it("shows assigned listening workers without revision metadata as awaiting revision metadata", async () => {
+    const fetchMock = vi.fn((url, init) => {
+      if (String(url).endsWith("/bundle-endpoints") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([
+          { id: "ep-1", name: "Customer API", module_import_id: "mod-1", module_bundle_name: "agentic-chat", pinned_worker_count: 1, key_preview: "abc123" },
+        ]) });
+      }
+      if (String(url).endsWith("/endpoint-workers") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ total_workers: 2, live_workers: 2, stale_workers: 0, assigned_workers: 1, unassigned_workers: 1, ready_workers: 1, warming_workers: 0, running_workers: 0, failed_workers: 0, items: [
+          { worker_id: "endpoint-worker-1", endpoint_id: "ep-1", assigned_endpoint_id: "ep-1", is_live: true, state_label: "Listening", status: "listening", deploy_state: "revision_metadata_missing", desired_revision_id: null, warmed_revision_id: null, state_summary: "Listening for assigned endpoint traffic, but revision metadata has not been reported yet." },
+          { worker_id: "endpoint-worker-2", endpoint_id: null, assigned_endpoint_id: null, is_live: true, state_label: "Idle", status: "idle", deploy_state: "unassigned", desired_revision_id: null, warmed_revision_id: null, state_summary: "Waiting for an endpoint assignment." },
+        ] }) });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter>
+        <EndpointsPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText(/1 ready of 2 total · 2 live · 0 stale · 1 assigned · 1 unassigned/)).toBeInTheDocument();
+    expect(screen.getByText("Listening for assigned endpoint traffic, but revision metadata has not been reported yet.")).toBeInTheDocument();
+    expect(screen.getByText("revision_metadata_missing")).toBeInTheDocument();
+  });
+
   it("shows live warmup workers as warming instead of stale", async () => {
     const fetchMock = vi.fn((url, init) => {
       if (String(url).endsWith("/bundle-endpoints") && init?.method === "GET") {

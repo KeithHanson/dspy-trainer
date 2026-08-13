@@ -539,13 +539,13 @@ def test_list_endpoint_workers_uses_registry_backed_summaries():
 
         assert payload["total_workers"] == 3
         assert payload["reported_workers"] == 3
-        assert payload["available_workers"] == 1
-        assert payload["busy_workers"] == 2
+        assert payload["available_workers"] == 0
+        assert payload["busy_workers"] == 3
         assert payload["live_workers"] == 2
         assert payload["stale_workers"] == 1
         assert payload["assigned_workers"] == 2
         assert payload["unassigned_workers"] == 1
-        assert payload["ready_workers"] == 1
+        assert payload["ready_workers"] == 0
         assert payload["warming_workers"] == 1
         assert payload["running_workers"] == 0
         assert payload["failed_workers"] == 0
@@ -554,7 +554,7 @@ def test_list_endpoint_workers_uses_registry_backed_summaries():
             "stale_workers": 1,
             "assigned_workers": 2,
             "unassigned_workers": 1,
-            "ready_workers": 1,
+            "ready_workers": 0,
             "warming_workers": 1,
             "running_workers": 0,
             "failed_workers": 0,
@@ -564,6 +564,8 @@ def test_list_endpoint_workers_uses_registry_backed_summaries():
             "endpoint-worker-2",
             "endpoint-worker-3",
         ]
+        assert payload["items"][0]["deploy_state"] == "revision_metadata_missing"
+        assert payload["items"][0]["state_summary"] == "Listening for assigned endpoint traffic, but revision metadata has not been reported yet."
         assert payload["items"][-1]["status"] == "stale"
         assert payload["items"][-1]["assigned_endpoint_id"] is None
 
@@ -603,6 +605,43 @@ def test_list_endpoint_workers_registry_summary_excludes_listening_revision_mism
         assert payload["ready_workers"] == 1
         assert payload["summary"]["ready_workers"] == 1
         assert payload["items"][0]["deploy_state"] == "revision_mismatch"
+        assert payload["items"][0]["is_revision_ready"] is False
+        assert payload["items"][1]["deploy_state"] == "unassigned"
+
+    asyncio.run(scenario())
+
+
+def test_list_endpoint_workers_registry_marks_assigned_listening_workers_without_revision_metadata():
+    async def scenario() -> None:
+        services = _make_services()
+        now = datetime(2099, 1, 1, tzinfo=timezone.utc)
+
+        await services.register_endpoint_worker(
+            worker_id="endpoint-worker-1",
+            runtime_instance_id="runtime-1",
+            status="listening",
+            hostname="host-1",
+            pid=101,
+            runtime_metadata={"endpoint_id": "endpoint-1"},
+            now=now,
+        )
+        await services._set_endpoint_worker_assignment("endpoint-worker-1", "endpoint-1")
+        await services.register_endpoint_worker(
+            worker_id="endpoint-worker-2",
+            runtime_instance_id="runtime-2",
+            status="idle",
+            hostname="host-2",
+            pid=102,
+            now=now,
+        )
+
+        payload = await services.list_endpoint_workers(now=now)
+
+        assert payload["available_workers"] == 1
+        assert payload["busy_workers"] == 1
+        assert payload["ready_workers"] == 1
+        assert payload["items"][0]["deploy_state"] == "revision_metadata_missing"
+        assert payload["items"][0]["state_summary"] == "Listening for assigned endpoint traffic, but revision metadata has not been reported yet."
         assert payload["items"][0]["is_revision_ready"] is False
         assert payload["items"][1]["deploy_state"] == "unassigned"
 
