@@ -580,6 +580,8 @@ Managed bundle endpoints do not execute inside the backend container. The backen
 - Endpoint workers are assigned deterministically to endpoints based on those pinned counts and the current registry-backed worker set.
 - Only workers assigned to a given endpoint consume that endpoint's invocation queue.
 - `GET /endpoint-workers` exposes operator-facing readiness details for each endpoint worker from the durable endpoint-worker registry, including `deploy_state`, `state_summary`, and the desired versus warmed bundle revisions.
+- Endpoint rollout is now explicit: use **Rebuild** to prepare the latest module revision into the shared preparation artifact/cache, then use **Deploy** to cut an endpoint over to that prepared revision. Workers reuse the prepared artifact during cutover instead of reinstalling dependencies on every restart when preparation inputs are unchanged.
+- Endpoints track both `prepared_revision_id` and `deployed_revision_id`, so a synced module revision can stay staged until an operator performs the deploy step.
 - Common endpoint worker states: `idle` (unassigned), `preparing` (installing the desired revision / warming up), `listening` (ready), `running` (serving traffic), `failed` (warmup or invocation failure), and `stale` (heartbeat expired / non-live).
 
 ---

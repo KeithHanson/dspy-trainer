@@ -631,6 +631,30 @@ async def regenerate_bundle_endpoint_key_global(endpoint_id: str, request: Reque
     return endpoint
 
 
+@app.post("/bundle-endpoints/{endpoint_id}/rebuild")
+async def rebuild_bundle_endpoint_global(endpoint_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    try:
+        endpoint = await services.rebuild_bundle_endpoint(endpoint_id)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    if endpoint is None:
+        return JSONResponse(status_code=404, content={"error": "endpoint not found"})
+    return endpoint
+
+
+@app.post("/bundle-endpoints/{endpoint_id}/deploy")
+async def deploy_bundle_endpoint_global(endpoint_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    try:
+        endpoint = await services.deploy_bundle_endpoint(endpoint_id)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    if endpoint is None:
+        return JSONResponse(status_code=404, content={"error": "endpoint not found"})
+    return endpoint
+
+
 @app.post("/bundle-endpoints/{endpoint_id}/invoke")
 async def invoke_bundle_endpoint(endpoint_id: str, request: Request):
     services: AppServices = request.app.state.services

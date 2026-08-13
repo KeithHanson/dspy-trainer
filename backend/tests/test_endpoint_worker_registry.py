@@ -732,14 +732,14 @@ def test_reconcile_endpoint_worker_assignments_uses_registered_workers_without_s
             return [{"id": "endpoint-1", "pinned_worker_count": 1, "created_at": now.isoformat()}]
 
         async def get_bundle_endpoint(endpoint_id: str):
-            return {"id": endpoint_id, "module_import_id": "mod-1"}
+            return {"id": endpoint_id, "module_import_id": "mod-1", "deployed_revision_id": "rev-1"}
 
-        async def resolve_module_execution_state(module_id: str):
-            return {"module_id": module_id, "bundle_revision_id": "rev-1"}
+        async def resolve_bundle_revision_execution_state(revision_id: str):
+            return {"module_id": "mod-1", "bundle_revision_id": revision_id}
 
         services.list_all_bundle_endpoints = list_all_bundle_endpoints  # type: ignore[method-assign]
         services.get_bundle_endpoint = get_bundle_endpoint  # type: ignore[method-assign]
-        services.resolve_module_execution_state = resolve_module_execution_state  # type: ignore[method-assign]
+        services.resolve_bundle_revision_execution_state = resolve_bundle_revision_execution_state  # type: ignore[method-assign]
 
         registered_1 = await services.register_endpoint_worker(
             runtime_instance_id="runtime-1",
@@ -777,14 +777,14 @@ def test_reconcile_endpoint_worker_assignments_prioritizes_live_workers_over_new
             return [{"id": "endpoint-1", "pinned_worker_count": 1, "created_at": now.isoformat()}]
 
         async def get_bundle_endpoint(endpoint_id: str):
-            return {"id": endpoint_id, "module_import_id": "mod-1"}
+            return {"id": endpoint_id, "module_import_id": "mod-1", "deployed_revision_id": "rev-1"}
 
-        async def resolve_module_execution_state(module_id: str):
-            return {"module_id": module_id, "bundle_revision_id": "rev-1"}
+        async def resolve_bundle_revision_execution_state(revision_id: str):
+            return {"module_id": "mod-1", "bundle_revision_id": revision_id}
 
         services.list_all_bundle_endpoints = list_all_bundle_endpoints  # type: ignore[method-assign]
         services.get_bundle_endpoint = get_bundle_endpoint  # type: ignore[method-assign]
-        services.resolve_module_execution_state = resolve_module_execution_state  # type: ignore[method-assign]
+        services.resolve_bundle_revision_execution_state = resolve_bundle_revision_execution_state  # type: ignore[method-assign]
 
         live_worker = await services.register_endpoint_worker(
             runtime_instance_id="runtime-1",
@@ -831,14 +831,14 @@ def test_reconcile_endpoint_worker_assignments_preserves_ready_assigned_workers_
             return [{"id": "endpoint-1", "pinned_worker_count": 1, "created_at": now.isoformat()}]
 
         async def get_bundle_endpoint(endpoint_id: str):
-            return {"id": endpoint_id, "module_import_id": "mod-1"}
+            return {"id": endpoint_id, "module_import_id": "mod-1", "deployed_revision_id": "rev-1"}
 
-        async def resolve_module_execution_state(module_id: str):
-            return {"module_id": module_id, "bundle_revision_id": "rev-1"}
+        async def resolve_bundle_revision_execution_state(revision_id: str):
+            return {"module_id": "mod-1", "bundle_revision_id": revision_id}
 
         services.list_all_bundle_endpoints = list_all_bundle_endpoints  # type: ignore[method-assign]
         services.get_bundle_endpoint = get_bundle_endpoint  # type: ignore[method-assign]
-        services.resolve_module_execution_state = resolve_module_execution_state  # type: ignore[method-assign]
+        services.resolve_bundle_revision_execution_state = resolve_bundle_revision_execution_state  # type: ignore[method-assign]
 
         ready_worker = await services.register_endpoint_worker(
             runtime_instance_id="runtime-1",
@@ -875,14 +875,14 @@ def test_endpoint_ready_for_invocation_survives_reconcile_with_newer_idle_worker
             return [{"id": "endpoint-1", "pinned_worker_count": 1, "created_at": now.isoformat()}]
 
         async def get_bundle_endpoint(endpoint_id: str):
-            return {"id": endpoint_id, "module_import_id": "mod-1"}
+            return {"id": endpoint_id, "module_import_id": "mod-1", "deployed_revision_id": "rev-1"}
 
-        async def resolve_module_execution_state(module_id: str):
-            return {"module_id": module_id, "bundle_revision_id": "rev-1"}
+        async def resolve_bundle_revision_execution_state(revision_id: str):
+            return {"module_id": "mod-1", "bundle_revision_id": revision_id}
 
         services.list_all_bundle_endpoints = list_all_bundle_endpoints  # type: ignore[method-assign]
         services.get_bundle_endpoint = get_bundle_endpoint  # type: ignore[method-assign]
-        services.resolve_module_execution_state = resolve_module_execution_state  # type: ignore[method-assign]
+        services.resolve_bundle_revision_execution_state = resolve_bundle_revision_execution_state  # type: ignore[method-assign]
 
         await services.register_endpoint_worker(
             runtime_instance_id="runtime-1",
@@ -923,14 +923,14 @@ def test_registry_assignment_remains_control_plane_owned_across_worker_heartbeat
             return [{"id": "endpoint-1", "pinned_worker_count": 1, "created_at": now.isoformat()}]
 
         async def get_bundle_endpoint(endpoint_id: str):
-            return {"id": endpoint_id, "module_import_id": "mod-1"}
+            return {"id": endpoint_id, "module_import_id": "mod-1", "deployed_revision_id": "rev-1"}
 
-        async def resolve_module_execution_state(module_id: str):
-            return {"module_id": module_id, "bundle_revision_id": "rev-1"}
+        async def resolve_bundle_revision_execution_state(revision_id: str):
+            return {"module_id": "mod-1", "bundle_revision_id": revision_id}
 
         services.list_all_bundle_endpoints = list_all_bundle_endpoints  # type: ignore[method-assign]
         services.get_bundle_endpoint = get_bundle_endpoint  # type: ignore[method-assign]
-        services.resolve_module_execution_state = resolve_module_execution_state  # type: ignore[method-assign]
+        services.resolve_bundle_revision_execution_state = resolve_bundle_revision_execution_state  # type: ignore[method-assign]
 
         worker = await services.register_endpoint_worker(
             runtime_instance_id="runtime-1",

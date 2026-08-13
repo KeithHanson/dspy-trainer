@@ -183,6 +183,11 @@ Remediation sequence:
 docker compose restart backend
 ```
 
+Endpoint worker rollout workflow:
+1. Trigger **Rebuild** for the endpoint after syncing or editing the bundle so Compose prepares the new shared dependency artifact once.
+2. Wait for endpoint workers to report the target revision as warmed/prepared.
+3. Trigger **Deploy** to move endpoint traffic to that prepared revision; workers should then cut over without a full dependency reinstall when the preparation inputs are unchanged.
+
 3. If startup still fails, recreate backend and worker with rebuild:
 
 ```bash

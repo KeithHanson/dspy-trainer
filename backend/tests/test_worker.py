@@ -65,10 +65,14 @@ class FakeServices:
         self.endpoint_invocations.append((invocation_id, endpoint_id, input_payload, worker_id, stream))
 
     async def get_bundle_endpoint(self, endpoint_id):
-        return {"id": endpoint_id, "module_import_id": "mod-1"}
+        return {"id": endpoint_id, "module_import_id": "mod-1", "deployed_revision_id": self.bundle_revision_id}
 
     async def resolve_module_execution_state(self, module_id):
         return {"module_id": module_id, "bundle_path": "/tmp/bundle", "bundle_revision_id": self.bundle_revision_id}
+
+    async def resolve_bundle_endpoint_execution_state(self, endpoint_id):
+        del endpoint_id
+        return {"module_id": "mod-1", "bundle_path": "/tmp/bundle", "bundle_revision_id": self.bundle_revision_id}
 
     async def ensure_bundle_requirements_installed(self, bundle_path):
         self.bundle_requirement_installs.append(bundle_path)

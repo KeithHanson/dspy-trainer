@@ -235,17 +235,12 @@ async def ensure_endpoint_assignment_ready(
     warmed_revision_id: str | None = None,
     runtime_identity: dict[str, object] | None = None,
 ) -> str | None:
-    endpoint = await services.get_bundle_endpoint(endpoint_id)
-    if endpoint is None:
-        logger.error("Assigned endpoint not found: %s", endpoint_id)
-        await _heartbeat(services, worker_id, "idle", runtime_identity=runtime_identity)
-        return None
-    module_state = await services.resolve_module_execution_state(str(endpoint["module_import_id"]))
-    if module_state is None:
+    execution_state = await services.resolve_bundle_endpoint_execution_state(endpoint_id)
+    if execution_state is None:
         logger.error("Assigned endpoint module not found: %s", endpoint_id)
         await _heartbeat(services, worker_id, "idle", runtime_identity=runtime_identity)
         return None
-    desired_revision_id = str(module_state.get("bundle_revision_id") or "").strip() or None
+    desired_revision_id = str(execution_state.get("bundle_revision_id") or "").strip() or None
     if desired_revision_id is None:
         logger.error("Assigned endpoint revision metadata missing: %s", endpoint_id)
         await _heartbeat(
@@ -270,7 +265,7 @@ async def ensure_endpoint_assignment_ready(
                 warmed_revision_id=warmed_revision_id,
                 runtime_identity=runtime_identity,
             )
-            await services.ensure_bundle_requirements_installed(module_state["bundle_path"])
+            await services.ensure_bundle_requirements_installed(execution_state["bundle_path"])
         await _heartbeat(
             services,
             worker_id,

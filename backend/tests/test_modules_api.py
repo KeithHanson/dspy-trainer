@@ -265,6 +265,11 @@ async def fake_get_lm_profile(self, lm_profile_id):
     return None
 
 
+def _current_revision_id_for_module(module_id):
+    module = STORE.get(module_id, {})
+    return module.get("current_revision_id") or f"rev-{module_id}"
+
+
 async def fake_create_bundle_endpoint(self, module_id, name, lm_profile_id=None, pinned_worker_count=1):
     if module_id not in STORE:
         return None
@@ -277,6 +282,16 @@ async def fake_create_bundle_endpoint(self, module_id, name, lm_profile_id=None,
         "name": name,
         "key_preview": "abc123",
         "api_key": f"bep-{endpoint_id}",
+        "prepared_revision_id": None,
+        "prepared_digest": None,
+        "prepared_at": None,
+        "deployed_revision_id": _current_revision_id_for_module(module_id),
+        "deployed_at": None,
+        "current_module_revision_id": _current_revision_id_for_module(module_id),
+        "current_module_commit_sha": STORE[module_id].get("current_commit_sha"),
+        "current_module_bundle_version": STORE[module_id].get("bundle_version"),
+        "prepared_revision_is_current": False,
+        "deployed_revision_is_current": True,
         "created_at": None,
         "updated_at": None,
     }
@@ -306,7 +321,17 @@ async def fake_update_bundle_endpoint_global(self, endpoint_id, *, name=None, mo
     if module_import_id is not None:
         if module_import_id not in STORE:
             raise ValueError("module not found")
+        current_module_id = endpoint.get("module_import_id")
         endpoint["module_import_id"] = module_import_id
+        endpoint["current_module_revision_id"] = _current_revision_id_for_module(module_import_id)
+        if module_import_id != current_module_id:
+            endpoint["prepared_revision_id"] = None
+            endpoint["prepared_digest"] = None
+            endpoint["prepared_at"] = None
+            endpoint["deployed_revision_id"] = None
+            endpoint["deployed_at"] = None
+            endpoint["deployed_revision_is_current"] = False
+            endpoint["prepared_revision_is_current"] = False
     if name is not None:
         endpoint["name"] = name
     if lm_profile_id is not None:
@@ -347,6 +372,34 @@ async def fake_regenerate_bundle_endpoint_key_global(self, endpoint_id):
         return None
     endpoint["api_key"] = f"rotated-{endpoint_id}"
     endpoint["key_preview"] = "rot999"
+    return endpoint
+
+
+async def fake_rebuild_bundle_endpoint(self, endpoint_id):
+    endpoint = ENDPOINTS.get(endpoint_id)
+    if endpoint is None:
+        return None
+    current_revision_id = _current_revision_id_for_module(endpoint["module_import_id"])
+    endpoint["current_module_revision_id"] = current_revision_id
+    endpoint["prepared_revision_id"] = current_revision_id
+    endpoint["prepared_digest"] = f"digest-{current_revision_id}"
+    endpoint["prepared_at"] = "2025-01-01T00:00:00+00:00"
+    endpoint["prepared_revision_is_current"] = True
+    endpoint["deployed_revision_is_current"] = endpoint.get("deployed_revision_id") == current_revision_id
+    return endpoint
+
+
+async def fake_deploy_bundle_endpoint(self, endpoint_id):
+    endpoint = ENDPOINTS.get(endpoint_id)
+    if endpoint is None:
+        return None
+    current_revision_id = _current_revision_id_for_module(endpoint["module_import_id"])
+    if endpoint.get("prepared_revision_id") != current_revision_id:
+        raise ValueError("rebuild required before deploy")
+    endpoint["current_module_revision_id"] = current_revision_id
+    endpoint["deployed_revision_id"] = current_revision_id
+    endpoint["deployed_at"] = "2025-01-01T00:05:00+00:00"
+    endpoint["deployed_revision_is_current"] = True
     return endpoint
 
 
@@ -494,6 +547,8 @@ def _patch_services(monkeypatch):
     monkeypatch.setattr(main_mod.AppServices, "delete_bundle_endpoint_global", fake_delete_bundle_endpoint_global)
     monkeypatch.setattr(main_mod.AppServices, "regenerate_bundle_endpoint_key", fake_regenerate_bundle_endpoint_key)
     monkeypatch.setattr(main_mod.AppServices, "regenerate_bundle_endpoint_key_global", fake_regenerate_bundle_endpoint_key_global)
+    monkeypatch.setattr(main_mod.AppServices, "rebuild_bundle_endpoint", fake_rebuild_bundle_endpoint)
+    monkeypatch.setattr(main_mod.AppServices, "deploy_bundle_endpoint", fake_deploy_bundle_endpoint)
     monkeypatch.setattr(main_mod.AppServices, "authenticate_bundle_endpoint", fake_authenticate_bundle_endpoint)
     monkeypatch.setattr(main_mod.AppServices, "enqueue_endpoint_invocation", fake_enqueue_endpoint_invocation)
     monkeypatch.setattr(main_mod.AppServices, "reconcile_endpoint_worker_assignments", fake_reconcile_endpoint_worker_assignments)
@@ -879,6 +934,20 @@ def test_bundle_endpoint_crud_and_key_rotation(monkeypatch):
         "checkout_path": "/tmp/bundle",
         "environment_entries": [],
     }
+    STORE["mod-endpoint-2"] = {
+        "id": "mod-endpoint-2",
+        "status": "validated",
+        "validation_status": "passed",
+        "smoke_status": "passed",
+        "diagnostics": [],
+        "bundle_name": "agentic-sales",
+        "bundle_version": "0.2.0",
+        "source": "upload",
+        "source_ref": "/tmp/bundle-2",
+        "checkout_path": "/tmp/bundle-2",
+        "environment_entries": [],
+        "current_revision_id": "rev-mod-endpoint-2",
+    }
 
     with TestClient(main_mod.app) as client:
         created = client.post("/bundle-endpoints", json={"name": "Public API", "module_import_id": "mod-endpoint", "lm_profile_id": "lm-1", "pinned_worker_count": 2})
@@ -895,11 +964,32 @@ def test_bundle_endpoint_crud_and_key_rotation(monkeypatch):
         fetched = client.get("/bundle-endpoints/endpoint-1")
         assert fetched.status_code == 200
         assert fetched.json()["id"] == "endpoint-1"
+        assert fetched.json()["deployed_revision_id"] == "rev-mod-endpoint"
+        assert fetched.json()["prepared_revision_id"] is None
+
+        rebuild = client.post("/bundle-endpoints/endpoint-1/rebuild")
+        assert rebuild.status_code == 200
+        assert rebuild.json()["prepared_revision_id"] == "rev-mod-endpoint"
+        assert rebuild.json()["prepared_revision_is_current"] is True
+
+        deploy = client.post("/bundle-endpoints/endpoint-1/deploy")
+        assert deploy.status_code == 200
+        assert deploy.json()["deployed_revision_id"] == "rev-mod-endpoint"
+        assert deploy.json()["deployed_revision_is_current"] is True
 
         updated = client.patch("/bundle-endpoints/endpoint-1", json={"name": "Customer stream", "module_import_id": "mod-endpoint", "lm_profile_id": "lm-1", "pinned_worker_count": 3})
         assert updated.status_code == 200
         assert updated.json()["name"] == "Customer stream"
         assert updated.json()["pinned_worker_count"] == 3
+
+        changed_module = client.patch("/bundle-endpoints/endpoint-1", json={"name": "Customer stream", "module_import_id": "mod-endpoint-2", "lm_profile_id": "lm-1", "pinned_worker_count": 3})
+        assert changed_module.status_code == 200
+        assert changed_module.json()["module_import_id"] == "mod-endpoint-2"
+        assert changed_module.json()["current_module_revision_id"] == "rev-mod-endpoint-2"
+        assert changed_module.json()["prepared_revision_id"] is None
+        assert changed_module.json()["deployed_revision_id"] is None
+        assert changed_module.json()["prepared_revision_is_current"] is False
+        assert changed_module.json()["deployed_revision_is_current"] is False
 
         rotated = client.post("/bundle-endpoints/endpoint-1/regenerate-key")
         assert rotated.status_code == 200
@@ -908,6 +998,45 @@ def test_bundle_endpoint_crud_and_key_rotation(monkeypatch):
         deleted = client.delete("/bundle-endpoints/endpoint-1")
         assert deleted.status_code == 200
         assert deleted.json()["deleted"] is True
+
+
+def test_bundle_endpoint_deploy_requires_rebuild(monkeypatch):
+    STORE.clear()
+    ENDPOINTS.clear()
+    _patch_services(monkeypatch)
+    STORE["mod-endpoint"] = {
+        "id": "mod-endpoint",
+        "status": "validated",
+        "validation_status": "passed",
+        "smoke_status": "passed",
+        "diagnostics": [],
+        "bundle_name": "agentic-chat",
+        "bundle_version": "0.1.0",
+        "source": "upload",
+        "source_ref": "/tmp/bundle",
+        "checkout_path": "/tmp/bundle",
+        "environment_entries": [],
+        "current_revision_id": "rev-new",
+    }
+    ENDPOINTS["endpoint-1"] = {
+        "id": "endpoint-1",
+        "module_import_id": "mod-endpoint",
+        "pinned_worker_count": 1,
+        "name": "Customer stream",
+        "key_preview": "abc123",
+        "api_key": "secret-key",
+        "prepared_revision_id": "rev-old",
+        "deployed_revision_id": "rev-old",
+        "current_module_revision_id": "rev-new",
+        "created_at": None,
+        "updated_at": None,
+    }
+
+    with TestClient(main_mod.app) as client:
+        response = client.post("/bundle-endpoints/endpoint-1/deploy")
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "rebuild required before deploy"}
 
 
 def test_bundle_endpoint_sync_and_stream_invocation(monkeypatch):

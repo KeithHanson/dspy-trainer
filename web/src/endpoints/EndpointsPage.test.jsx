@@ -9,7 +9,7 @@ describe("EndpointsPage", () => {
     const fetchMock = vi.fn((url, init) => {
       if (String(url).endsWith("/bundle-endpoints") && init?.method === "GET") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([
-          { id: "ep-1", name: "Customer API", module_import_id: "mod-1", module_bundle_name: "agentic-chat", pinned_worker_count: 2, key_preview: "abc123" },
+          { id: "ep-1", name: "Customer API", module_import_id: "mod-1", module_bundle_name: "agentic-chat", pinned_worker_count: 2, key_preview: "abc123", current_module_revision_id: "rev-22222222", prepared_revision_id: "rev-22222222", deployed_revision_id: "rev-22222222" },
         ]) });
       }
       if (String(url).endsWith("/endpoint-workers") && init?.method === "GET") {
@@ -37,7 +37,13 @@ describe("EndpointsPage", () => {
     expect(endpointCard).toBeTruthy();
     expect(within(endpointCard).getByText(/agentic-chat/)).toBeInTheDocument();
     expect(within(endpointCard).getByText(/Pinned workers 2/)).toBeInTheDocument();
+    expect(within(endpointCard).getByRole("button", { name: "Rebuild" })).toBeInTheDocument();
+    expect(within(endpointCard).getByRole("button", { name: "Deploy" })).toBeInTheDocument();
     expect(within(endpointCard).getByRole("button", { name: "Copy curl" })).toBeInTheDocument();
+    expect(within(endpointCard).getByText(/Latest rev rev-2222/)).toBeInTheDocument();
+    expect(within(endpointCard).getByText(/Prepared rev rev-2222/)).toBeInTheDocument();
+    expect(within(endpointCard).getByText(/Deployed rev rev-2222/)).toBeInTheDocument();
+    expect(within(endpointCard).getByText("Live on revision rev-2222.")).toBeInTheDocument();
     expect(screen.getByText("Endpoint workers")).toBeInTheDocument();
     expect(screen.getByText(/1 ready of 3 total · 2 live · 1 stale · 2 assigned · 1 unassigned/)).toBeInTheDocument();
     expect(screen.getByText("endpoint-worker-1")).toBeInTheDocument();
@@ -61,7 +67,7 @@ describe("EndpointsPage", () => {
     const fetchMock = vi.fn((url, init) => {
       if (String(url).endsWith("/bundle-endpoints") && init?.method === "GET") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([
-          { id: "ep-1", name: "Customer API", module_import_id: "mod-1", module_bundle_name: "agentic-chat", pinned_worker_count: 2, key_preview: "abc123" },
+          { id: "ep-1", name: "Customer API", module_import_id: "mod-1", module_bundle_name: "agentic-chat", pinned_worker_count: 2, key_preview: "abc123", current_module_revision_id: "rev-22222222", prepared_revision_id: "rev-11111111", deployed_revision_id: "rev-11111111" },
         ]) });
       }
       if (String(url).endsWith("/endpoint-workers") && init?.method === "GET") {
@@ -89,7 +95,7 @@ describe("EndpointsPage", () => {
     const fetchMock = vi.fn((url, init) => {
       if (String(url).endsWith("/bundle-endpoints") && init?.method === "GET") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([
-          { id: "ep-1", name: "Customer API", module_import_id: "mod-1", module_bundle_name: "agentic-chat", pinned_worker_count: 1, key_preview: "abc123" },
+          { id: "ep-1", name: "Customer API", module_import_id: "mod-1", module_bundle_name: "agentic-chat", pinned_worker_count: 1, key_preview: "abc123", current_module_revision_id: "rev-22222222", prepared_revision_id: null, deployed_revision_id: "rev-11111111" },
         ]) });
       }
       if (String(url).endsWith("/endpoint-workers") && init?.method === "GET") {
@@ -117,7 +123,7 @@ describe("EndpointsPage", () => {
     const fetchMock = vi.fn((url, init) => {
       if (String(url).endsWith("/bundle-endpoints") && init?.method === "GET") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([
-          { id: "ep-1", name: "Customer API", module_import_id: "mod-1", module_bundle_name: "agentic-chat", pinned_worker_count: 1, key_preview: "abc123" },
+          { id: "ep-1", name: "Customer API", module_import_id: "mod-1", module_bundle_name: "agentic-chat", pinned_worker_count: 1, key_preview: "abc123", current_module_revision_id: "rev-22222222", prepared_revision_id: "rev-22222222", deployed_revision_id: "rev-11111111" },
         ]) });
       }
       if (String(url).endsWith("/endpoint-workers") && init?.method === "GET") {
@@ -144,7 +150,7 @@ describe("EndpointsPage", () => {
     const fetchMock = vi.fn((url, init) => {
       if (String(url).endsWith("/bundle-endpoints") && init?.method === "GET") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([
-          { id: "ep-1", name: "Customer API", module_import_id: "mod-1", module_bundle_name: "agentic-chat", pinned_worker_count: 2, key_preview: "abc123" },
+          { id: "ep-1", name: "Customer API", module_import_id: "mod-1", module_bundle_name: "agentic-chat", pinned_worker_count: 2, key_preview: "abc123", current_module_revision_id: "rev-33333333", prepared_revision_id: "rev-33333333", deployed_revision_id: "rev-33333333" },
         ]) });
       }
       if (String(url).endsWith("/endpoint-workers") && init?.method === "GET") {
@@ -177,7 +183,7 @@ describe("EndpointsPage", () => {
     const fetchMock = vi.fn((url, init) => {
       if (String(url).endsWith("/bundle-endpoints") && init?.method === "GET") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([
-          { id: "ep-1", name: "Customer API", module_import_id: "mod-1", module_bundle_name: "agentic-chat", pinned_worker_count: 2, key_preview: "abc123" },
+          { id: "ep-1", name: "Customer API", module_import_id: "mod-1", module_bundle_name: "agentic-chat", pinned_worker_count: 2, key_preview: "abc123", current_module_revision_id: "rev-22222222", prepared_revision_id: "rev-22222222", deployed_revision_id: "rev-22222222" },
         ]) });
       }
       if (String(url).endsWith("/endpoint-workers") && init?.method === "GET") {
@@ -197,6 +203,46 @@ describe("EndpointsPage", () => {
     await userEvent.click(within(endpointCard).getByRole("button", { name: "Copy curl" }));
 
     expect(writeText).toHaveBeenCalledWith(expect.stringContaining(`${window.location.origin}/api/bundle-endpoints/ep-1/invoke`));
+  });
+
+  it("runs rebuild and deploy actions from the list page", async () => {
+    const fetchMock = vi.fn((url, init) => {
+      if (String(url).endsWith("/bundle-endpoints") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([
+          { id: "ep-1", name: "Customer API", module_import_id: "mod-1", module_bundle_name: "agentic-chat", pinned_worker_count: 2, key_preview: "abc123", current_module_revision_id: "rev-22222222", prepared_revision_id: null, deployed_revision_id: "rev-11111111" },
+        ]) });
+      }
+      if (String(url).endsWith("/endpoint-workers") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ items: [], total_workers: 0 }) });
+      }
+      if (String(url).endsWith("/bundle-endpoints/ep-1/rebuild") && init?.method === "POST") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ id: "ep-1", name: "Customer API", module_import_id: "mod-1", module_bundle_name: "agentic-chat", pinned_worker_count: 2, key_preview: "abc123", current_module_revision_id: "rev-22222222", prepared_revision_id: "rev-22222222", deployed_revision_id: "rev-11111111" }) });
+      }
+      if (String(url).endsWith("/bundle-endpoints/ep-1/deploy") && init?.method === "POST") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ id: "ep-1", name: "Customer API", module_import_id: "mod-1", module_bundle_name: "agentic-chat", pinned_worker_count: 2, key_preview: "abc123", current_module_revision_id: "rev-22222222", prepared_revision_id: "rev-22222222", deployed_revision_id: "rev-22222222" }) });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter>
+        <EndpointsPage />
+      </MemoryRouter>,
+    );
+
+    const endpointCard = (await screen.findByText("Customer API")).closest("article");
+    expect(within(endpointCard).getByRole("button", { name: "Deploy" })).toBeDisabled();
+    expect(within(endpointCard).getByText("Latest bundle revision rev-2222 needs rebuild before deploy.")).toBeInTheDocument();
+
+    await userEvent.click(within(endpointCard).getByRole("button", { name: "Rebuild" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("/bundle-endpoints/ep-1/rebuild"), expect.objectContaining({ method: "POST" })));
+    await waitFor(() => expect(within(endpointCard).getByRole("button", { name: "Deploy" })).toBeEnabled());
+    expect(within(endpointCard).getByText("Prepared revision rev-2222 is ready to deploy.")).toBeInTheDocument();
+
+    await userEvent.click(within(endpointCard).getByRole("button", { name: "Deploy" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("/bundle-endpoints/ep-1/deploy"), expect.objectContaining({ method: "POST" })));
+    expect(await within(endpointCard).findByText("Live on revision rev-2222.")).toBeInTheDocument();
   });
 
   it("shows endpoints zero state", async () => {
@@ -260,7 +306,7 @@ describe("EndpointsPage", () => {
     });
   });
 
-  it("loads and updates an existing endpoint", async () => {
+  it("keeps edited endpoints in a pending rebuild/deploy state when the module changes", async () => {
     const fetchMock = vi.fn((url, init) => {
       if (String(url).endsWith("/modules") && init?.method === "GET") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([
@@ -278,7 +324,18 @@ describe("EndpointsPage", () => {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ id: "ep-1", name: "Customer API", module_import_id: "mod-1", lm_profile_id: "lm-1", pinned_worker_count: 2 }) });
       }
       if (String(url).endsWith("/bundle-endpoints/ep-1") && init?.method === "PATCH") {
-        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ id: "ep-1", name: "Customer Stream", module_import_id: "mod-2", lm_profile_id: "lm-2", pinned_worker_count: 4 }) });
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({
+          id: "ep-1",
+          name: "Customer Stream",
+          module_import_id: "mod-2",
+          lm_profile_id: "lm-2",
+          pinned_worker_count: 4,
+          current_module_revision_id: "rev-22222222",
+          prepared_revision_id: null,
+          deployed_revision_id: null,
+          prepared_revision_is_current: false,
+          deployed_revision_is_current: false,
+        }) });
       }
       if (String(url).endsWith("/bundle-endpoints/ep-1/regenerate-key") && init?.method === "POST") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ api_key: "bep-rotated" }) });
@@ -313,6 +370,8 @@ describe("EndpointsPage", () => {
     expect(await screen.findByText("bep-rotated")).toBeInTheDocument();
     expect(screen.getAllByText("Backup LM").length).toBeGreaterThan(0);
     expect(screen.getByText("4")).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalledWith(expect.stringContaining("/bundle-endpoints/ep-1/rebuild"), expect.anything());
+    expect(fetchMock).not.toHaveBeenCalledWith(expect.stringContaining("/bundle-endpoints/ep-1/deploy"), expect.anything());
     expect(screen.getByText(/curl -X POST/)).toBeInTheDocument();
     expect(screen.getByText(/curl -N -X POST/)).toBeInTheDocument();
     expect(screen.getAllByText(/bundle-endpoints\/ep-1\/invoke/).length).toBeGreaterThan(0);
