@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.config import get_cors_origins_from_env
+from app.config import Settings, get_cors_origins_from_env
 
 
 def test_cors_origins_include_explicit_and_vite_public_origins_without_duplicates(monkeypatch):
@@ -38,3 +38,9 @@ def test_cors_origins_ignore_relative_public_urls(monkeypatch):
     monkeypatch.setenv("VITE_MLFLOW_BASE_URL", "/mlflow")
 
     assert get_cors_origins_from_env() == ["http://localhost:8080"]
+
+
+def test_endpoint_worker_heartbeat_ttl_defaults_to_five_minutes():
+    settings = Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer")
+
+    assert settings.endpoint_worker_heartbeat_ttl_seconds == 300

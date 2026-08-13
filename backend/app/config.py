@@ -18,9 +18,8 @@ class Settings(BaseSettings):
     worker_registry_prefix: str = Field(default="dspy-trainer:workers")
     total_workers: int = Field(default=8)
     endpoint_worker_registry_prefix: str = Field(default="dspy-trainer:endpoint-workers")
-    total_endpoint_workers: int = Field(default=2)
+    endpoint_worker_heartbeat_ttl_seconds: int = Field(default=300)
     endpoint_queue_prefix: str = Field(default="dspy-trainer:endpoint-queues")
-    endpoint_worker_assignment_prefix: str = Field(default="dspy-trainer:endpoint-worker-assignments")
     endpoint_invocation_channel_prefix: str = Field(default="dspy-trainer:endpoint-invocations")
 
     postgres_dsn: str = Field(default="")
@@ -39,6 +38,13 @@ class Settings(BaseSettings):
         if not value.strip():
             raise ValueError("DSPY_TRAINER_POSTGRES_DSN is required")
         return value
+
+    @field_validator("endpoint_worker_heartbeat_ttl_seconds")
+    @classmethod
+    def validate_endpoint_worker_heartbeat_ttl_seconds(cls, value: int) -> int:
+        if int(value) < 1:
+            raise ValueError("DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS must be at least 1")
+        return int(value)
 
     def cors_origins_list(self) -> list[str]:
         return get_cors_origins_from_values(

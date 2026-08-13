@@ -1,9 +1,12 @@
 import asyncio
 from contextlib import suppress
+from datetime import datetime, timezone
 import json
 import logging
 import os
 import socket
+import sys
+import uuid
 
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
@@ -15,26 +18,129 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [endpo
 logger = logging.getLogger(__name__)
 
 
+_UNSET = object()
+
+
+def _build_runtime_identity(*, explicit_worker_id: str | None = None) -> dict[str, object]:
+    hostname = socket.gethostname()
+    pid = os.getpid()
+    runtime_instance_id = str(uuid.uuid4())
+    booted_at = datetime.now(timezone.utc).isoformat()
+    session_id = str(os.getenv("PI_SESSION_ID") or "").strip() or None
+    return {
+        "worker_id": str(explicit_worker_id or "").strip() or None,
+        "runtime_instance_id": runtime_instance_id,
+        "hostname": hostname,
+        "pid": pid,
+        "booted_at": booted_at,
+        "session_id": session_id,
+        "runtime_metadata": {
+            "booted_at": booted_at,
+            "hostname": hostname,
+            "pid": pid,
+            "session_id": session_id,
+            "platform": {
+                "python_executable": os.path.abspath(sys.executable),
+                "argv": list(sys.argv),
+            },
+        },
+    }
+
+
+def _heartbeat_runtime_metadata(
+    runtime_identity: dict[str, object],
+    *,
+    desired_revision_id: object = _UNSET,
+    warmed_revision_id: object = _UNSET,
+    endpoint_id: object = _UNSET,
+) -> dict[str, object]:
+    runtime_metadata = dict(runtime_identity.get("runtime_metadata") or {})
+    heartbeat_state = dict(runtime_identity.get("heartbeat_state") or {})
+
+    def _resolve_field(name: str, value: object) -> object:
+        return heartbeat_state.get(name) if value is _UNSET else value
+
+    resolved_endpoint_id = _resolve_field("endpoint_id", endpoint_id)
+    resolved_desired_revision_id = _resolve_field("desired_revision_id", desired_revision_id)
+    resolved_warmed_revision_id = _resolve_field("warmed_revision_id", warmed_revision_id)
+    heartbeat_state.update(
+        {
+            "endpoint_id": resolved_endpoint_id,
+            "desired_revision_id": resolved_desired_revision_id,
+            "warmed_revision_id": resolved_warmed_revision_id,
+        }
+    )
+    runtime_identity["heartbeat_state"] = heartbeat_state
+    runtime_metadata.update(
+        {
+            "booted_at": runtime_identity.get("booted_at"),
+            "hostname": runtime_identity.get("hostname"),
+            "pid": runtime_identity.get("pid"),
+            "session_id": runtime_identity.get("session_id"),
+            "endpoint_id": resolved_endpoint_id,
+            "desired_revision_id": resolved_desired_revision_id,
+            "warmed_revision_id": resolved_warmed_revision_id,
+        }
+    )
+    runtime_identity["runtime_metadata"] = runtime_metadata
+    return runtime_metadata
+
+
+def resolve_endpoint_worker_id(
+    explicit_worker_id: str | None = None,
+    *,
+    hostname: str | None = None,
+    pid: int | None = None,
+) -> str:
+    configured_worker_id = str(explicit_worker_id or "").strip()
+    if configured_worker_id:
+        return configured_worker_id
+    resolved_hostname = str(hostname or socket.gethostname()).strip()
+    return f"{resolved_hostname}-{pid if pid is not None else os.getpid()}"
+
+
+
 async def _heartbeat(
     services: AppServices,
     worker_id: str,
     status: str,
     *,
     task_id: str | None = None,
-    endpoint_id: str | None = None,
-) -> None:
-    if services.redis is None:
-        return
-    key = f"{services.settings.endpoint_worker_registry_prefix}:{worker_id}"
-    payload = {
-        "worker_id": worker_id,
-        "status": status,
-        "task_id": task_id,
-        "endpoint_id": endpoint_id,
-        "kind": "endpoint",
-        "last_seen": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
-    }
-    await services.redis.set(key, json.dumps(payload), ex=15)
+    endpoint_id: object = _UNSET,
+    desired_revision_id: object = _UNSET,
+    warmed_revision_id: object = _UNSET,
+    runtime_identity: dict[str, object] | None = None,
+    registration: bool = False,
+    last_error: str | None = None,
+) -> str:
+    effective_runtime_identity = runtime_identity or {}
+    if services.postgres_pool is not None:
+        payload = {
+            "runtime_instance_id": str(effective_runtime_identity.get("runtime_instance_id") or "").strip() or None,
+            "status": status,
+            "assigned_endpoint_id": endpoint_id if endpoint_id is not _UNSET else None,
+            "task_id": task_id,
+            "hostname": str(effective_runtime_identity.get("hostname") or "").strip() or None,
+            "pid": effective_runtime_identity.get("pid") if isinstance(effective_runtime_identity.get("pid"), int) else None,
+            "runtime_metadata": _heartbeat_runtime_metadata(
+                effective_runtime_identity,
+                desired_revision_id=desired_revision_id,
+                warmed_revision_id=warmed_revision_id,
+                endpoint_id=endpoint_id,
+            ),
+            "last_error": last_error,
+        }
+        if registration:
+            response = await services.register_endpoint_worker(
+                worker_id=worker_id if str(worker_id or "").strip() else None,
+                **payload,
+            )
+        else:
+            response = await services.heartbeat_endpoint_worker(worker_id, **payload)
+        if response is None:
+            raise RuntimeError(f"endpoint worker registration not found for heartbeat: {worker_id}")
+        return str(response.get("worker_id") or worker_id)
+    raise RuntimeError("endpoint workers require database-backed registry")
 
 
 async def _heartbeat_loop(
@@ -43,14 +149,33 @@ async def _heartbeat_loop(
     status: str,
     *,
     task_id: str | None = None,
-    endpoint_id: str | None = None,
+    endpoint_id: object = _UNSET,
+    desired_revision_id: object = _UNSET,
+    warmed_revision_id: object = _UNSET,
+    runtime_identity: dict[str, object] | None = None,
 ) -> None:
     while True:
-        await _heartbeat(services, worker_id, status, task_id=task_id, endpoint_id=endpoint_id)
+        await _heartbeat(
+            services,
+            worker_id,
+            status,
+            task_id=task_id,
+            endpoint_id=endpoint_id,
+            desired_revision_id=desired_revision_id,
+            warmed_revision_id=warmed_revision_id,
+            runtime_identity=runtime_identity,
+        )
         await asyncio.sleep(5)
 
 
-async def process_endpoint_job(services: AppServices, raw_payload: str, worker_id: str, endpoint_id: str) -> None:
+async def process_endpoint_job(
+    services: AppServices,
+    raw_payload: str,
+    worker_id: str,
+    endpoint_id: str,
+    revision_id: str | None = None,
+    runtime_identity: dict[str, object] | None = None,
+) -> None:
     payload = json.loads(raw_payload)
     invocation_id = str(payload.get("invocation_id") or "").strip()
     if payload.get("type") != "endpoint_invocation" or not invocation_id:
@@ -58,9 +183,27 @@ async def process_endpoint_job(services: AppServices, raw_payload: str, worker_i
         return
     heartbeat_task = None
     try:
-        await _heartbeat(services, worker_id, "running", task_id=invocation_id, endpoint_id=endpoint_id)
+        await _heartbeat(
+            services,
+            worker_id,
+            "running",
+            task_id=invocation_id,
+            endpoint_id=endpoint_id,
+            desired_revision_id=revision_id,
+            warmed_revision_id=revision_id,
+            runtime_identity=runtime_identity,
+        )
         heartbeat_task = asyncio.create_task(
-            _heartbeat_loop(services, worker_id, "running", task_id=invocation_id, endpoint_id=endpoint_id)
+            _heartbeat_loop(
+                services,
+                worker_id,
+                "running",
+                task_id=invocation_id,
+                endpoint_id=endpoint_id,
+                desired_revision_id=revision_id,
+                warmed_revision_id=revision_id,
+                runtime_identity=runtime_identity,
+            )
         )
         await services.run_endpoint_invocation_job(
             invocation_id,
@@ -74,57 +217,127 @@ async def process_endpoint_job(services: AppServices, raw_payload: str, worker_i
             heartbeat_task.cancel()
             with suppress(asyncio.CancelledError):
                 await heartbeat_task
-        await _heartbeat(services, worker_id, "listening", endpoint_id=endpoint_id)
+        await _heartbeat(
+            services,
+            worker_id,
+            "listening",
+            endpoint_id=endpoint_id,
+            desired_revision_id=revision_id,
+            warmed_revision_id=revision_id,
+            runtime_identity=runtime_identity,
+        )
 
 
-async def ensure_endpoint_assignment_ready(services: AppServices, worker_id: str, endpoint_id: str) -> bool:
+async def ensure_endpoint_assignment_ready(
+    services: AppServices,
+    worker_id: str,
+    endpoint_id: str,
+    warmed_revision_id: str | None = None,
+    runtime_identity: dict[str, object] | None = None,
+) -> str | None:
     endpoint = await services.get_bundle_endpoint(endpoint_id)
     if endpoint is None:
         logger.error("Assigned endpoint not found: %s", endpoint_id)
-        await _heartbeat(services, worker_id, "idle")
-        return False
+        await _heartbeat(services, worker_id, "idle", runtime_identity=runtime_identity)
+        return None
     module_state = await services.resolve_module_execution_state(str(endpoint["module_import_id"]))
     if module_state is None:
         logger.error("Assigned endpoint module not found: %s", endpoint_id)
-        await _heartbeat(services, worker_id, "idle")
-        return False
+        await _heartbeat(services, worker_id, "idle", runtime_identity=runtime_identity)
+        return None
+    desired_revision_id = str(module_state.get("bundle_revision_id") or "").strip() or None
+    if desired_revision_id is None:
+        logger.error("Assigned endpoint revision metadata missing: %s", endpoint_id)
+        await _heartbeat(
+            services,
+            worker_id,
+            "failed",
+            endpoint_id=endpoint_id,
+            desired_revision_id=None,
+            warmed_revision_id=warmed_revision_id,
+            runtime_identity=runtime_identity,
+            last_error="revision_metadata_missing",
+        )
+        return None
     try:
-        await _heartbeat(services, worker_id, "preparing", endpoint_id=endpoint_id)
-        await services.ensure_bundle_requirements_installed(module_state["bundle_path"])
-        await _heartbeat(services, worker_id, "listening", endpoint_id=endpoint_id)
-        return True
+        if warmed_revision_id != desired_revision_id:
+            await _heartbeat(
+                services,
+                worker_id,
+                "preparing",
+                endpoint_id=endpoint_id,
+                desired_revision_id=desired_revision_id,
+                warmed_revision_id=warmed_revision_id,
+                runtime_identity=runtime_identity,
+            )
+            await services.ensure_bundle_requirements_installed(module_state["bundle_path"])
+        await _heartbeat(
+            services,
+            worker_id,
+            "listening",
+            endpoint_id=endpoint_id,
+            desired_revision_id=desired_revision_id,
+            warmed_revision_id=desired_revision_id,
+            runtime_identity=runtime_identity,
+        )
+        return desired_revision_id
     except Exception:
         logger.exception("Endpoint worker warmup failed for endpoint %s", endpoint_id)
-        await _heartbeat(services, worker_id, "failed", endpoint_id=endpoint_id)
-        return False
+        await _heartbeat(
+            services,
+            worker_id,
+            "failed",
+            endpoint_id=endpoint_id,
+            desired_revision_id=desired_revision_id,
+            warmed_revision_id=warmed_revision_id,
+            runtime_identity=runtime_identity,
+            last_error="warmup_failed",
+        )
+        return None
 
 
 async def run_endpoint_worker() -> None:
     settings = get_settings()
     services = AppServices(settings)
-    worker_id = os.getenv("DSPY_TRAINER_ENDPOINT_WORKER_ID", f"{socket.gethostname()}-{os.getpid()}")
     await services.connect()
+    runtime_identity = _build_runtime_identity()
+    worker_id = await _heartbeat(
+        services,
+        resolve_endpoint_worker_id(None, hostname=socket.gethostname(), pid=os.getpid()),
+        "idle",
+        runtime_identity=runtime_identity,
+        registration=True,
+    )
+    runtime_identity["worker_id"] = worker_id
     logger.info("Endpoint worker started")
     logger.info("Endpoint worker id: %s", worker_id)
+    logger.info("Endpoint worker runtime instance id: %s", runtime_identity.get("runtime_instance_id"))
     assigned_endpoint_id = ""
+    warmed_revision_id: str | None = None
     try:
         while True:
-            await services.reconcile_endpoint_worker_assignments()
             assignment = await services.get_endpoint_worker_assignment(worker_id)
             endpoint_id = str(assignment.get("endpoint_id") or "").strip() if assignment else ""
             if not endpoint_id:
                 assigned_endpoint_id = ""
-                await _heartbeat(services, worker_id, "idle")
+                warmed_revision_id = None
+                await _heartbeat(services, worker_id, "idle", runtime_identity=runtime_identity)
                 await asyncio.sleep(2)
                 continue
-            if endpoint_id != assigned_endpoint_id:
-                ready = await ensure_endpoint_assignment_ready(services, worker_id, endpoint_id)
-                if not ready:
-                    await asyncio.sleep(2)
-                    continue
-                assigned_endpoint_id = endpoint_id
-            else:
-                await _heartbeat(services, worker_id, "listening", endpoint_id=endpoint_id)
+            ready_revision_id = await ensure_endpoint_assignment_ready(
+                services,
+                worker_id,
+                endpoint_id,
+                warmed_revision_id if endpoint_id == assigned_endpoint_id else None,
+                runtime_identity=runtime_identity,
+            )
+            if ready_revision_id is None:
+                if endpoint_id != assigned_endpoint_id:
+                    warmed_revision_id = None
+                await asyncio.sleep(2)
+                continue
+            assigned_endpoint_id = endpoint_id
+            warmed_revision_id = ready_revision_id
             try:
                 result = await services.redis.execute_command("BRPOP", services._endpoint_queue_name(endpoint_id), 5) if services.redis else None
             except RedisTimeoutError:
@@ -133,7 +346,14 @@ async def run_endpoint_worker() -> None:
                 continue
             _, raw_payload = result
             try:
-                await process_endpoint_job(services, raw_payload, worker_id, endpoint_id)
+                await process_endpoint_job(
+                    services,
+                    raw_payload,
+                    worker_id,
+                    endpoint_id,
+                    ready_revision_id,
+                    runtime_identity=runtime_identity,
+                )
             except Exception:
                 logger.exception("Endpoint worker job processing failed")
     finally:

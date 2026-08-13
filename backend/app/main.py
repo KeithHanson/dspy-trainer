@@ -13,7 +13,7 @@ from pydantic import AliasChoices, BaseModel, Field
 
 from app.config import get_cors_origins_from_env, get_settings
 from app.executor import run_bundle_eval
-from app.services import AppServices, ModuleSyncError
+from app.services import AppServices, EndpointUnavailableError, ModuleSyncError
 from app.validator import validate_bundle
 
 
@@ -21,7 +21,7 @@ from app.validator import validate_bundle
 async def lifespan(app: FastAPI):
     settings = get_settings()
     services = AppServices(settings)
-    await services.connect()
+    await services.connect_backend()
     app.state.services = services
     yield
     await services.disconnect()
@@ -71,6 +71,17 @@ def _read_endpoint_api_key(request: Request) -> str:
 
 def _format_sse_event(event: str, payload: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, default=str)}\n\n"
+
+
+def _endpoint_unavailable_response(exc: EndpointUnavailableError) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": str(exc),
+            "code": exc.code,
+            "routing_state": exc.routing_state,
+        },
+    )
 
 
 def _iter_sample_bundle_files(bundle_dir: Path) -> list[Path]:
@@ -637,6 +648,10 @@ async def invoke_bundle_endpoint(endpoint_id: str, request: Request):
         return JSONResponse(status_code=401, content={"error": "invalid endpoint id or api key"})
     if services.redis is None:
         return JSONResponse(status_code=503, content={"error": "queue not initialized"})
+    try:
+        await services.ensure_endpoint_ready_for_invocation(endpoint_id)
+    except EndpointUnavailableError as exc:
+        return _endpoint_unavailable_response(exc)
     redis_client = services.redis
     invocation_id = str(__import__("uuid").uuid4())
     channel = services._endpoint_invocation_channel(invocation_id)
@@ -663,6 +678,8 @@ async def invoke_bundle_endpoint(endpoint_id: str, request: Request):
             if event_name == "error":
                 return JSONResponse(status_code=500, content=event_body)
         return JSONResponse(status_code=504, content={"error": "endpoint invocation timed out"})
+    except EndpointUnavailableError as exc:
+        return _endpoint_unavailable_response(exc)
     except RuntimeError as exc:
         return JSONResponse(status_code=400, content={"error": str(exc)})
     finally:
@@ -687,6 +704,10 @@ async def stream_bundle_endpoint(endpoint_id: str, request: Request):
         return JSONResponse(status_code=401, content={"error": "invalid endpoint id or api key"})
     if services.redis is None:
         return JSONResponse(status_code=503, content={"error": "queue not initialized"})
+    try:
+        await services.ensure_endpoint_ready_for_invocation(endpoint_id)
+    except EndpointUnavailableError as exc:
+        return _endpoint_unavailable_response(exc)
     redis_client = services.redis
 
     async def event_stream():
@@ -717,6 +738,8 @@ async def stream_bundle_endpoint(endpoint_id: str, request: Request):
                 yield _format_sse_event(event_name, event_body)
                 if event_name in {"final", "error"}:
                     break
+        except EndpointUnavailableError as exc:
+            yield _format_sse_event("error", {"error": str(exc), "code": exc.code, "routing_state": exc.routing_state})
         except Exception as exc:
             yield _format_sse_event("error", {"error": str(exc)})
         finally:

@@ -543,8 +543,8 @@ Key variables in `.env`:
 | `GIT_COMMIT_EMAIL` | Git author email for optimization commits | Recommended |
 | `DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY` | Encrypts module environment entries and LM Profile provider API keys stored in Postgres | Required for module env UI and LM Profile API key storage |
 | `DSPY_TRAINER_TOTAL_WORKERS` | Number of general worker containers in Compose | Optional |
-| `DSPY_TRAINER_TOTAL_ENDPOINT_WORKERS` | Logical endpoint worker count used for endpoint assignment | Optional |
 | `DSPY_TRAINER_TOTAL_ENDPOINT_WORKER_REPLICAS` | Number of dedicated endpoint worker containers in Compose | Optional |
+| `DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS` | Seconds before an endpoint-worker heartbeat is marked stale | Optional |
 | `DSPY_TRAINER_POSTGRES_DSN` | Postgres connection | ✅ (auto in Compose) |
 | `DSPY_TRAINER_REDIS_URL` | Redis connection | ✅ (auto in Compose) |
 
@@ -573,11 +573,14 @@ LM Profiles store the provider model, API base, model type, optional LM class ov
 Managed bundle endpoints do not execute inside the backend container. The backend authenticates, enqueues, and relays responses, while dedicated `endpoint-worker` containers perform bundle installation/bootstrap and invocation.
 
 - Set `DSPY_TRAINER_TOTAL_WORKERS` in `.env` to control the number of general worker containers Compose starts.
-- Set `DSPY_TRAINER_TOTAL_ENDPOINT_WORKERS` in `.env` to control the logical endpoint worker count used for endpoint assignment.
 - Set `DSPY_TRAINER_TOTAL_ENDPOINT_WORKER_REPLICAS` in `.env` to control how many dedicated endpoint-worker containers Compose starts.
+- Compose-backed endpoint workers now self-register into the backend's durable endpoint-worker registry; operator-facing assignment and readiness come directly from those live registry records rather than from an env-defined logical roster.
+- Endpoint-worker heartbeats default to a 5 minute stale threshold (`DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS=300`). Override it in `.env` if you need operator stale detection to move faster or slower.
 - Each endpoint stores a `pinned_worker_count`.
-- Endpoint workers are assigned deterministically to endpoints based on those pinned counts.
+- Endpoint workers are assigned deterministically to endpoints based on those pinned counts and the current registry-backed worker set.
 - Only workers assigned to a given endpoint consume that endpoint's invocation queue.
+- `GET /endpoint-workers` exposes operator-facing readiness details for each endpoint worker from the durable endpoint-worker registry, including `deploy_state`, `state_summary`, and the desired versus warmed bundle revisions.
+- Common endpoint worker states: `idle` (unassigned), `preparing` (installing the desired revision / warming up), `listening` (ready), `running` (serving traffic), `failed` (warmup or invocation failure), and `stale` (heartbeat expired / non-live).
 
 ---
 
@@ -739,6 +742,7 @@ A: Set the worker replica env vars in `.env`, then recreate the stack:
 ```env
 DSPY_TRAINER_TOTAL_WORKERS=4
 DSPY_TRAINER_TOTAL_ENDPOINT_WORKER_REPLICAS=16
+DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS=300
 ```
 
 **Q: Can I use this for production LLM apps?**  
