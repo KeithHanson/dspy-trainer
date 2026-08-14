@@ -129,9 +129,18 @@ class _EndpointConn:
             if params[5]:
                 endpoint["prepared_revision_id"] = None
                 endpoint["prepared_digest"] = None
+                endpoint["prepared_image_ref"] = None
+                endpoint["prepared_image_digest"] = None
                 endpoint["prepared_at"] = None
                 endpoint["deployed_revision_id"] = None
+                endpoint["deployed_digest"] = None
+                endpoint["deployed_image_ref"] = None
+                endpoint["deployed_image_digest"] = None
                 endpoint["deployed_at"] = None
+                endpoint["restart_generation"] = 0
+                endpoint["rollout_state"] = {}
+                endpoint["rollout_operations"] = []
+                endpoint["rollout_events"] = []
             endpoint["updated_at"] = params[6]
             return {
                 "id": endpoint["id"],
@@ -163,6 +172,94 @@ class _EndpointPool:
 
     def acquire(self):
         return _EndpointAcquire(self.state)
+
+
+class _RolloutConn:
+    def __init__(self, state):
+        self.state = state
+
+    async def execute(self, query, *params):
+        normalized = " ".join(query.strip().lower().split())
+        endpoint = self.state["endpoints"].get(str(params[0]))
+        if endpoint is None:
+            return "UPDATE 0"
+        if normalized.startswith("update bundle_endpoints set prepared_revision_id = $2"):
+            endpoint["prepared_revision_id"] = params[1]
+            endpoint["prepared_digest"] = params[2]
+            endpoint["prepared_image_ref"] = None
+            endpoint["prepared_image_digest"] = None
+            endpoint["prepared_at"] = params[3]
+            endpoint["updated_at"] = params[3]
+            return "UPDATE 1"
+        if normalized.startswith("update bundle_endpoints set deployed_revision_id = $2"):
+            endpoint["deployed_revision_id"] = params[1]
+            endpoint["deployed_digest"] = params[2]
+            endpoint["deployed_image_ref"] = params[3]
+            endpoint["deployed_image_digest"] = params[4]
+            endpoint["deployed_at"] = params[5]
+            endpoint["updated_at"] = params[5]
+            return "UPDATE 1"
+        if normalized.startswith("update bundle_endpoints set restart_generation = $2"):
+            endpoint["restart_generation"] = params[1]
+            endpoint["rollout_state"] = params[2]
+            endpoint["rollout_operations"] = params[3]
+            endpoint["rollout_events"] = params[4]
+            endpoint["updated_at"] = params[5]
+            return "UPDATE 1"
+        return "UPDATE 0"
+
+
+class _RolloutAcquire:
+    def __init__(self, state):
+        self.conn = _RolloutConn(state)
+
+    async def __aenter__(self):
+        return self.conn
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _RolloutPool:
+    def __init__(self, state):
+        self.state = state
+
+    def acquire(self):
+        return _RolloutAcquire(self.state)
+
+
+def _serialize_endpoint_rollout_payload(state, endpoint_id):
+    endpoint = state["endpoints"][endpoint_id]
+    current_module_revision_id = state["modules"].get(endpoint["module_import_id"], {}).get("current_revision_id")
+    return AppServices._build_bundle_endpoint_payload(
+        {
+            "id": endpoint["id"],
+            "module_import_id": endpoint["module_import_id"],
+            "lm_profile_id": endpoint.get("lm_profile_id"),
+            "pinned_worker_count": endpoint.get("pinned_worker_count", 1),
+            "name": endpoint["name"],
+            "key_preview": endpoint.get("key_preview", "abc123"),
+            "prepared_revision_id": endpoint.get("prepared_revision_id"),
+            "prepared_digest": endpoint.get("prepared_digest"),
+            "prepared_image_ref": endpoint.get("prepared_image_ref"),
+            "prepared_image_digest": endpoint.get("prepared_image_digest"),
+            "prepared_at": endpoint.get("prepared_at"),
+            "deployed_revision_id": endpoint.get("deployed_revision_id"),
+            "deployed_digest": endpoint.get("deployed_digest"),
+            "deployed_image_ref": endpoint.get("deployed_image_ref"),
+            "deployed_image_digest": endpoint.get("deployed_image_digest"),
+            "deployed_at": endpoint.get("deployed_at"),
+            "restart_generation": endpoint.get("restart_generation", 0),
+            "rollout_state": endpoint.get("rollout_state", {}),
+            "rollout_operations": endpoint.get("rollout_operations", []),
+            "rollout_events": endpoint.get("rollout_events", []),
+            "current_module_revision_id": current_module_revision_id,
+            "current_module_commit_sha": state["modules"].get(endpoint["module_import_id"], {}).get("current_commit_sha"),
+            "current_module_bundle_version": state["modules"].get(endpoint["module_import_id"], {}).get("bundle_version"),
+            "created_at": endpoint.get("created_at"),
+            "updated_at": endpoint.get("updated_at"),
+        }
+    )
 
 
 def test_set_module_bundle_metadata_updates_saved_bundle_toml(tmp_path):
@@ -274,7 +371,135 @@ def test_update_bundle_endpoint_global_clears_revision_metadata_when_module_chan
     assert payload["prepared_revision_is_current"] is False
     assert payload["deployed_revision_is_current"] is False
     assert state["endpoints"]["endpoint-1"]["prepared_digest"] is None
+    assert state["endpoints"]["endpoint-1"]["prepared_image_ref"] is None
+    assert state["endpoints"]["endpoint-1"]["deployed_digest"] is None
+    assert state["endpoints"]["endpoint-1"]["rollout_operations"] == []
     assert state["endpoints"]["endpoint-1"]["deployed_at"] is None
+
+
+def test_build_bundle_endpoint_payload_includes_rollout_state_metadata():
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+    payload = services._build_bundle_endpoint_payload(
+        {
+            "id": "endpoint-1",
+            "module_import_id": "mod-1",
+            "lm_profile_id": "lm-1",
+            "pinned_worker_count": 2,
+            "name": "Customer API",
+            "key_preview": "abc123",
+            "prepared_revision_id": "rev-2",
+            "prepared_digest": "bundle-digest-2",
+            "prepared_image_ref": "registry.test/demo:rev-2",
+            "prepared_image_digest": "sha256:prepared",
+            "prepared_at": None,
+            "deployed_revision_id": "rev-1",
+            "deployed_digest": "bundle-digest-1",
+            "deployed_image_ref": "registry.test/demo:rev-1",
+            "deployed_image_digest": "sha256:deployed",
+            "deployed_at": None,
+            "restart_generation": 3,
+            "rollout_state": '{"status":"completed","last_action":"deploy"}',
+            "rollout_operations": '[{"action":"rebuild"},{"action":"deploy"}]',
+            "rollout_events": [{"action": "restart-runtime", "kind": "operation-completed"}],
+            "current_module_revision_id": "rev-2",
+            "current_module_commit_sha": "abc123",
+            "current_module_bundle_version": "0.1.0",
+            "created_at": None,
+            "updated_at": None,
+        }
+    )
+
+    assert payload["prepared_image_ref"] == "registry.test/demo:rev-2"
+    assert payload["deployed_image_digest"] == "sha256:deployed"
+    assert payload["restart_generation"] == 3
+    assert payload["rollout_state"]["last_action"] == "deploy"
+    assert [item["action"] for item in payload["rollout_operations"]] == ["rebuild", "deploy"]
+    assert payload["rollout_events"][0]["action"] == "restart-runtime"
+
+
+def test_bundle_endpoint_rollout_state_persists_rebuild_deploy_and_restart(monkeypatch, tmp_path):
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+    bundle_root = tmp_path / "bundle"
+    bundle_root.mkdir()
+    (bundle_root / "requirements.txt").write_text("dspy==2.6.27\n", encoding="utf-8")
+    state = {
+        "modules": {
+            "mod-1": {
+                "id": "mod-1",
+                "current_revision_id": "rev-1",
+                "current_commit_sha": "abc123",
+                "bundle_version": "0.1.0",
+            }
+        },
+        "endpoints": {
+            "endpoint-1": {
+                "id": "endpoint-1",
+                "module_import_id": "mod-1",
+                "lm_profile_id": None,
+                "pinned_worker_count": 1,
+                "name": "Customer API",
+                "key_preview": "abc123",
+                "prepared_revision_id": None,
+                "prepared_digest": None,
+                "prepared_image_ref": None,
+                "prepared_image_digest": None,
+                "prepared_at": None,
+                "deployed_revision_id": None,
+                "deployed_digest": None,
+                "deployed_image_ref": None,
+                "deployed_image_digest": None,
+                "deployed_at": None,
+                "restart_generation": 0,
+                "rollout_state": {},
+                "rollout_operations": [],
+                "rollout_events": [],
+                "created_at": None,
+                "updated_at": None,
+            }
+        },
+    }
+    services.postgres_pool = _RolloutPool(state)
+
+    async def fake_get_bundle_endpoint(endpoint_id):
+        return _serialize_endpoint_rollout_payload(state, endpoint_id)
+
+    async def fake_resolve_module_execution_state(module_id):
+        return {
+            "module_id": module_id,
+            "bundle_path": str(bundle_root),
+            "bundle_revision_id": "rev-1",
+            "bundle_commit_sha": "abc123",
+            "bundle_version": "0.1.0",
+            "bundle_name": "demo-bundle",
+        }
+
+    async def fake_ensure_bundle_requirements_installed(bundle_path):
+        assert bundle_path == str(bundle_root)
+        return None
+
+    monkeypatch.setattr(services, "get_bundle_endpoint", fake_get_bundle_endpoint)
+    monkeypatch.setattr(services, "resolve_module_execution_state", fake_resolve_module_execution_state)
+    monkeypatch.setattr(services, "ensure_bundle_requirements_installed", fake_ensure_bundle_requirements_installed)
+
+    rebuilt = asyncio.run(services.rebuild_bundle_endpoint("endpoint-1"))
+    deployed = asyncio.run(services.deploy_bundle_endpoint("endpoint-1"))
+    restarted = asyncio.run(services.restart_bundle_endpoint_runtime("endpoint-1"))
+
+    assert rebuilt is not None
+    assert rebuilt["prepared_revision_id"] == "rev-1"
+    assert rebuilt["prepared_digest"]
+    assert rebuilt["rollout_operations"][0]["action"] == "rebuild"
+
+    assert deployed is not None
+    assert deployed["deployed_revision_id"] == "rev-1"
+    assert deployed["deployed_digest"] == rebuilt["prepared_digest"]
+    assert deployed["rollout_operations"][1]["action"] == "deploy"
+
+    assert restarted is not None
+    assert restarted["restart_generation"] == 1
+    assert restarted["rollout_state"]["last_action"] == "restart-runtime"
+    assert [item["action"] for item in restarted["rollout_operations"]] == ["rebuild", "deploy", "restart-runtime"]
+    assert [item["action"] for item in restarted["rollout_events"]] == ["rebuild", "deploy", "restart-runtime"]
 
 
 def test_resolve_bundle_endpoint_execution_state_requires_deployed_revision(monkeypatch):
