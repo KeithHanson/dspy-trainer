@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from dataclasses import dataclass
+import hashlib
 import importlib.util
 from importlib import import_module
 import io
@@ -17,11 +19,18 @@ from typing import Any, Callable
 
 import dspy
 
-from app.bundle_preparation import activate_bundle_preparation
+from app.bundle_preparation import activate_bundle_preparation, inspect_bundle_preparation
 from app.config import get_settings
 
 
 AZURE_RESPONSES_COMPAT_CLASS_PATH = "app.lm.AzureResponsesCompatLM"
+
+
+@dataclass(frozen=True)
+class BundleRuntime:
+    bundle_path: str
+    program: Any
+    lm: Any
 
 
 class _TeeWriter:
@@ -141,11 +150,46 @@ def _capture_process_output(log_event: Callable[[str], None] | None):
         handler.finish()
 
 
+def _bundle_module_name(root: Path, stem: str) -> str:
+    digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:12]
+    return f"dspy_trainer_bundle_{digest}_{stem}"
+
+
+@contextmanager
+def _bundle_import_scope(root: Path):
+    resolved_root = root.expanduser().resolve()
+    root_text = str(resolved_root)
+    original_sys_path = list(sys.path)
+    preexisting_modules = dict(sys.modules)
+    sys.path.insert(0, root_text)
+    try:
+        yield
+    finally:
+        sys.path[:] = original_sys_path
+        for name, module in list(sys.modules.items()):
+            if name.startswith("dspy_trainer_bundle_"):
+                sys.modules.pop(name, None)
+                continue
+            module_file = getattr(module, "__file__", None)
+            if not module_file:
+                continue
+            try:
+                module_path = Path(module_file).resolve()
+            except Exception:
+                continue
+            if module_path == resolved_root or resolved_root in module_path.parents:
+                sys.modules.pop(name, None)
+        for name, module in preexisting_modules.items():
+            if name not in sys.modules:
+                sys.modules[name] = module
+
+
 def _load_module(name: str, file_path: Path) -> ModuleType:
     spec = importlib.util.spec_from_file_location(name, file_path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Unable to load module from {file_path}")
     module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -249,7 +293,9 @@ def _build_lm_from_profile(lm_profile: dict[str, Any]) -> Any:
 
 def _load_bundle(bundle_path: str) -> tuple[Path, float, str | None, list[str] | None, ModuleType, ModuleType]:
     root = Path(bundle_path).expanduser().resolve()
-    activate_bundle_preparation(str(root), get_settings().checkout_root)
+    preparation_spec = inspect_bundle_preparation(str(root))
+    if preparation_spec.has_requirements:
+        activate_bundle_preparation(str(root), get_settings().checkout_root)
     pass_threshold = 0.5
     optimized_program_state: str | None = None
     target_output_fields: list[str] | None = None
@@ -282,15 +328,16 @@ def _load_bundle(bundle_path: str) -> tuple[Path, float, str | None, list[str] |
         except Exception:
             pass
 
-    module_mod = _load_module("user_module", root / "module.py")
-    metric_mod = _load_module("user_metric", root / "metric.py")
+    with _bundle_import_scope(root):
+        module_mod = _load_module(_bundle_module_name(root, "module"), root / "module.py")
+        metric_mod = _load_module(_bundle_module_name(root, "metric"), root / "metric.py")
 
-    if not hasattr(module_mod, "build_program"):
-        raise RuntimeError("module.py must define build_program()")
-    if not hasattr(metric_mod, "judge_metric"):
-        raise RuntimeError("metric.py must define judge_metric(example, prediction)")
+        if not hasattr(module_mod, "build_program"):
+            raise RuntimeError("module.py must define build_program()")
+        if not hasattr(metric_mod, "judge_metric"):
+            raise RuntimeError("metric.py must define judge_metric(example, prediction)")
 
-    return root, pass_threshold, optimized_program_state, target_output_fields, module_mod, metric_mod
+        return root, pass_threshold, optimized_program_state, target_output_fields, module_mod, metric_mod
 
 
 @contextmanager
@@ -355,54 +402,39 @@ def _build_runtime_program(
     return program, lm
 
 
-def _invoke_program(program: Any, input_payload: dict[str, Any], lm: Any) -> Any:
-    original_program_lm = None
-    had_program_lm_binding = False
-    if lm is not None and hasattr(program, "set_lm"):
-        try:
-            original_program_lm = getattr(program, "lm", None)
-            program.set_lm(lm)
-            had_program_lm_binding = True
-        except Exception:
-            pass
-    try:
-        if lm is not None:
-            with dspy.context(lm=lm):
-                return program(**input_payload)
-        return program(**input_payload)
-    finally:
-        if had_program_lm_binding:
-            try:
-                program.set_lm(original_program_lm)
-            except Exception:
-                pass
-
-
-def invoke_bundle(
+def warm_bundle_runtime(
     bundle_path: str,
-    input_payload: dict[str, Any],
     lm_profile: dict[str, Any] | None = None,
+    runtime_env: dict[str, str] | None = None,
+) -> BundleRuntime:
+    with _temporary_environment(runtime_env):
+        program, lm = _build_runtime_program(bundle_path, lm_profile=lm_profile)
+    return BundleRuntime(bundle_path=bundle_path, program=program, lm=lm)
+
+
+def invoke_warmed_bundle(
+    runtime: BundleRuntime,
+    input_payload: dict[str, Any],
     runtime_env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(input_payload, dict) or not input_payload:
         raise RuntimeError("bundle invocation input must be a non-empty object")
     with _temporary_environment(runtime_env):
-        program, lm = _build_runtime_program(bundle_path, lm_profile=lm_profile)
-        prediction = _invoke_program(program, input_payload, lm)
+        prediction = _invoke_program(runtime.program, input_payload, runtime.lm)
     return _prediction_to_payload(prediction)
 
 
-def stream_bundle(
-    bundle_path: str,
+def stream_warmed_bundle(
+    runtime: BundleRuntime,
     input_payload: dict[str, Any],
     emit_event: Callable[[dict[str, Any]], None],
-    lm_profile: dict[str, Any] | None = None,
     runtime_env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(input_payload, dict) or not input_payload:
         raise RuntimeError("bundle invocation input must be a non-empty object")
     with _temporary_environment(runtime_env):
-        program, lm = _build_runtime_program(bundle_path, lm_profile=lm_profile)
+        program = runtime.program
+        lm = runtime.lm
         stream_method = getattr(program, "emit", None)
         if not callable(stream_method):
             raise RuntimeError("bundle program must define emit(...) for SSE streaming")
@@ -440,6 +472,50 @@ def stream_bundle(
                 except Exception:
                     pass
     return _prediction_to_payload(result)
+
+
+def _invoke_program(program: Any, input_payload: dict[str, Any], lm: Any) -> Any:
+    original_program_lm = None
+    had_program_lm_binding = False
+    if lm is not None and hasattr(program, "set_lm"):
+        try:
+            original_program_lm = getattr(program, "lm", None)
+            program.set_lm(lm)
+            had_program_lm_binding = True
+        except Exception:
+            pass
+    try:
+        if lm is not None:
+            with dspy.context(lm=lm):
+                return program(**input_payload)
+        return program(**input_payload)
+    finally:
+        if had_program_lm_binding:
+            try:
+                program.set_lm(original_program_lm)
+            except Exception:
+                pass
+
+
+def invoke_bundle(
+    bundle_path: str,
+    input_payload: dict[str, Any],
+    lm_profile: dict[str, Any] | None = None,
+    runtime_env: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    runtime = warm_bundle_runtime(bundle_path, lm_profile=lm_profile, runtime_env=runtime_env)
+    return invoke_warmed_bundle(runtime, input_payload, runtime_env=runtime_env)
+
+
+def stream_bundle(
+    bundle_path: str,
+    input_payload: dict[str, Any],
+    emit_event: Callable[[dict[str, Any]], None],
+    lm_profile: dict[str, Any] | None = None,
+    runtime_env: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    runtime = warm_bundle_runtime(bundle_path, lm_profile=lm_profile, runtime_env=runtime_env)
+    return stream_warmed_bundle(runtime, input_payload, emit_event, runtime_env=runtime_env)
 
 
 def _build_eval_example(item: dict[str, Any]) -> dspy.Example:

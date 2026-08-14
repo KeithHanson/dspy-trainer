@@ -8,6 +8,9 @@ from typing import Any, cast
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+FIXTURES = Path(__file__).resolve().parent / "fixtures" / "module_bundles"
+
+from app.executor.module_runner import BundleRuntime
 from worker import process_job
 from endpoint_worker import (
     _build_runtime_identity,
@@ -45,6 +48,9 @@ class FakeServices:
         self.endpoint_invocations = []
         self.bundle_requirement_installs = []
         self.bundle_revision_id = "rev-1"
+        self.bundle_path = str(FIXTURES / "valid_bundle")
+        self.runtime_env = {"SPECIAL_TOKEN": "expected-value"}
+        self.lm_profile = None
         self.registry_workers = {}
         self.registry_calls = []
 
@@ -61,21 +67,30 @@ class FakeServices:
             raise RuntimeError("boom")
         return {"id": task_id, "status": "succeeded"}
 
-    async def run_endpoint_invocation_job(self, invocation_id, endpoint_id, input_payload, worker_id, *, stream):
-        self.endpoint_invocations.append((invocation_id, endpoint_id, input_payload, worker_id, stream))
+    async def run_endpoint_invocation_job(self, invocation_id, endpoint_id, input_payload, worker_id, *, stream, warmed_runtime=None, runtime_env_override=None):
+        self.endpoint_invocations.append((invocation_id, endpoint_id, input_payload, worker_id, stream, warmed_runtime, runtime_env_override))
 
     async def get_bundle_endpoint(self, endpoint_id):
-        return {"id": endpoint_id, "module_import_id": "mod-1", "deployed_revision_id": self.bundle_revision_id}
+        return {"id": endpoint_id, "module_import_id": "mod-1", "deployed_revision_id": self.bundle_revision_id, "lm_profile_id": None}
 
     async def resolve_module_execution_state(self, module_id):
-        return {"module_id": module_id, "bundle_path": "/tmp/bundle", "bundle_revision_id": self.bundle_revision_id}
+        return {"module_id": module_id, "bundle_path": self.bundle_path, "bundle_revision_id": self.bundle_revision_id}
 
     async def resolve_bundle_endpoint_execution_state(self, endpoint_id):
         del endpoint_id
-        return {"module_id": "mod-1", "bundle_path": "/tmp/bundle", "bundle_revision_id": self.bundle_revision_id}
+        return {"module_id": "mod-1", "bundle_path": self.bundle_path, "bundle_revision_id": self.bundle_revision_id}
 
     async def ensure_bundle_requirements_installed(self, bundle_path):
         self.bundle_requirement_installs.append(bundle_path)
+
+    async def get_module_runtime_environment(self, module_id):
+        assert module_id == "mod-1"
+        return dict(self.runtime_env)
+
+    async def _get_lm_profile_record(self, profile_id, *, include_secret=False):
+        assert profile_id is None or profile_id == "profile-1"
+        assert include_secret is True
+        return self.lm_profile
 
     async def register_endpoint_worker(self, **payload):
         worker_id = payload.get("worker_id") or f"endpoint-worker-{len(self.registry_workers) + 1}"
@@ -269,7 +284,7 @@ def test_process_endpoint_job_runs_endpoint_invocation_and_restores_listening():
         )
     )
 
-    assert services.endpoint_invocations == [("inv-1", "endpoint-1", {"question": "hello"}, "endpoint-worker-1", True)]
+    assert services.endpoint_invocations == [("inv-1", "endpoint-1", {"question": "hello"}, "endpoint-worker-1", True, None, None)]
     assert services.registry_calls[1][1]["status"] == "running"
     assert services.registry_calls[1][1]["runtime_metadata"]["warmed_revision_id"] == "rev-1"
     assert services.registry_calls[-1][1]["status"] == "listening"
@@ -284,12 +299,14 @@ def test_ensure_endpoint_assignment_ready_preinstalls_dependencies_and_marks_lis
         _heartbeat(cast(Any, services), "endpoint-worker-1", "idle", runtime_identity=runtime_identity, registration=True)
     )
 
-    ready_revision_id = asyncio.run(
+    ready_revision_id, warmed_runtime, warmed_runtime_env = asyncio.run(
         ensure_endpoint_assignment_ready(cast(Any, services), "endpoint-worker-1", "endpoint-1", runtime_identity=runtime_identity)
     )
 
     assert ready_revision_id == "rev-1"
-    assert services.bundle_requirement_installs == ["/tmp/bundle"]
+    assert isinstance(warmed_runtime, BundleRuntime)
+    assert warmed_runtime_env == {"SPECIAL_TOKEN": "expected-value"}
+    assert services.bundle_requirement_installs == [services.bundle_path]
     statuses = [call[1]["status"] for call in services.registry_calls[1:]]
     assert statuses == ["preparing", "listening"]
     assert services.registry_calls[-1][1]["runtime_metadata"]["warmed_revision_id"] == "rev-1"
@@ -304,7 +321,7 @@ def test_ensure_endpoint_assignment_ready_rewarms_when_revision_changes():
         _heartbeat(cast(Any, services), "endpoint-worker-1", "idle", runtime_identity=runtime_identity, registration=True)
     )
 
-    ready_revision_id = asyncio.run(
+    ready_revision_id, warmed_runtime, warmed_runtime_env = asyncio.run(
         ensure_endpoint_assignment_ready(
             cast(Any, services),
             "endpoint-worker-1",
@@ -316,8 +333,10 @@ def test_ensure_endpoint_assignment_ready_rewarms_when_revision_changes():
 
     statuses = [call[1]["status"] for call in services.registry_calls[1:]]
     assert ready_revision_id == "rev-2"
+    assert isinstance(warmed_runtime, BundleRuntime)
+    assert warmed_runtime_env == {"SPECIAL_TOKEN": "expected-value"}
     assert statuses == ["preparing", "listening"]
-    assert services.bundle_requirement_installs == ["/tmp/bundle"]
+    assert services.bundle_requirement_installs == [services.bundle_path]
     assert services.registry_calls[1][1]["runtime_metadata"]["warmed_revision_id"] == "rev-1"
     assert services.registry_calls[-1][1]["runtime_metadata"]["warmed_revision_id"] == "rev-2"
 
@@ -330,17 +349,21 @@ def test_ensure_endpoint_assignment_ready_skips_warmup_when_revision_matches():
         _heartbeat(cast(Any, services), "endpoint-worker-1", "idle", runtime_identity=runtime_identity, registration=True)
     )
 
-    ready_revision_id = asyncio.run(
+    warmed_runtime = BundleRuntime(bundle_path=services.bundle_path, program=object(), lm=None)
+    ready_revision_id, next_runtime, warmed_runtime_env = asyncio.run(
         ensure_endpoint_assignment_ready(
             cast(Any, services),
             "endpoint-worker-1",
             "endpoint-1",
             warmed_revision_id="rev-1",
             runtime_identity=runtime_identity,
+            warmed_runtime=warmed_runtime,
         )
     )
 
     assert ready_revision_id == "rev-1"
+    assert next_runtime is warmed_runtime
+    assert warmed_runtime_env == {"SPECIAL_TOKEN": "expected-value"}
     assert services.bundle_requirement_installs == []
     assert [call[1]["status"] for call in services.registry_calls[1:]] == ["listening"]
 
@@ -354,7 +377,7 @@ def test_ensure_endpoint_assignment_ready_marks_worker_failed_when_revision_meta
         _heartbeat(cast(Any, services), "endpoint-worker-1", "idle", runtime_identity=runtime_identity, registration=True)
     )
 
-    ready_revision_id = asyncio.run(
+    ready_revision_id, warmed_runtime, warmed_runtime_env = asyncio.run(
         ensure_endpoint_assignment_ready(
             cast(Any, services),
             "endpoint-worker-1",
@@ -365,6 +388,8 @@ def test_ensure_endpoint_assignment_ready_marks_worker_failed_when_revision_meta
     )
 
     assert ready_revision_id is None
+    assert warmed_runtime is None
+    assert warmed_runtime_env is None
     assert services.bundle_requirement_installs == []
     assert [call[1]["status"] for call in services.registry_calls[1:]] == ["failed"]
     assert services.registry_calls[-1][1]["assigned_endpoint_id"] == "endpoint-1"

@@ -214,7 +214,7 @@ def test_enqueue_endpoint_invocation_succeeds_once_worker_is_listening_on_curren
         return None
 
     async def fake_get_bundle_endpoint(endpoint_id):
-        return {"id": endpoint_id, "module_import_id": "mod-1"}
+        return {"id": endpoint_id, "module_import_id": "mod-1", "deployed_revision_id": "rev-2"}
 
     async def fake_resolve_module_execution_state(module_id):
         return {"module_id": module_id, "bundle_revision_id": "rev-2"}
@@ -263,7 +263,7 @@ def test_enqueue_endpoint_invocation_rejects_worker_with_stale_desired_revision(
         return None
 
     async def fake_get_bundle_endpoint(endpoint_id):
-        return {"id": endpoint_id, "module_import_id": "mod-1"}
+        return {"id": endpoint_id, "module_import_id": "mod-1", "deployed_revision_id": "rev-2"}
 
     async def fake_resolve_module_execution_state(module_id):
         return {"module_id": module_id, "bundle_revision_id": "rev-2"}

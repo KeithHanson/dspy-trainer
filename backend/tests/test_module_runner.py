@@ -2,6 +2,8 @@ import sys
 import logging
 import os
 from pathlib import Path
+import shutil
+import time
 
 import pytest
 
@@ -9,7 +11,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.executor import module_runner
-from app.executor.module_runner import _capture_process_output, invoke_bundle, run_bundle_eval, run_bundle_optimization, stream_bundle
+from app.executor.module_runner import _capture_process_output, invoke_bundle, invoke_warmed_bundle, run_bundle_eval, run_bundle_optimization, stream_bundle, warm_bundle_runtime
 
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "module_bundles"
@@ -199,6 +201,71 @@ def test_stream_bundle_emits_chunks_and_final_payload(tmp_path):
 
     assert events == [{"chunk": 1, "text": "he"}, {"chunk": 2, "text": "llo"}]
     assert result == {"answer": "HELLO"}
+
+
+def test_warm_bundle_runtime_reuses_loaded_program_and_reduces_first_invoke_latency(tmp_path):
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "module.py").write_text(
+        "import time\n"
+        "import dspy\n"
+        "class Program(dspy.Module):\n"
+        "  def __init__(self):\n"
+        "    super().__init__()\n"
+        "    time.sleep(0.2)\n"
+        "  def forward(self, question: str):\n"
+        "    return dspy.Prediction(answer=question.upper())\n"
+        "def build_program():\n"
+        "  return Program()\n",
+        encoding="utf-8",
+    )
+    (bundle / "metric.py").write_text(
+        "def judge_metric(example, prediction):\n"
+        "  return {'score': 1.0, 'rationale': 'ok', 'flags': [], 'raw_response': {}}\n",
+        encoding="utf-8",
+    )
+
+    start_cold = time.perf_counter()
+    cold_result = invoke_bundle(str(bundle), {"question": "hello"})
+    cold_elapsed = time.perf_counter() - start_cold
+
+    warmed_runtime = warm_bundle_runtime(str(bundle))
+    start_warm = time.perf_counter()
+    warm_result = invoke_warmed_bundle(warmed_runtime, {"question": "hello"})
+    warm_elapsed = time.perf_counter() - start_warm
+
+    assert cold_result == {"answer": "HELLO"}
+    assert warm_result == {"answer": "HELLO"}
+    assert cold_elapsed >= 0.18
+    assert warm_elapsed < 0.05
+
+
+def test_invoke_bundle_loads_updated_local_imports_without_process_restart(tmp_path):
+    bundle_v1 = tmp_path / "bundle-v1"
+    bundle_v1.mkdir()
+    (bundle_v1 / "helper.py").write_text("VALUE = 'OLD'\n", encoding="utf-8")
+    (bundle_v1 / "module.py").write_text(
+        "import dspy\n"
+        "from helper import VALUE\n"
+        "class Program(dspy.Module):\n"
+        "  def forward(self, question: str):\n"
+        "    return dspy.Prediction(answer=f'{VALUE}:{question}')\n"
+        "def build_program():\n"
+        "  return Program()\n",
+        encoding="utf-8",
+    )
+    (bundle_v1 / "metric.py").write_text(
+        "def judge_metric(example, prediction):\n"
+        "  return {'score': 1.0, 'rationale': 'ok', 'flags': [], 'raw_response': {}}\n",
+        encoding="utf-8",
+    )
+
+    bundle_v2 = tmp_path / "bundle-v2"
+    shutil.copytree(bundle_v1, bundle_v2)
+    (bundle_v2 / "helper.py").write_text("VALUE = 'NEW'\n", encoding="utf-8")
+
+    assert invoke_bundle(str(bundle_v1), {"question": "hi"}) == {"answer": "OLD:hi"}
+    assert invoke_bundle(str(bundle_v2), {"question": "hi"}) == {"answer": "NEW:hi"}
 
 
 def test_capture_process_output_captures_named_dspy_logger():

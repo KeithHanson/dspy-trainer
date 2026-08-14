@@ -11,6 +11,7 @@ import uuid
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from app.config import get_settings
+from app.executor.module_runner import BundleRuntime, warm_bundle_runtime
 from app.services import AppServices
 
 
@@ -175,6 +176,8 @@ async def process_endpoint_job(
     endpoint_id: str,
     revision_id: str | None = None,
     runtime_identity: dict[str, object] | None = None,
+    warmed_runtime: BundleRuntime | None = None,
+    runtime_env: dict[str, str] | None = None,
 ) -> None:
     payload = json.loads(raw_payload)
     invocation_id = str(payload.get("invocation_id") or "").strip()
@@ -211,6 +214,8 @@ async def process_endpoint_job(
             payload.get("input_payload") if isinstance(payload.get("input_payload"), dict) else {},
             worker_id,
             stream=bool(payload.get("stream", False)),
+            warmed_runtime=warmed_runtime,
+            runtime_env_override=runtime_env,
         )
     finally:
         if heartbeat_task is not None:
@@ -234,12 +239,13 @@ async def ensure_endpoint_assignment_ready(
     endpoint_id: str,
     warmed_revision_id: str | None = None,
     runtime_identity: dict[str, object] | None = None,
-) -> str | None:
+    warmed_runtime: BundleRuntime | None = None,
+) -> tuple[str | None, BundleRuntime | None, dict[str, str] | None]:
     execution_state = await services.resolve_bundle_endpoint_execution_state(endpoint_id)
     if execution_state is None:
         logger.error("Assigned endpoint module not found: %s", endpoint_id)
         await _heartbeat(services, worker_id, "idle", runtime_identity=runtime_identity)
-        return None
+        return None, None, None
     desired_revision_id = str(execution_state.get("bundle_revision_id") or "").strip() or None
     if desired_revision_id is None:
         logger.error("Assigned endpoint revision metadata missing: %s", endpoint_id)
@@ -253,9 +259,13 @@ async def ensure_endpoint_assignment_ready(
             runtime_identity=runtime_identity,
             last_error="revision_metadata_missing",
         )
-        return None
+        return None, None, None
+    runtime_env = await services.get_module_runtime_environment(str(execution_state.get("module_id") or ""))
+    endpoint = await services.get_bundle_endpoint(endpoint_id)
+    lm_profile = await services._get_lm_profile_record(str(endpoint["lm_profile_id"]), include_secret=True) if endpoint and endpoint.get("lm_profile_id") else None
     try:
-        if warmed_revision_id != desired_revision_id:
+        next_runtime = warmed_runtime
+        if warmed_revision_id != desired_revision_id or warmed_runtime is None:
             await _heartbeat(
                 services,
                 worker_id,
@@ -266,6 +276,12 @@ async def ensure_endpoint_assignment_ready(
                 runtime_identity=runtime_identity,
             )
             await services.ensure_bundle_requirements_installed(execution_state["bundle_path"])
+            next_runtime = await asyncio.to_thread(
+                warm_bundle_runtime,
+                execution_state["bundle_path"],
+                lm_profile,
+                runtime_env,
+            )
         await _heartbeat(
             services,
             worker_id,
@@ -275,7 +291,7 @@ async def ensure_endpoint_assignment_ready(
             warmed_revision_id=desired_revision_id,
             runtime_identity=runtime_identity,
         )
-        return desired_revision_id
+        return desired_revision_id, next_runtime, runtime_env
     except Exception:
         logger.exception("Endpoint worker warmup failed for endpoint %s", endpoint_id)
         await _heartbeat(
@@ -288,7 +304,7 @@ async def ensure_endpoint_assignment_ready(
             runtime_identity=runtime_identity,
             last_error="warmup_failed",
         )
-        return None
+        return None, None, None
 
 
 async def run_endpoint_worker() -> None:
@@ -309,6 +325,8 @@ async def run_endpoint_worker() -> None:
     logger.info("Endpoint worker runtime instance id: %s", runtime_identity.get("runtime_instance_id"))
     assigned_endpoint_id = ""
     warmed_revision_id: str | None = None
+    warmed_runtime: BundleRuntime | None = None
+    warmed_runtime_env: dict[str, str] | None = None
     try:
         while True:
             assignment = await services.get_endpoint_worker_assignment(worker_id)
@@ -316,19 +334,24 @@ async def run_endpoint_worker() -> None:
             if not endpoint_id:
                 assigned_endpoint_id = ""
                 warmed_revision_id = None
+                warmed_runtime = None
+                warmed_runtime_env = None
                 await _heartbeat(services, worker_id, "idle", runtime_identity=runtime_identity)
                 await asyncio.sleep(2)
                 continue
-            ready_revision_id = await ensure_endpoint_assignment_ready(
+            ready_revision_id, warmed_runtime, warmed_runtime_env = await ensure_endpoint_assignment_ready(
                 services,
                 worker_id,
                 endpoint_id,
                 warmed_revision_id if endpoint_id == assigned_endpoint_id else None,
                 runtime_identity=runtime_identity,
+                warmed_runtime=warmed_runtime if endpoint_id == assigned_endpoint_id else None,
             )
             if ready_revision_id is None:
                 if endpoint_id != assigned_endpoint_id:
                     warmed_revision_id = None
+                    warmed_runtime = None
+                    warmed_runtime_env = None
                 await asyncio.sleep(2)
                 continue
             assigned_endpoint_id = endpoint_id
@@ -348,6 +371,8 @@ async def run_endpoint_worker() -> None:
                     endpoint_id,
                     ready_revision_id,
                     runtime_identity=runtime_identity,
+                    warmed_runtime=warmed_runtime,
+                    runtime_env=warmed_runtime_env,
                 )
             except Exception:
                 logger.exception("Endpoint worker job processing failed")
