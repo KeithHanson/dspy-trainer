@@ -268,6 +268,46 @@ def test_invoke_bundle_loads_updated_local_imports_without_process_restart(tmp_p
     assert invoke_bundle(str(bundle_v2), {"question": "hi"}) == {"answer": "NEW:hi"}
 
 
+def test_warm_bundle_runtime_reloads_forward_signature_after_in_place_bundle_update(tmp_path):
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "metric.py").write_text(
+        "def judge_metric(example, prediction):\n"
+        "  return {'score': 1.0, 'rationale': 'ok', 'flags': [], 'raw_response': {}}\n",
+        encoding="utf-8",
+    )
+    (bundle / "module.py").write_text(
+        "import dspy\n"
+        "class Program(dspy.Module):\n"
+        "  def forward(self, question: str):\n"
+        "    return dspy.Prediction(answer=question.upper())\n"
+        "def build_program():\n"
+        "  return Program()\n",
+        encoding="utf-8",
+    )
+
+    runtime_v1 = warm_bundle_runtime(str(bundle))
+    runtime_v1_module_name = runtime_v1.program.__class__.__module__
+    assert invoke_warmed_bundle(runtime_v1, {"question": "hello"}) == {"answer": "HELLO"}
+
+    (bundle / "module.py").write_text(
+        "import dspy\n"
+        "class Program(dspy.Module):\n"
+        "  def forward(self, prompt: str):\n"
+        "    return dspy.Prediction(answer=prompt.lower())\n"
+        "def build_program():\n"
+        "  return Program()\n",
+        encoding="utf-8",
+    )
+
+    runtime_v2 = warm_bundle_runtime(str(bundle))
+
+    assert runtime_v2.program.__class__.__module__ != runtime_v1_module_name
+    assert invoke_warmed_bundle(runtime_v2, {"prompt": "HELLO"}) == {"answer": "hello"}
+    with pytest.raises(TypeError, match="unexpected keyword argument 'question'"):
+        invoke_warmed_bundle(runtime_v2, {"question": "hello"})
+
+
 def test_capture_process_output_captures_named_dspy_logger():
     root_logger = logging.getLogger()
     logger = logging.getLogger("dspy.teleprompt.gepa.gepa")

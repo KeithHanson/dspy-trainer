@@ -5,12 +5,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "module_bundles"
 
-from app.executor.module_runner import BundleRuntime
+from app.executor.module_runner import BundleRuntime, invoke_warmed_bundle
 from worker import process_job
 from endpoint_worker import (
     _build_runtime_identity,
@@ -339,6 +340,71 @@ def test_ensure_endpoint_assignment_ready_rewarms_when_revision_changes():
     assert services.bundle_requirement_installs == [services.bundle_path]
     assert services.registry_calls[1][1]["runtime_metadata"]["warmed_revision_id"] == "rev-1"
     assert services.registry_calls[-1][1]["runtime_metadata"]["warmed_revision_id"] == "rev-2"
+
+
+def test_ensure_endpoint_assignment_ready_reloads_changed_forward_signature_without_restart(tmp_path):
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "metric.py").write_text(
+        "def judge_metric(example, prediction):\n"
+        "  return {'score': 1.0, 'rationale': 'ok', 'flags': [], 'raw_response': {}}\n",
+        encoding="utf-8",
+    )
+    (bundle / "module.py").write_text(
+        "import dspy\n"
+        "class Program(dspy.Module):\n"
+        "  def forward(self, question: str):\n"
+        "    return dspy.Prediction(answer=question.upper())\n"
+        "def build_program():\n"
+        "  return Program()\n",
+        encoding="utf-8",
+    )
+
+    services = FakeServices()
+    services.postgres_pool = object()
+    services.bundle_path = str(bundle)
+    runtime_identity = _build_runtime_identity(explicit_worker_id="endpoint-worker-1")
+    asyncio.run(
+        _heartbeat(cast(Any, services), "endpoint-worker-1", "idle", runtime_identity=runtime_identity, registration=True)
+    )
+
+    ready_revision_id_v1, warmed_runtime_v1, _ = asyncio.run(
+        ensure_endpoint_assignment_ready(cast(Any, services), "endpoint-worker-1", "endpoint-1", runtime_identity=runtime_identity)
+    )
+
+    assert ready_revision_id_v1 == "rev-1"
+    assert isinstance(warmed_runtime_v1, BundleRuntime)
+    runtime_v1_module_name = warmed_runtime_v1.program.__class__.__module__
+    assert invoke_warmed_bundle(warmed_runtime_v1, {"question": "hello"}) == {"answer": "HELLO"}
+
+    services.bundle_revision_id = "rev-2"
+    (bundle / "module.py").write_text(
+        "import dspy\n"
+        "class Program(dspy.Module):\n"
+        "  def forward(self, prompt: str):\n"
+        "    return dspy.Prediction(answer=prompt.lower())\n"
+        "def build_program():\n"
+        "  return Program()\n",
+        encoding="utf-8",
+    )
+
+    ready_revision_id_v2, warmed_runtime_v2, _ = asyncio.run(
+        ensure_endpoint_assignment_ready(
+            cast(Any, services),
+            "endpoint-worker-1",
+            "endpoint-1",
+            warmed_revision_id="rev-1",
+            runtime_identity=runtime_identity,
+            warmed_runtime=warmed_runtime_v1,
+        )
+    )
+
+    assert ready_revision_id_v2 == "rev-2"
+    assert isinstance(warmed_runtime_v2, BundleRuntime)
+    assert warmed_runtime_v2.program.__class__.__module__ != runtime_v1_module_name
+    assert invoke_warmed_bundle(warmed_runtime_v2, {"prompt": "HELLO"}) == {"answer": "hello"}
+    with pytest.raises(TypeError, match="unexpected keyword argument 'question'"):
+        invoke_warmed_bundle(warmed_runtime_v2, {"question": "hello"})
 
 
 def test_ensure_endpoint_assignment_ready_skips_warmup_when_revision_matches():
