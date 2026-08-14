@@ -173,6 +173,22 @@ def _json_ready(value: Any) -> Any:
     return json.loads(json.dumps(value, default=str))
 
 
+def _format_log_value(value: Any) -> str:
+    normalized = _json_ready(value)
+    if isinstance(normalized, str):
+        if normalized and re.fullmatch(r"[A-Za-z0-9_./:@%+=,-]+", normalized):
+            return normalized
+        return json.dumps(normalized)
+    return json.dumps(normalized, sort_keys=True)
+
+
+def _log_structured_info(event: str, **fields: Any) -> None:
+    segments = [f"event={event}"]
+    for key in sorted(fields):
+        segments.append(f"{key}={_format_log_value(fields[key])}")
+    logger.info(" ".join(segments))
+
+
 def _normalize_bundle_endpoint_name(value: Any) -> str:
     name = str(value or "").strip()
     if not name:
@@ -3433,18 +3449,77 @@ class AppServices:
             )
         return await self.get_bundle_endpoint(endpoint_id)
 
-    async def _run_subprocess(self, *argv: str, cwd: str | Path | None = None) -> tuple[str, str]:
+    async def _run_subprocess(
+        self,
+        *argv: str,
+        cwd: str | Path | None = None,
+        log_event_prefix: str | None = None,
+        log_fields: dict[str, Any] | None = None,
+    ) -> tuple[str, str]:
+        fields = dict(log_fields or {})
+        command = [str(arg) for arg in argv]
+        command_cwd = str(cwd) if cwd is not None else None
+        if log_event_prefix:
+            _log_structured_info(
+                f"{log_event_prefix}_started",
+                argv=command,
+                cwd=command_cwd,
+                **fields,
+            )
         process = await asyncio.create_subprocess_exec(
             *argv,
-            cwd=str(cwd) if cwd is not None else None,
+            cwd=command_cwd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout_bytes, stderr_bytes = await process.communicate()
-        stdout = stdout_bytes.decode("utf-8", errors="ignore").strip()
-        stderr = stderr_bytes.decode("utf-8", errors="ignore").strip()
-        if process.returncode != 0:
+
+        async def _read_stream(stream: asyncio.StreamReader | None, stream_name: str) -> str:
+            if stream is None:
+                return ""
+            chunks: list[str] = []
+            while True:
+                raw_line = await stream.readline()
+                if not raw_line:
+                    break
+                decoded_line = raw_line.decode("utf-8", errors="ignore")
+                chunks.append(decoded_line)
+                line = decoded_line.rstrip("\r\n")
+                if log_event_prefix:
+                    _log_structured_info(
+                        f"{log_event_prefix}_output",
+                        stream=stream_name,
+                        line=line,
+                        **fields,
+                    )
+            return "".join(chunks)
+
+        stdout_text, stderr_text = await asyncio.gather(
+            _read_stream(process.stdout, "stdout"),
+            _read_stream(process.stderr, "stderr"),
+        )
+        returncode = await process.wait()
+        stdout = stdout_text.strip()
+        stderr = stderr_text.strip()
+        if returncode != 0:
+            if log_event_prefix:
+                _log_structured_info(
+                    f"{log_event_prefix}_failed",
+                    argv=command,
+                    cwd=command_cwd,
+                    returncode=returncode,
+                    stderr=stderr,
+                    stdout=stdout,
+                    **fields,
+                )
             raise RuntimeError(stderr or stdout or f"command failed: {' '.join(argv)}")
+        if log_event_prefix:
+            _log_structured_info(
+                f"{log_event_prefix}_completed",
+                argv=command,
+                cwd=command_cwd,
+                returncode=returncode,
+                **fields,
+            )
         return stdout, stderr
 
     def _prepared_bundle_image_repository(self, endpoint_id: str) -> str:
@@ -3459,7 +3534,7 @@ class AppServices:
         digest_component = _sanitize_docker_image_component(digest, fallback="digest")[:24]
         return f"rev-{revision_component}-prep-{digest_component}"
 
-    async def _inspect_local_image_id(self, image_ref: str) -> str | None:
+    async def _inspect_local_image_id(self, image_ref: str, *, endpoint_id: str | None = None, revision_id: str | None = None) -> str | None:
         try:
             stdout, _ = await self._run_subprocess(
                 str(self.settings.docker_executable or "docker"),
@@ -3468,6 +3543,13 @@ class AppServices:
                 image_ref,
                 "--format",
                 "{{.Id}}",
+                log_event_prefix="endpoint_rollout_subprocess",
+                log_fields={
+                    "endpoint_id": endpoint_id,
+                    "image_ref": image_ref,
+                    "revision_id": revision_id,
+                    "subprocess_name": "docker_image_inspect",
+                },
             )
         except RuntimeError:
             return None
@@ -3485,14 +3567,14 @@ class AppServices:
     ) -> dict[str, Any]:
         existing_ref = _clean_optional_text(existing_image_ref)
         existing_digest = _clean_optional_text(existing_image_digest)
-        if existing_ref and existing_digest and await self._inspect_local_image_id(existing_ref) == existing_digest:
-            logger.info(
-                "prepared_bundle_image_reused endpoint_id=%s revision_id=%s digest=%s image_ref=%s image_digest=%s",
-                endpoint_id,
-                revision_id,
-                digest,
-                existing_ref,
-                existing_digest,
+        if existing_ref and existing_digest and await self._inspect_local_image_id(existing_ref, endpoint_id=endpoint_id, revision_id=revision_id) == existing_digest:
+            _log_structured_info(
+                "endpoint_rollout_image_prepare_reused",
+                digest=digest,
+                endpoint_id=endpoint_id,
+                image_digest=existing_digest,
+                image_ref=existing_ref,
+                revision_id=revision_id,
             )
             return {"image_ref": existing_ref, "image_digest": existing_digest, "reused": True}
 
@@ -3523,30 +3605,48 @@ class AppServices:
                 ]
             )
             (context_root / "Dockerfile").write_text("\n".join(dockerfile_lines) + "\n", encoding="utf-8")
-            logger.info(
-                "prepared_bundle_image_build_started endpoint_id=%s revision_id=%s digest=%s image_ref=%s",
-                endpoint_id,
-                revision_id,
-                digest,
-                image_ref,
+            _log_structured_info(
+                "endpoint_rollout_image_build_started",
+                digest=digest,
+                endpoint_id=endpoint_id,
+                image_ref=image_ref,
+                revision_id=revision_id,
             )
-            await self._run_subprocess(
-                str(self.settings.docker_executable or "docker"),
-                "build",
-                "--tag",
-                image_ref,
-                str(context_root),
-            )
-        image_digest = await self._inspect_local_image_id(image_ref)
+            try:
+                await self._run_subprocess(
+                    str(self.settings.docker_executable or "docker"),
+                    "build",
+                    "--tag",
+                    image_ref,
+                    str(context_root),
+                    log_event_prefix="endpoint_rollout_subprocess",
+                    log_fields={
+                        "digest": digest,
+                        "endpoint_id": endpoint_id,
+                        "image_ref": image_ref,
+                        "revision_id": revision_id,
+                        "subprocess_name": "docker_build",
+                    },
+                )
+            except Exception:
+                _log_structured_info(
+                    "endpoint_rollout_image_build_failed",
+                    digest=digest,
+                    endpoint_id=endpoint_id,
+                    image_ref=image_ref,
+                    revision_id=revision_id,
+                )
+                raise
+        image_digest = await self._inspect_local_image_id(image_ref, endpoint_id=endpoint_id, revision_id=revision_id)
         if image_digest is None:
             raise RuntimeError(f"prepared image digest unavailable for {image_ref}")
-        logger.info(
-            "prepared_bundle_image_build_succeeded endpoint_id=%s revision_id=%s digest=%s image_ref=%s image_digest=%s",
-            endpoint_id,
-            revision_id,
-            digest,
-            image_ref,
-            image_digest,
+        _log_structured_info(
+            "endpoint_rollout_image_build_completed",
+            digest=digest,
+            endpoint_id=endpoint_id,
+            image_digest=image_digest,
+            image_ref=image_ref,
+            revision_id=revision_id,
         )
         return {"image_ref": image_ref, "image_digest": image_digest, "reused": False}
 
@@ -3556,55 +3656,84 @@ class AppServices:
         endpoint = await self.get_bundle_endpoint(endpoint_id)
         if endpoint is None:
             return None
-        module_state = await self.resolve_module_execution_state(str(endpoint["module_import_id"]))
-        if module_state is None:
-            raise ValueError("module execution state not found")
-        bundle_path = str(module_state.get("bundle_path") or "").strip()
-        revision_id = str(module_state.get("bundle_revision_id") or "").strip() or None
-        if not bundle_path or revision_id is None:
-            raise ValueError("module revision metadata missing")
-        await self.ensure_bundle_requirements_installed(bundle_path)
-        digest = inspect_bundle_preparation(bundle_path).digest
-        image_metadata = await self._build_prepared_bundle_image(
+        _log_structured_info(
+            "endpoint_rollout_rebuild_started",
             endpoint_id=endpoint_id,
-            bundle_path=bundle_path,
-            revision_id=revision_id,
-            digest=digest,
-            existing_image_ref=endpoint.get("prepared_image_ref") if str(endpoint.get("prepared_revision_id") or "").strip() == revision_id and str(endpoint.get("prepared_digest") or "").strip() == digest else None,
-            existing_image_digest=endpoint.get("prepared_image_digest") if str(endpoint.get("prepared_revision_id") or "").strip() == revision_id and str(endpoint.get("prepared_digest") or "").strip() == digest else None,
+            module_import_id=endpoint.get("module_import_id"),
         )
-        now = datetime.now(timezone.utc)
-        async with self.postgres_pool.acquire() as conn:
-            await conn.execute(
-                """
-                update bundle_endpoints
-                set prepared_revision_id = $2,
-                    prepared_digest = $3,
-                    prepared_image_ref = $4,
-                    prepared_image_digest = $5,
-                    prepared_at = $6,
-                    updated_at = $6
-                where id = $1
-                """,
-                endpoint_id,
-                revision_id,
-                digest,
-                image_metadata["image_ref"],
-                image_metadata["image_digest"],
-                now,
+        try:
+            module_state = await self.resolve_module_execution_state(str(endpoint["module_import_id"]))
+            if module_state is None:
+                raise ValueError("module execution state not found")
+            bundle_path = str(module_state.get("bundle_path") or "").strip()
+            revision_id = str(module_state.get("bundle_revision_id") or "").strip() or None
+            if not bundle_path or revision_id is None:
+                raise ValueError("module revision metadata missing")
+            await self.ensure_bundle_requirements_installed(bundle_path)
+            digest = inspect_bundle_preparation(bundle_path).digest
+            _log_structured_info(
+                "endpoint_rollout_rebuild_requirements_ready",
+                bundle_path=bundle_path,
+                digest=digest,
+                endpoint_id=endpoint_id,
+                revision_id=revision_id,
             )
-        payload = await self._append_bundle_endpoint_rollout_history(
-            endpoint_id,
-            action="rebuild",
-            metadata={
-                "prepared_revision_id": revision_id,
-                "prepared_digest": digest,
-                "prepared_image_ref": image_metadata["image_ref"],
-                "prepared_image_digest": image_metadata["image_digest"],
-                "prepared_image_reused": bool(image_metadata.get("reused")),
-            },
-        )
-        return payload
+            image_metadata = await self._build_prepared_bundle_image(
+                endpoint_id=endpoint_id,
+                bundle_path=bundle_path,
+                revision_id=revision_id,
+                digest=digest,
+                existing_image_ref=endpoint.get("prepared_image_ref") if str(endpoint.get("prepared_revision_id") or "").strip() == revision_id and str(endpoint.get("prepared_digest") or "").strip() == digest else None,
+                existing_image_digest=endpoint.get("prepared_image_digest") if str(endpoint.get("prepared_revision_id") or "").strip() == revision_id and str(endpoint.get("prepared_digest") or "").strip() == digest else None,
+            )
+            now = datetime.now(timezone.utc)
+            async with self.postgres_pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    update bundle_endpoints
+                    set prepared_revision_id = $2,
+                        prepared_digest = $3,
+                        prepared_image_ref = $4,
+                        prepared_image_digest = $5,
+                        prepared_at = $6,
+                        updated_at = $6
+                    where id = $1
+                    """,
+                    endpoint_id,
+                    revision_id,
+                    digest,
+                    image_metadata["image_ref"],
+                    image_metadata["image_digest"],
+                    now,
+                )
+            payload = await self._append_bundle_endpoint_rollout_history(
+                endpoint_id,
+                action="rebuild",
+                metadata={
+                    "prepared_revision_id": revision_id,
+                    "prepared_digest": digest,
+                    "prepared_image_ref": image_metadata["image_ref"],
+                    "prepared_image_digest": image_metadata["image_digest"],
+                    "prepared_image_reused": bool(image_metadata.get("reused")),
+                },
+            )
+            _log_structured_info(
+                "endpoint_rollout_rebuild_completed",
+                digest=digest,
+                endpoint_id=endpoint_id,
+                prepared_image_digest=image_metadata["image_digest"],
+                prepared_image_ref=image_metadata["image_ref"],
+                prepared_image_reused=bool(image_metadata.get("reused")),
+                prepared_revision_id=revision_id,
+            )
+            return payload
+        except Exception as exc:
+            _log_structured_info(
+                "endpoint_rollout_rebuild_failed",
+                endpoint_id=endpoint_id,
+                error=str(exc),
+            )
+            raise
 
     async def deploy_bundle_endpoint(self, endpoint_id: str) -> dict[str, Any] | None:
         if self.postgres_pool is None:
@@ -3612,78 +3741,124 @@ class AppServices:
         endpoint = await self.get_bundle_endpoint(endpoint_id)
         if endpoint is None:
             return None
-        current_revision_id = str(endpoint.get("current_module_revision_id") or "").strip() or None
-        prepared_revision_id = str(endpoint.get("prepared_revision_id") or "").strip() or None
-        prepared_digest = str(endpoint.get("prepared_digest") or "").strip() or None
-        prepared_image_ref = str(endpoint.get("prepared_image_ref") or "").strip() or None
-        prepared_image_digest = str(endpoint.get("prepared_image_digest") or "").strip() or None
-        if current_revision_id is None:
-            raise ValueError("module revision metadata missing")
-        if prepared_revision_id != current_revision_id or not prepared_digest or not prepared_image_ref or not prepared_image_digest:
-            raise ValueError("rebuild required before deploy")
-
-        module_state = await self.resolve_module_execution_state(str(endpoint["module_import_id"]))
-        if module_state is None:
-            raise ValueError("module execution state not found")
-        bundle_path = str(module_state.get("bundle_path") or "").strip()
-        module_revision_id = str(module_state.get("bundle_revision_id") or "").strip() or None
-        if not bundle_path or module_revision_id is None:
-            raise ValueError("module revision metadata missing")
-        if module_revision_id != current_revision_id:
-            raise ValueError("module revision metadata changed during deploy")
-        current_digest = inspect_bundle_preparation(bundle_path).digest
-        if prepared_digest != current_digest:
-            raise ValueError("rebuild required before deploy")
-
-        now = datetime.now(timezone.utc)
-        async with self.postgres_pool.acquire() as conn:
-            await conn.execute(
-                """
-                update bundle_endpoints
-                set deployed_revision_id = $2,
-                    deployed_digest = $3,
-                    deployed_image_ref = $4,
-                    deployed_image_digest = $5,
-                    deployed_at = $6,
-                    updated_at = $6
-                where id = $1
-                """,
-                endpoint_id,
-                prepared_revision_id,
-                prepared_digest,
-                prepared_image_ref,
-                prepared_image_digest,
-                now,
-            )
-        payload = await self._append_bundle_endpoint_rollout_history(
-            endpoint_id,
-            action="deploy",
-            metadata={
-                "deployed_revision_id": prepared_revision_id,
-                "deployed_digest": prepared_digest,
-                "deployed_image_ref": prepared_image_ref,
-                "deployed_image_digest": prepared_image_digest,
-            },
+        _log_structured_info(
+            "endpoint_rollout_deploy_started",
+            current_revision_id=endpoint.get("current_module_revision_id"),
+            endpoint_id=endpoint_id,
+            prepared_digest=endpoint.get("prepared_digest"),
+            prepared_image_ref=endpoint.get("prepared_image_ref"),
+            prepared_revision_id=endpoint.get("prepared_revision_id"),
         )
-        return payload
+        try:
+            current_revision_id = str(endpoint.get("current_module_revision_id") or "").strip() or None
+            prepared_revision_id = str(endpoint.get("prepared_revision_id") or "").strip() or None
+            prepared_digest = str(endpoint.get("prepared_digest") or "").strip() or None
+            prepared_image_ref = str(endpoint.get("prepared_image_ref") or "").strip() or None
+            prepared_image_digest = str(endpoint.get("prepared_image_digest") or "").strip() or None
+            if current_revision_id is None:
+                raise ValueError("module revision metadata missing")
+            if prepared_revision_id != current_revision_id or not prepared_digest or not prepared_image_ref or not prepared_image_digest:
+                raise ValueError("rebuild required before deploy")
+
+            module_state = await self.resolve_module_execution_state(str(endpoint["module_import_id"]))
+            if module_state is None:
+                raise ValueError("module execution state not found")
+            bundle_path = str(module_state.get("bundle_path") or "").strip()
+            module_revision_id = str(module_state.get("bundle_revision_id") or "").strip() or None
+            if not bundle_path or module_revision_id is None:
+                raise ValueError("module revision metadata missing")
+            if module_revision_id != current_revision_id:
+                raise ValueError("module revision metadata changed during deploy")
+            current_digest = inspect_bundle_preparation(bundle_path).digest
+            if prepared_digest != current_digest:
+                raise ValueError("rebuild required before deploy")
+
+            now = datetime.now(timezone.utc)
+            async with self.postgres_pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    update bundle_endpoints
+                    set deployed_revision_id = $2,
+                        deployed_digest = $3,
+                        deployed_image_ref = $4,
+                        deployed_image_digest = $5,
+                        deployed_at = $6,
+                        updated_at = $6
+                    where id = $1
+                    """,
+                    endpoint_id,
+                    prepared_revision_id,
+                    prepared_digest,
+                    prepared_image_ref,
+                    prepared_image_digest,
+                    now,
+                )
+            payload = await self._append_bundle_endpoint_rollout_history(
+                endpoint_id,
+                action="deploy",
+                metadata={
+                    "deployed_revision_id": prepared_revision_id,
+                    "deployed_digest": prepared_digest,
+                    "deployed_image_ref": prepared_image_ref,
+                    "deployed_image_digest": prepared_image_digest,
+                },
+            )
+            _log_structured_info(
+                "endpoint_rollout_deploy_completed",
+                deployed_digest=prepared_digest,
+                deployed_image_digest=prepared_image_digest,
+                deployed_image_ref=prepared_image_ref,
+                deployed_revision_id=prepared_revision_id,
+                endpoint_id=endpoint_id,
+            )
+            return payload
+        except Exception as exc:
+            _log_structured_info(
+                "endpoint_rollout_deploy_failed",
+                endpoint_id=endpoint_id,
+                error=str(exc),
+            )
+            raise
 
     async def restart_bundle_endpoint_runtime(self, endpoint_id: str) -> dict[str, Any] | None:
         endpoint = await self.get_bundle_endpoint(endpoint_id)
         if endpoint is None:
             return None
         deployed_revision_id = str(endpoint.get("deployed_revision_id") or "").strip() or None
-        if deployed_revision_id is None:
-            raise ValueError("deploy required before restart-runtime")
         next_restart_generation = int(endpoint.get("restart_generation") or 0) + 1
-        return await self._append_bundle_endpoint_rollout_history(
-            endpoint_id,
-            action="restart-runtime",
-            metadata={
-                "restart_generation": next_restart_generation,
-                "deployed_revision_id": deployed_revision_id,
-            },
-            restart_generation=next_restart_generation,
+        _log_structured_info(
+            "endpoint_rollout_restart_runtime_started",
+            deployed_revision_id=deployed_revision_id,
+            endpoint_id=endpoint_id,
+            next_restart_generation=next_restart_generation,
         )
+        try:
+            if deployed_revision_id is None:
+                raise ValueError("deploy required before restart-runtime")
+            payload = await self._append_bundle_endpoint_rollout_history(
+                endpoint_id,
+                action="restart-runtime",
+                metadata={
+                    "restart_generation": next_restart_generation,
+                    "deployed_revision_id": deployed_revision_id,
+                },
+                restart_generation=next_restart_generation,
+            )
+            _log_structured_info(
+                "endpoint_rollout_restart_runtime_completed",
+                deployed_revision_id=deployed_revision_id,
+                endpoint_id=endpoint_id,
+                restart_generation=next_restart_generation,
+            )
+            return payload
+        except Exception as exc:
+            _log_structured_info(
+                "endpoint_rollout_restart_runtime_failed",
+                endpoint_id=endpoint_id,
+                error=str(exc),
+                next_restart_generation=next_restart_generation,
+            )
+            raise
 
     async def _get_endpoint_desired_runtime_state(self, endpoint_id: str) -> tuple[str | None, int]:
         endpoint = await self.get_bundle_endpoint(endpoint_id)

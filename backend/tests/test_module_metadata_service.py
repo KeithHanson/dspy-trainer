@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import sys
 from decimal import Decimal
@@ -417,7 +418,7 @@ def test_build_bundle_endpoint_payload_includes_rollout_state_metadata():
     assert payload["rollout_events"][0]["action"] == "restart-runtime"
 
 
-def test_bundle_endpoint_rollout_state_persists_rebuild_deploy_and_restart(monkeypatch, tmp_path):
+def test_bundle_endpoint_rollout_state_persists_rebuild_deploy_and_restart(monkeypatch, tmp_path, caplog):
     services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
     bundle_root = tmp_path / "bundle"
     bundle_root.mkdir()
@@ -493,9 +494,10 @@ def test_bundle_endpoint_rollout_state_persists_rebuild_deploy_and_restart(monke
 
     monkeypatch.setattr(services, "_build_prepared_bundle_image", fake_build_prepared_bundle_image)
 
-    rebuilt = asyncio.run(services.rebuild_bundle_endpoint("endpoint-1"))
-    deployed = asyncio.run(services.deploy_bundle_endpoint("endpoint-1"))
-    restarted = asyncio.run(services.restart_bundle_endpoint_runtime("endpoint-1"))
+    with caplog.at_level(logging.INFO):
+        rebuilt = asyncio.run(services.rebuild_bundle_endpoint("endpoint-1"))
+        deployed = asyncio.run(services.deploy_bundle_endpoint("endpoint-1"))
+        restarted = asyncio.run(services.restart_bundle_endpoint_runtime("endpoint-1"))
 
     assert rebuilt is not None
     assert rebuilt["prepared_revision_id"] == "rev-1"
@@ -517,6 +519,13 @@ def test_bundle_endpoint_rollout_state_persists_rebuild_deploy_and_restart(monke
     assert restarted["rollout_state"]["last_action"] == "restart-runtime"
     assert [item["action"] for item in restarted["rollout_operations"]] == ["rebuild", "deploy", "restart-runtime"]
     assert [item["action"] for item in restarted["rollout_events"]] == ["rebuild", "deploy", "restart-runtime"]
+    assert "event=endpoint_rollout_rebuild_started" in caplog.text
+    assert "event=endpoint_rollout_rebuild_completed" in caplog.text
+    assert "event=endpoint_rollout_deploy_started" in caplog.text
+    assert "event=endpoint_rollout_deploy_completed" in caplog.text
+    assert "event=endpoint_rollout_restart_runtime_started" in caplog.text
+    assert "event=endpoint_rollout_restart_runtime_completed" in caplog.text
+    assert "endpoint_id=endpoint-1" in caplog.text
 
 
 def test_deploy_bundle_endpoint_requires_valid_prepared_image_metadata(tmp_path, monkeypatch):
@@ -1174,9 +1183,9 @@ def test_build_prepared_bundle_image_builds_revision_and_digest_tagged_image(tmp
     calls: list[tuple[str, ...]] = []
     dockerfile_text = ""
 
-    async def fake_run_subprocess(*argv, cwd=None):
+    async def fake_run_subprocess(*argv, cwd=None, log_event_prefix=None, log_fields=None):
         nonlocal dockerfile_text
-        del cwd
+        del cwd, log_event_prefix, log_fields
         calls.append(tuple(argv))
         if argv[0:2] == ("docker", "build"):
             dockerfile_text = (Path(argv[4]) / "Dockerfile").read_text(encoding="utf-8")
@@ -1214,8 +1223,8 @@ def test_build_prepared_bundle_image_reuses_existing_matching_local_image(tmp_pa
     services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
     calls: list[tuple[str, ...]] = []
 
-    async def fake_run_subprocess(*argv, cwd=None):
-        del cwd
+    async def fake_run_subprocess(*argv, cwd=None, log_event_prefix=None, log_fields=None):
+        del cwd, log_event_prefix, log_fields
         calls.append(tuple(argv))
         return ("sha256:prepared", "")
 
@@ -1240,6 +1249,35 @@ def test_build_prepared_bundle_image_reuses_existing_matching_local_image(tmp_pa
     assert calls == [
         ("docker", "image", "inspect", "registry.test/prepared/endpoint-1:rev-1", "--format", "{{.Id}}")
     ]
+
+
+def test_run_subprocess_streams_rollout_output_to_logs(caplog):
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+
+    with caplog.at_level(logging.INFO):
+        stdout, stderr = asyncio.run(
+            services._run_subprocess(
+                sys.executable,
+                "-c",
+                "import sys; print('docker step 1', flush=True); print('docker warn', file=sys.stderr, flush=True)",
+                log_event_prefix="endpoint_rollout_subprocess",
+                log_fields={
+                    "endpoint_id": "endpoint-1",
+                    "subprocess_name": "validation_demo",
+                },
+            )
+        )
+
+    assert stdout == "docker step 1"
+    assert stderr == "docker warn"
+    assert "event=endpoint_rollout_subprocess_started" in caplog.text
+    assert "event=endpoint_rollout_subprocess_output" in caplog.text
+    assert "stream=stdout" in caplog.text
+    assert "line=\"docker step 1\"" in caplog.text
+    assert "stream=stderr" in caplog.text
+    assert "line=\"docker warn\"" in caplog.text
+    assert "subprocess_name=validation_demo" in caplog.text
+    assert "event=endpoint_rollout_subprocess_completed" in caplog.text
 
 
 def test_rebuild_bundle_endpoint_reuses_matching_prepared_image_metadata(tmp_path, monkeypatch):
