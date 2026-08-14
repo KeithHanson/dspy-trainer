@@ -49,6 +49,7 @@ class FakeServices:
         self.endpoint_invocations = []
         self.bundle_requirement_installs = []
         self.bundle_revision_id = "rev-1"
+        self.restart_generation = 0
         self.bundle_path = str(FIXTURES / "valid_bundle")
         self.runtime_env = {"SPECIAL_TOKEN": "expected-value"}
         self.lm_profile = None
@@ -72,14 +73,14 @@ class FakeServices:
         self.endpoint_invocations.append((invocation_id, endpoint_id, input_payload, worker_id, stream, warmed_runtime, runtime_env_override))
 
     async def get_bundle_endpoint(self, endpoint_id):
-        return {"id": endpoint_id, "module_import_id": "mod-1", "deployed_revision_id": self.bundle_revision_id, "lm_profile_id": None}
+        return {"id": endpoint_id, "module_import_id": "mod-1", "deployed_revision_id": self.bundle_revision_id, "restart_generation": self.restart_generation, "lm_profile_id": None}
 
     async def resolve_module_execution_state(self, module_id):
         return {"module_id": module_id, "bundle_path": self.bundle_path, "bundle_revision_id": self.bundle_revision_id}
 
     async def resolve_bundle_endpoint_execution_state(self, endpoint_id):
         del endpoint_id
-        return {"module_id": "mod-1", "bundle_path": self.bundle_path, "bundle_revision_id": self.bundle_revision_id}
+        return {"module_id": "mod-1", "bundle_path": self.bundle_path, "bundle_revision_id": self.bundle_revision_id, "restart_generation": self.restart_generation}
 
     async def ensure_bundle_requirements_installed(self, bundle_path):
         self.bundle_requirement_installs.append(bundle_path)
@@ -229,6 +230,8 @@ def test_endpoint_worker_heartbeats_update_registry_status_and_assignment_metada
     assert heartbeat["task_id"] == "inv-1"
     assert heartbeat["runtime_metadata"]["desired_revision_id"] == "rev-2"
     assert heartbeat["runtime_metadata"]["warmed_revision_id"] == "rev-1"
+    assert heartbeat["runtime_metadata"]["desired_restart_generation"] is None
+    assert heartbeat["runtime_metadata"]["warmed_restart_generation"] is None
 
 
 def test_endpoint_worker_heartbeat_preserves_revision_metadata_across_minimal_heartbeats():
@@ -263,6 +266,8 @@ def test_endpoint_worker_heartbeat_preserves_revision_metadata_across_minimal_he
     heartbeat = services.registry_calls[-1][1]
     assert heartbeat["runtime_metadata"]["desired_revision_id"] == "rev-1"
     assert heartbeat["runtime_metadata"]["warmed_revision_id"] == "rev-1"
+    assert heartbeat["runtime_metadata"]["desired_restart_generation"] is None
+    assert heartbeat["runtime_metadata"]["warmed_restart_generation"] is None
     assert heartbeat["runtime_metadata"]["endpoint_id"] == "endpoint-1"
 
 
@@ -282,14 +287,17 @@ def test_process_endpoint_job_runs_endpoint_invocation_and_restores_listening():
             endpoint_id="endpoint-1",
             revision_id="rev-1",
             runtime_identity=runtime_identity,
+            restart_generation=2,
         )
     )
 
     assert services.endpoint_invocations == [("inv-1", "endpoint-1", {"question": "hello"}, "endpoint-worker-1", True, None, None)]
     assert services.registry_calls[1][1]["status"] == "running"
     assert services.registry_calls[1][1]["runtime_metadata"]["warmed_revision_id"] == "rev-1"
+    assert services.registry_calls[1][1]["runtime_metadata"]["warmed_restart_generation"] == 2
     assert services.registry_calls[-1][1]["status"] == "listening"
     assert services.registry_calls[-1][1]["runtime_metadata"]["desired_revision_id"] == "rev-1"
+    assert services.registry_calls[-1][1]["runtime_metadata"]["desired_restart_generation"] == 2
 
 
 def test_ensure_endpoint_assignment_ready_preinstalls_dependencies_and_marks_listening():
@@ -300,17 +308,19 @@ def test_ensure_endpoint_assignment_ready_preinstalls_dependencies_and_marks_lis
         _heartbeat(cast(Any, services), "endpoint-worker-1", "idle", runtime_identity=runtime_identity, registration=True)
     )
 
-    ready_revision_id, warmed_runtime, warmed_runtime_env = asyncio.run(
+    ready_revision_id, ready_restart_generation, warmed_runtime, warmed_runtime_env = asyncio.run(
         ensure_endpoint_assignment_ready(cast(Any, services), "endpoint-worker-1", "endpoint-1", runtime_identity=runtime_identity)
     )
 
     assert ready_revision_id == "rev-1"
+    assert ready_restart_generation == 0
     assert isinstance(warmed_runtime, BundleRuntime)
     assert warmed_runtime_env == {"SPECIAL_TOKEN": "expected-value"}
     assert services.bundle_requirement_installs == [services.bundle_path]
     statuses = [call[1]["status"] for call in services.registry_calls[1:]]
     assert statuses == ["preparing", "listening"]
     assert services.registry_calls[-1][1]["runtime_metadata"]["warmed_revision_id"] == "rev-1"
+    assert services.registry_calls[-1][1]["runtime_metadata"]["warmed_restart_generation"] == 0
 
 
 def test_ensure_endpoint_assignment_ready_rewarms_when_revision_changes():
@@ -322,7 +332,7 @@ def test_ensure_endpoint_assignment_ready_rewarms_when_revision_changes():
         _heartbeat(cast(Any, services), "endpoint-worker-1", "idle", runtime_identity=runtime_identity, registration=True)
     )
 
-    ready_revision_id, warmed_runtime, warmed_runtime_env = asyncio.run(
+    ready_revision_id, ready_restart_generation, warmed_runtime, warmed_runtime_env = asyncio.run(
         ensure_endpoint_assignment_ready(
             cast(Any, services),
             "endpoint-worker-1",
@@ -334,6 +344,7 @@ def test_ensure_endpoint_assignment_ready_rewarms_when_revision_changes():
 
     statuses = [call[1]["status"] for call in services.registry_calls[1:]]
     assert ready_revision_id == "rev-2"
+    assert ready_restart_generation == 0
     assert isinstance(warmed_runtime, BundleRuntime)
     assert warmed_runtime_env == {"SPECIAL_TOKEN": "expected-value"}
     assert statuses == ["preparing", "listening"]
@@ -368,11 +379,12 @@ def test_ensure_endpoint_assignment_ready_reloads_changed_forward_signature_with
         _heartbeat(cast(Any, services), "endpoint-worker-1", "idle", runtime_identity=runtime_identity, registration=True)
     )
 
-    ready_revision_id_v1, warmed_runtime_v1, _ = asyncio.run(
+    ready_revision_id_v1, ready_restart_generation_v1, warmed_runtime_v1, _ = asyncio.run(
         ensure_endpoint_assignment_ready(cast(Any, services), "endpoint-worker-1", "endpoint-1", runtime_identity=runtime_identity)
     )
 
     assert ready_revision_id_v1 == "rev-1"
+    assert ready_restart_generation_v1 == 0
     assert isinstance(warmed_runtime_v1, BundleRuntime)
     runtime_v1_module_name = warmed_runtime_v1.program.__class__.__module__
     assert invoke_warmed_bundle(warmed_runtime_v1, {"question": "hello"}) == {"answer": "HELLO"}
@@ -388,7 +400,7 @@ def test_ensure_endpoint_assignment_ready_reloads_changed_forward_signature_with
         encoding="utf-8",
     )
 
-    ready_revision_id_v2, warmed_runtime_v2, _ = asyncio.run(
+    ready_revision_id_v2, ready_restart_generation_v2, warmed_runtime_v2, _ = asyncio.run(
         ensure_endpoint_assignment_ready(
             cast(Any, services),
             "endpoint-worker-1",
@@ -400,6 +412,7 @@ def test_ensure_endpoint_assignment_ready_reloads_changed_forward_signature_with
     )
 
     assert ready_revision_id_v2 == "rev-2"
+    assert ready_restart_generation_v2 == 0
     assert isinstance(warmed_runtime_v2, BundleRuntime)
     assert warmed_runtime_v2.program.__class__.__module__ != runtime_v1_module_name
     assert invoke_warmed_bundle(warmed_runtime_v2, {"prompt": "HELLO"}) == {"answer": "hello"}
@@ -416,22 +429,57 @@ def test_ensure_endpoint_assignment_ready_skips_warmup_when_revision_matches():
     )
 
     warmed_runtime = BundleRuntime(bundle_path=services.bundle_path, program=object(), lm=None)
-    ready_revision_id, next_runtime, warmed_runtime_env = asyncio.run(
+    ready_revision_id, ready_restart_generation, next_runtime, warmed_runtime_env = asyncio.run(
         ensure_endpoint_assignment_ready(
             cast(Any, services),
             "endpoint-worker-1",
             "endpoint-1",
             warmed_revision_id="rev-1",
+            warmed_restart_generation=0,
             runtime_identity=runtime_identity,
             warmed_runtime=warmed_runtime,
         )
     )
 
     assert ready_revision_id == "rev-1"
+    assert ready_restart_generation == 0
     assert next_runtime is warmed_runtime
     assert warmed_runtime_env == {"SPECIAL_TOKEN": "expected-value"}
     assert services.bundle_requirement_installs == []
     assert [call[1]["status"] for call in services.registry_calls[1:]] == ["listening"]
+
+
+def test_ensure_endpoint_assignment_ready_rewarms_when_restart_generation_changes():
+    services = FakeServices()
+    services.postgres_pool = object()
+    services.restart_generation = 3
+    runtime_identity = _build_runtime_identity(explicit_worker_id="endpoint-worker-1")
+    asyncio.run(
+        _heartbeat(cast(Any, services), "endpoint-worker-1", "idle", runtime_identity=runtime_identity, registration=True)
+    )
+
+    warmed_runtime = BundleRuntime(bundle_path=services.bundle_path, program=object(), lm=None)
+    ready_revision_id, ready_restart_generation, next_runtime, warmed_runtime_env = asyncio.run(
+        ensure_endpoint_assignment_ready(
+            cast(Any, services),
+            "endpoint-worker-1",
+            "endpoint-1",
+            warmed_revision_id="rev-1",
+            warmed_restart_generation=2,
+            runtime_identity=runtime_identity,
+            warmed_runtime=warmed_runtime,
+        )
+    )
+
+    assert ready_revision_id == "rev-1"
+    assert ready_restart_generation == 3
+    assert isinstance(next_runtime, BundleRuntime)
+    assert next_runtime is not warmed_runtime
+    assert warmed_runtime_env == {"SPECIAL_TOKEN": "expected-value"}
+    assert services.bundle_requirement_installs == [services.bundle_path]
+    assert [call[1]["status"] for call in services.registry_calls[1:]] == ["preparing", "listening"]
+    assert services.registry_calls[1][1]["runtime_metadata"]["warmed_restart_generation"] == 2
+    assert services.registry_calls[-1][1]["runtime_metadata"]["warmed_restart_generation"] == 3
 
 
 def test_ensure_endpoint_assignment_ready_marks_worker_failed_when_revision_metadata_missing():
@@ -443,7 +491,7 @@ def test_ensure_endpoint_assignment_ready_marks_worker_failed_when_revision_meta
         _heartbeat(cast(Any, services), "endpoint-worker-1", "idle", runtime_identity=runtime_identity, registration=True)
     )
 
-    ready_revision_id, warmed_runtime, warmed_runtime_env = asyncio.run(
+    ready_revision_id, ready_restart_generation, warmed_runtime, warmed_runtime_env = asyncio.run(
         ensure_endpoint_assignment_ready(
             cast(Any, services),
             "endpoint-worker-1",
@@ -454,6 +502,7 @@ def test_ensure_endpoint_assignment_ready_marks_worker_failed_when_revision_meta
     )
 
     assert ready_revision_id is None
+    assert ready_restart_generation is None
     assert warmed_runtime is None
     assert warmed_runtime_env is None
     assert services.bundle_requirement_installs == []

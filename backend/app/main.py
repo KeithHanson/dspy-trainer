@@ -655,6 +655,18 @@ async def deploy_bundle_endpoint_global(endpoint_id: str, request: Request):
     return endpoint
 
 
+@app.post("/bundle-endpoints/{endpoint_id}/restart-runtime")
+async def restart_bundle_endpoint_runtime_global(endpoint_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    try:
+        endpoint = await services.restart_bundle_endpoint_runtime(endpoint_id)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    if endpoint is None:
+        return JSONResponse(status_code=404, content={"error": "endpoint not found"})
+    return endpoint
+
+
 @app.post("/bundle-endpoints/{endpoint_id}/invoke")
 async def invoke_bundle_endpoint(endpoint_id: str, request: Request):
     services: AppServices = request.app.state.services

@@ -53,6 +53,8 @@ def _heartbeat_runtime_metadata(
     *,
     desired_revision_id: object = _UNSET,
     warmed_revision_id: object = _UNSET,
+    desired_restart_generation: object = _UNSET,
+    warmed_restart_generation: object = _UNSET,
     endpoint_id: object = _UNSET,
 ) -> dict[str, object]:
     runtime_metadata = dict(runtime_identity.get("runtime_metadata") or {})
@@ -64,11 +66,15 @@ def _heartbeat_runtime_metadata(
     resolved_endpoint_id = _resolve_field("endpoint_id", endpoint_id)
     resolved_desired_revision_id = _resolve_field("desired_revision_id", desired_revision_id)
     resolved_warmed_revision_id = _resolve_field("warmed_revision_id", warmed_revision_id)
+    resolved_desired_restart_generation = _resolve_field("desired_restart_generation", desired_restart_generation)
+    resolved_warmed_restart_generation = _resolve_field("warmed_restart_generation", warmed_restart_generation)
     heartbeat_state.update(
         {
             "endpoint_id": resolved_endpoint_id,
             "desired_revision_id": resolved_desired_revision_id,
             "warmed_revision_id": resolved_warmed_revision_id,
+            "desired_restart_generation": resolved_desired_restart_generation,
+            "warmed_restart_generation": resolved_warmed_restart_generation,
         }
     )
     runtime_identity["heartbeat_state"] = heartbeat_state
@@ -81,6 +87,8 @@ def _heartbeat_runtime_metadata(
             "endpoint_id": resolved_endpoint_id,
             "desired_revision_id": resolved_desired_revision_id,
             "warmed_revision_id": resolved_warmed_revision_id,
+            "desired_restart_generation": resolved_desired_restart_generation,
+            "warmed_restart_generation": resolved_warmed_restart_generation,
         }
     )
     runtime_identity["runtime_metadata"] = runtime_metadata
@@ -113,6 +121,8 @@ async def _heartbeat(
     runtime_identity: dict[str, object] | None = None,
     registration: bool = False,
     last_error: str | None = None,
+    desired_restart_generation: object = _UNSET,
+    warmed_restart_generation: object = _UNSET,
 ) -> str:
     effective_runtime_identity = runtime_identity or {}
     if services.postgres_pool is not None:
@@ -127,6 +137,8 @@ async def _heartbeat(
                 effective_runtime_identity,
                 desired_revision_id=desired_revision_id,
                 warmed_revision_id=warmed_revision_id,
+                desired_restart_generation=desired_restart_generation,
+                warmed_restart_generation=warmed_restart_generation,
                 endpoint_id=endpoint_id,
             ),
             "last_error": last_error,
@@ -154,6 +166,8 @@ async def _heartbeat_loop(
     desired_revision_id: object = _UNSET,
     warmed_revision_id: object = _UNSET,
     runtime_identity: dict[str, object] | None = None,
+    desired_restart_generation: object = _UNSET,
+    warmed_restart_generation: object = _UNSET,
 ) -> None:
     while True:
         await _heartbeat(
@@ -165,6 +179,8 @@ async def _heartbeat_loop(
             desired_revision_id=desired_revision_id,
             warmed_revision_id=warmed_revision_id,
             runtime_identity=runtime_identity,
+            desired_restart_generation=desired_restart_generation,
+            warmed_restart_generation=warmed_restart_generation,
         )
         await asyncio.sleep(5)
 
@@ -178,6 +194,7 @@ async def process_endpoint_job(
     runtime_identity: dict[str, object] | None = None,
     warmed_runtime: BundleRuntime | None = None,
     runtime_env: dict[str, str] | None = None,
+    restart_generation: int | None = None,
 ) -> None:
     payload = json.loads(raw_payload)
     invocation_id = str(payload.get("invocation_id") or "").strip()
@@ -195,6 +212,8 @@ async def process_endpoint_job(
             desired_revision_id=revision_id,
             warmed_revision_id=revision_id,
             runtime_identity=runtime_identity,
+            desired_restart_generation=restart_generation,
+            warmed_restart_generation=restart_generation,
         )
         heartbeat_task = asyncio.create_task(
             _heartbeat_loop(
@@ -206,6 +225,8 @@ async def process_endpoint_job(
                 desired_revision_id=revision_id,
                 warmed_revision_id=revision_id,
                 runtime_identity=runtime_identity,
+                desired_restart_generation=restart_generation,
+                warmed_restart_generation=restart_generation,
             )
         )
         await services.run_endpoint_invocation_job(
@@ -230,6 +251,8 @@ async def process_endpoint_job(
             desired_revision_id=revision_id,
             warmed_revision_id=revision_id,
             runtime_identity=runtime_identity,
+            desired_restart_generation=restart_generation,
+            warmed_restart_generation=restart_generation,
         )
 
 
@@ -238,15 +261,17 @@ async def ensure_endpoint_assignment_ready(
     worker_id: str,
     endpoint_id: str,
     warmed_revision_id: str | None = None,
+    warmed_restart_generation: int | None = None,
     runtime_identity: dict[str, object] | None = None,
     warmed_runtime: BundleRuntime | None = None,
-) -> tuple[str | None, BundleRuntime | None, dict[str, str] | None]:
+) -> tuple[str | None, int | None, BundleRuntime | None, dict[str, str] | None]:
     execution_state = await services.resolve_bundle_endpoint_execution_state(endpoint_id)
     if execution_state is None:
         logger.error("Assigned endpoint module not found: %s", endpoint_id)
         await _heartbeat(services, worker_id, "idle", runtime_identity=runtime_identity)
-        return None, None, None
+        return None, None, None, None
     desired_revision_id = str(execution_state.get("bundle_revision_id") or "").strip() or None
+    desired_restart_generation = int(execution_state.get("restart_generation") or 0)
     if desired_revision_id is None:
         logger.error("Assigned endpoint revision metadata missing: %s", endpoint_id)
         await _heartbeat(
@@ -258,14 +283,20 @@ async def ensure_endpoint_assignment_ready(
             warmed_revision_id=warmed_revision_id,
             runtime_identity=runtime_identity,
             last_error="revision_metadata_missing",
+            desired_restart_generation=desired_restart_generation,
+            warmed_restart_generation=warmed_restart_generation,
         )
-        return None, None, None
+        return None, None, None, None
     runtime_env = await services.get_module_runtime_environment(str(execution_state.get("module_id") or ""))
     endpoint = await services.get_bundle_endpoint(endpoint_id)
     lm_profile = await services._get_lm_profile_record(str(endpoint["lm_profile_id"]), include_secret=True) if endpoint and endpoint.get("lm_profile_id") else None
     try:
         next_runtime = warmed_runtime
-        if warmed_revision_id != desired_revision_id or warmed_runtime is None:
+        if (
+            warmed_revision_id != desired_revision_id
+            or warmed_restart_generation != desired_restart_generation
+            or warmed_runtime is None
+        ):
             await _heartbeat(
                 services,
                 worker_id,
@@ -274,6 +305,8 @@ async def ensure_endpoint_assignment_ready(
                 desired_revision_id=desired_revision_id,
                 warmed_revision_id=warmed_revision_id,
                 runtime_identity=runtime_identity,
+                desired_restart_generation=desired_restart_generation,
+                warmed_restart_generation=warmed_restart_generation,
             )
             await services.ensure_bundle_requirements_installed(execution_state["bundle_path"])
             next_runtime = await asyncio.to_thread(
@@ -290,8 +323,10 @@ async def ensure_endpoint_assignment_ready(
             desired_revision_id=desired_revision_id,
             warmed_revision_id=desired_revision_id,
             runtime_identity=runtime_identity,
+            desired_restart_generation=desired_restart_generation,
+            warmed_restart_generation=desired_restart_generation,
         )
-        return desired_revision_id, next_runtime, runtime_env
+        return desired_revision_id, desired_restart_generation, next_runtime, runtime_env
     except Exception:
         logger.exception("Endpoint worker warmup failed for endpoint %s", endpoint_id)
         await _heartbeat(
@@ -303,8 +338,10 @@ async def ensure_endpoint_assignment_ready(
             warmed_revision_id=warmed_revision_id,
             runtime_identity=runtime_identity,
             last_error="warmup_failed",
+            desired_restart_generation=desired_restart_generation,
+            warmed_restart_generation=warmed_restart_generation,
         )
-        return None, None, None
+        return None, None, None, None
 
 
 async def run_endpoint_worker() -> None:
@@ -325,6 +362,7 @@ async def run_endpoint_worker() -> None:
     logger.info("Endpoint worker runtime instance id: %s", runtime_identity.get("runtime_instance_id"))
     assigned_endpoint_id = ""
     warmed_revision_id: str | None = None
+    warmed_restart_generation: int | None = None
     warmed_runtime: BundleRuntime | None = None
     warmed_runtime_env: dict[str, str] | None = None
     try:
@@ -334,28 +372,32 @@ async def run_endpoint_worker() -> None:
             if not endpoint_id:
                 assigned_endpoint_id = ""
                 warmed_revision_id = None
+                warmed_restart_generation = None
                 warmed_runtime = None
                 warmed_runtime_env = None
                 await _heartbeat(services, worker_id, "idle", runtime_identity=runtime_identity)
                 await asyncio.sleep(2)
                 continue
-            ready_revision_id, warmed_runtime, warmed_runtime_env = await ensure_endpoint_assignment_ready(
+            ready_revision_id, ready_restart_generation, warmed_runtime, warmed_runtime_env = await ensure_endpoint_assignment_ready(
                 services,
                 worker_id,
                 endpoint_id,
                 warmed_revision_id if endpoint_id == assigned_endpoint_id else None,
+                warmed_restart_generation if endpoint_id == assigned_endpoint_id else None,
                 runtime_identity=runtime_identity,
                 warmed_runtime=warmed_runtime if endpoint_id == assigned_endpoint_id else None,
             )
             if ready_revision_id is None:
                 if endpoint_id != assigned_endpoint_id:
                     warmed_revision_id = None
+                    warmed_restart_generation = None
                     warmed_runtime = None
                     warmed_runtime_env = None
                 await asyncio.sleep(2)
                 continue
             assigned_endpoint_id = endpoint_id
             warmed_revision_id = ready_revision_id
+            warmed_restart_generation = ready_restart_generation
             try:
                 result = await services.redis.execute_command("BRPOP", services._endpoint_queue_name(endpoint_id), 5) if services.redis else None
             except RedisTimeoutError:
@@ -373,6 +415,7 @@ async def run_endpoint_worker() -> None:
                     runtime_identity=runtime_identity,
                     warmed_runtime=warmed_runtime,
                     runtime_env=warmed_runtime_env,
+                    restart_generation=ready_restart_generation,
                 )
             except Exception:
                 logger.exception("Endpoint worker job processing failed")
