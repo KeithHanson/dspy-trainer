@@ -76,15 +76,31 @@ function formatRevision(value) {
   return value ? String(value).slice(0, 8) : "-";
 }
 
-function formatWorkerLastSeen(value) {
+function formatTimestamp(value) {
   if (!value) {
-    return "unknown";
+    return "-";
   }
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) {
-    return "unknown";
+    return "-";
   }
   return parsed.toLocaleString();
+}
+
+function formatDigest(value) {
+  if (!value) {
+    return "-";
+  }
+  const text = String(value);
+  if (text.length <= 18) {
+    return text;
+  }
+  return `${text.slice(0, 18)}…`;
+}
+
+function formatWorkerLastSeen(value) {
+  const formatted = formatTimestamp(value);
+  return formatted === "-" ? "unknown" : formatted;
 }
 
 function describeEndpointDeployment(endpoint) {
@@ -102,6 +118,92 @@ function describeEndpointDeployment(endpoint) {
     return `Prepared revision ${formatRevision(currentRevision)} is ready to deploy.`;
   }
   return `Live on revision ${formatRevision(currentRevision)} (restart gen ${restartGeneration}).`;
+}
+
+function buildEndpointWorkerSummary(endpointId, endpointWorkers) {
+  const workers = Array.isArray(endpointWorkers?.items)
+    ? endpointWorkers.items.filter((worker) => String(worker?.assigned_endpoint_id || "").trim() === endpointId)
+    : [];
+  const summary = {
+    total: workers.length,
+    ready: 0,
+    warming: 0,
+    stale: 0,
+    mismatched: 0,
+    failed: 0,
+    running: 0,
+  };
+  workers.forEach((worker) => {
+    if (!worker?.is_live) {
+      summary.stale += 1;
+    }
+    if (worker?.deploy_state === "ready") {
+      summary.ready += 1;
+    } else if (worker?.status === "preparing") {
+      summary.warming += 1;
+    } else if (worker?.status === "running") {
+      summary.running += 1;
+    } else if (worker?.status === "failed") {
+      summary.failed += 1;
+    } else if (worker?.deploy_state && worker.deploy_state !== "unassigned") {
+      summary.mismatched += 1;
+    }
+  });
+  return summary;
+}
+
+function describeEndpointConvergence(endpointId, endpointWorkers, pinnedWorkerCount) {
+  const summary = buildEndpointWorkerSummary(endpointId, endpointWorkers);
+  if (!summary.total) {
+    return `0 / ${pinnedWorkerCount || 1} assigned workers reporting`; 
+  }
+  const parts = [`${summary.ready}/${summary.total} ready`];
+  if (summary.warming) parts.push(`${summary.warming} warming`);
+  if (summary.running) parts.push(`${summary.running} running`);
+  if (summary.mismatched) parts.push(`${summary.mismatched} mismatched`);
+  if (summary.failed) parts.push(`${summary.failed} failed`);
+  if (summary.stale) parts.push(`${summary.stale} stale`);
+  parts.push(`target ${pinnedWorkerCount || 1}`);
+  return parts.join(" · ");
+}
+
+function summarizeRolloutState(endpoint) {
+  const rolloutState = endpoint?.rollout_state && typeof endpoint.rollout_state === "object" ? endpoint.rollout_state : {};
+  const status = rolloutState.status || "idle";
+  const lastAction = rolloutState.last_action ? ` after ${rolloutState.last_action}` : "";
+  const updatedAt = rolloutState.updated_at ? ` · updated ${formatTimestamp(rolloutState.updated_at)}` : "";
+  return `${status}${lastAction}${updatedAt}`;
+}
+
+function RolloutHistoryList({ title, items, kind }) {
+  const history = Array.isArray(items) ? items.slice().reverse() : [];
+  return (
+    <div style={{ minWidth: 0, flex: 1 }}>
+      <div className="t-label" style={{ marginBottom: 6 }}>{title}</div>
+      {history.length ? (
+        <div className="col gap-1">
+          {history.map((item) => (
+            <div key={item.id || `${kind}-${item.action}-${item.created_at || ""}`} className="panel" style={{ padding: 10 }}>
+              <div className="row between" style={{ gap: 12, alignItems: "center" }}>
+                <strong>{item.action || kind}</strong>
+                <span className="muted t-xs">{formatTimestamp(item.completed_at || item.created_at)}</span>
+              </div>
+              <div className="muted t-xs" style={{ marginTop: 4 }}>
+                {kind === "operation"
+                  ? `${item.status || "unknown"} · restart gen ${item.restart_generation ?? "-"}`
+                  : `${item.kind || "event"} · op ${formatRevision(item.operation_id)}`}
+              </div>
+              {item.metadata && Object.keys(item.metadata).length ? (
+                <pre className="mono t-xs" style={{ marginTop: 8, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{JSON.stringify(item.metadata, null, 2)}</pre>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="dashboard-zero">No {title.toLowerCase()} yet.</div>
+      )}
+    </div>
+  );
 }
 
 function EndpointWorkersSection({ endpointWorkers, endpoints }) {
@@ -352,11 +454,23 @@ export function EndpointsPage() {
                       <span className="cap mono">Prepared rev {formatRevision(endpoint.prepared_revision_id)}</span>
                       <span className="cap mono">Deployed rev {formatRevision(endpoint.deployed_revision_id)}</span>
                       <span className="cap mono">Restart gen {endpoint.restart_generation ?? 0}</span>
+                      <span className="cap mono">Prepared image {endpoint.prepared_image_ref || "-"}</span>
+                      <span className="cap mono">Prepared image digest {formatDigest(endpoint.prepared_image_digest)}</span>
+                      <span className="cap mono">Prepared at {formatTimestamp(endpoint.prepared_at)}</span>
+                      <span className="cap mono">Deployed image {endpoint.deployed_image_ref || "-"}</span>
+                      <span className="cap mono">Deployed image digest {formatDigest(endpoint.deployed_image_digest)}</span>
+                      <span className="cap mono">Deployed at {formatTimestamp(endpoint.deployed_at)}</span>
+                      <span className="cap mono">Convergence {describeEndpointConvergence(endpoint.id, endpointWorkers, endpoint.pinned_worker_count)}</span>
+                      <span className="cap mono">Rollout state {summarizeRolloutState(endpoint)}</span>
                       <span className="cap mono">Sync POST {buildApiUrl(`/bundle-endpoints/${endpoint.id}/invoke`)}</span>
                       <span className="cap mono">SSE POST {buildApiUrl(`/bundle-endpoints/${endpoint.id}/stream`)}</span>
                       <span className="cap mono">Key preview ...{endpoint.key_preview || "unknown"}</span>
                     </div>
                     <p className="muted t-xs" style={{ marginTop: 8 }}>{describeEndpointDeployment(endpoint)}</p>
+                    <div className="row" style={{ gap: 12, marginTop: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
+                      <RolloutHistoryList title="Rollout operations" items={endpoint.rollout_operations} kind="operation" />
+                      <RolloutHistoryList title="Rollout events" items={endpoint.rollout_events} kind="event" />
+                    </div>
                   </div>
                 </article>
               ))}

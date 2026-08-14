@@ -270,6 +270,41 @@ def _current_revision_id_for_module(module_id):
     return module.get("current_revision_id") or f"rev-{module_id}"
 
 
+def _append_fake_rollout_history(endpoint, action, metadata=None):
+    metadata = metadata or {}
+    operations = list(endpoint.get("rollout_operations") or [])
+    events = list(endpoint.get("rollout_events") or [])
+    operation_id = f"op-{len(operations) + 1}"
+    event_id = f"evt-{len(events) + 1}"
+    operation = {
+        "id": operation_id,
+        "action": action,
+        "status": "completed",
+        "restart_generation": int(endpoint.get("restart_generation") or 0),
+        "created_at": "2025-01-01T00:00:00Z",
+        "completed_at": "2025-01-01T00:00:00Z",
+        "metadata": metadata,
+    }
+    event = {
+        "id": event_id,
+        "action": action,
+        "kind": "operation-completed",
+        "operation_id": operation_id,
+        "created_at": "2025-01-01T00:00:00Z",
+        "metadata": metadata,
+    }
+    endpoint["rollout_operations"] = [*operations, operation]
+    endpoint["rollout_events"] = [*events, event]
+    endpoint["rollout_state"] = {
+        "status": "completed",
+        "last_action": action,
+        "last_operation_id": operation_id,
+        "last_event_id": event_id,
+        "restart_generation": int(endpoint.get("restart_generation") or 0),
+        "updated_at": "2025-01-01T00:00:00Z",
+    }
+
+
 async def fake_create_bundle_endpoint(self, module_id, name, lm_profile_id=None, pinned_worker_count=1):
     if module_id not in STORE:
         return None
@@ -287,6 +322,12 @@ async def fake_create_bundle_endpoint(self, module_id, name, lm_profile_id=None,
         "prepared_at": None,
         "deployed_revision_id": _current_revision_id_for_module(module_id),
         "deployed_at": None,
+        "restart_generation": 0,
+        "rollout_state": {},
+        "rollout_operations": [],
+        "rollout_events": [],
+        "deployed_image_ref": None,
+        "deployed_image_digest": None,
         "current_module_revision_id": _current_revision_id_for_module(module_id),
         "current_module_commit_sha": STORE[module_id].get("current_commit_sha"),
         "current_module_bundle_version": STORE[module_id].get("bundle_version"),
@@ -388,6 +429,7 @@ async def fake_rebuild_bundle_endpoint(self, endpoint_id):
     endpoint["prepared_at"] = "2025-01-01T00:00:00+00:00"
     endpoint["prepared_revision_is_current"] = True
     endpoint["deployed_revision_is_current"] = endpoint.get("deployed_revision_id") == current_revision_id
+    _append_fake_rollout_history(endpoint, "rebuild", {"prepared_revision_id": current_revision_id})
     return endpoint
 
 
@@ -400,8 +442,11 @@ async def fake_deploy_bundle_endpoint(self, endpoint_id):
         raise ValueError("rebuild required before deploy")
     endpoint["current_module_revision_id"] = current_revision_id
     endpoint["deployed_revision_id"] = current_revision_id
+    endpoint["deployed_image_ref"] = endpoint.get("prepared_image_ref")
+    endpoint["deployed_image_digest"] = endpoint.get("prepared_image_digest")
     endpoint["deployed_at"] = "2025-01-01T00:05:00+00:00"
     endpoint["deployed_revision_is_current"] = True
+    _append_fake_rollout_history(endpoint, "deploy", {"deployed_revision_id": current_revision_id})
     return endpoint
 
 
@@ -412,6 +457,7 @@ async def fake_restart_bundle_endpoint_runtime(self, endpoint_id):
     if not endpoint.get("deployed_revision_id"):
         raise ValueError("deploy required before restart-runtime")
     endpoint["restart_generation"] = int(endpoint.get("restart_generation") or 0) + 1
+    _append_fake_rollout_history(endpoint, "restart-runtime", {"restart_generation": endpoint["restart_generation"]})
     return endpoint
 
 
@@ -973,6 +1019,8 @@ def test_bundle_endpoint_crud_and_key_rotation(monkeypatch):
         assert listed.status_code == 200
         assert listed.json()[0]["name"] == "Public API"
         assert listed.json()[0]["module_import_id"] == "mod-endpoint"
+        assert listed.json()[0]["rollout_operations"] == []
+        assert listed.json()[0]["rollout_events"] == []
 
         fetched = client.get("/bundle-endpoints/endpoint-1")
         assert fetched.status_code == 200
@@ -984,15 +1032,21 @@ def test_bundle_endpoint_crud_and_key_rotation(monkeypatch):
         assert rebuild.status_code == 200
         assert rebuild.json()["prepared_revision_id"] == "rev-mod-endpoint"
         assert rebuild.json()["prepared_revision_is_current"] is True
+        assert rebuild.json()["rollout_state"]["last_action"] == "rebuild"
+        assert rebuild.json()["rollout_operations"][0]["action"] == "rebuild"
 
         deploy = client.post("/bundle-endpoints/endpoint-1/deploy")
         assert deploy.status_code == 200
         assert deploy.json()["deployed_revision_id"] == "rev-mod-endpoint"
         assert deploy.json()["deployed_revision_is_current"] is True
+        assert deploy.json()["rollout_state"]["last_action"] == "deploy"
+        assert [item["action"] for item in deploy.json()["rollout_operations"]] == ["rebuild", "deploy"]
 
         restart = client.post("/bundle-endpoints/endpoint-1/restart-runtime")
         assert restart.status_code == 200
         assert restart.json()["restart_generation"] == 1
+        assert restart.json()["rollout_state"]["last_action"] == "restart-runtime"
+        assert [item["action"] for item in restart.json()["rollout_events"]] == ["rebuild", "deploy", "restart-runtime"]
 
         updated = client.patch("/bundle-endpoints/endpoint-1", json={"name": "Customer stream", "module_import_id": "mod-endpoint", "lm_profile_id": "lm-1", "pinned_worker_count": 3})
         assert updated.status_code == 200

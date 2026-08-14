@@ -9,7 +9,27 @@ describe("EndpointsPage", () => {
     const fetchMock = vi.fn((url, init) => {
       if (String(url).endsWith("/bundle-endpoints") && init?.method === "GET") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([
-          { id: "ep-1", name: "Customer API", module_import_id: "mod-1", module_bundle_name: "agentic-chat", pinned_worker_count: 2, key_preview: "abc123", current_module_revision_id: "rev-22222222", prepared_revision_id: "rev-22222222", prepared_image_ref: "registry.test/prepared/ep-1:rev-22222222", prepared_image_digest: "sha256:prepared", deployed_revision_id: "rev-22222222", restart_generation: 2 },
+          {
+            id: "ep-1",
+            name: "Customer API",
+            module_import_id: "mod-1",
+            module_bundle_name: "agentic-chat",
+            pinned_worker_count: 2,
+            key_preview: "abc123",
+            current_module_revision_id: "rev-22222222",
+            prepared_revision_id: "rev-22222222",
+            prepared_image_ref: "registry.test/prepared/ep-1:rev-22222222",
+            prepared_image_digest: "sha256:prepared1234567890",
+            prepared_at: "2025-01-01T00:00:00Z",
+            deployed_revision_id: "rev-22222222",
+            deployed_image_ref: "registry.test/deployed/ep-1:rev-22222222",
+            deployed_image_digest: "sha256:deployed1234567890",
+            deployed_at: "2025-01-01T00:05:00Z",
+            restart_generation: 2,
+            rollout_state: { status: "completed", last_action: "deploy", updated_at: "2025-01-01T00:05:00Z" },
+            rollout_operations: [{ id: "op-1", action: "deploy", status: "completed", restart_generation: 2, created_at: "2025-01-01T00:05:00Z", completed_at: "2025-01-01T00:05:00Z", metadata: { deployed_revision_id: "rev-22222222" } }],
+            rollout_events: [{ id: "evt-1", action: "deploy", kind: "operation-completed", operation_id: "op-1", created_at: "2025-01-01T00:05:00Z", metadata: { deployed_revision_id: "rev-22222222" } }],
+          },
         ]) });
       }
       if (String(url).endsWith("/endpoint-workers") && init?.method === "GET") {
@@ -45,7 +65,15 @@ describe("EndpointsPage", () => {
     expect(within(endpointCard).getByText(/Prepared rev rev-2222/)).toBeInTheDocument();
     expect(within(endpointCard).getByText(/Deployed rev rev-2222/)).toBeInTheDocument();
     expect(within(endpointCard).getByText(/Restart gen 2/)).toBeInTheDocument();
+    expect(within(endpointCard).getByText(/Prepared image registry.test\/prepared\/ep-1:rev-22222222/)).toBeInTheDocument();
+    expect(within(endpointCard).getByText(/Deployed image registry.test\/deployed\/ep-1:rev-22222222/)).toBeInTheDocument();
+    expect(within(endpointCard).getByText(/Convergence 1\/2 ready · 1 mismatched · 1 stale · target 2/)).toBeInTheDocument();
+    expect(within(endpointCard).getByText(/Rollout state completed after deploy/)).toBeInTheDocument();
     expect(within(endpointCard).getByText("Live on revision rev-2222 (restart gen 2).")).toBeInTheDocument();
+    expect(within(endpointCard).getByText("Rollout operations")).toBeInTheDocument();
+    expect(within(endpointCard).getByText("Rollout events")).toBeInTheDocument();
+    expect(within(endpointCard).getAllByText("deploy").length).toBeGreaterThan(0);
+    expect(within(endpointCard).getAllByText(/"deployed_revision_id": "rev-22222222"/).length).toBeGreaterThan(0);
     expect(screen.getByText("Endpoint workers")).toBeInTheDocument();
     expect(screen.getByText(/1 ready of 3 total · 2 live · 1 stale · 2 assigned · 1 unassigned/)).toBeInTheDocument();
     expect(screen.getByText("endpoint-worker-1")).toBeInTheDocument();
@@ -211,20 +239,20 @@ describe("EndpointsPage", () => {
     const fetchMock = vi.fn((url, init) => {
       if (String(url).endsWith("/bundle-endpoints") && init?.method === "GET") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([
-          { id: "ep-1", name: "Customer API", module_import_id: "mod-1", module_bundle_name: "agentic-chat", pinned_worker_count: 2, key_preview: "abc123", current_module_revision_id: "rev-22222222", prepared_revision_id: null, prepared_image_ref: null, prepared_image_digest: null, deployed_revision_id: "rev-11111111", restart_generation: 0 },
+          { id: "ep-1", name: "Customer API", module_import_id: "mod-1", module_bundle_name: "agentic-chat", pinned_worker_count: 2, key_preview: "abc123", current_module_revision_id: "rev-22222222", prepared_revision_id: null, prepared_image_ref: null, prepared_image_digest: null, deployed_revision_id: "rev-11111111", restart_generation: 0, rollout_state: {}, rollout_operations: [], rollout_events: [] },
         ]) });
       }
       if (String(url).endsWith("/endpoint-workers") && init?.method === "GET") {
         return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ items: [], total_workers: 0 }) });
       }
       if (String(url).endsWith("/bundle-endpoints/ep-1/rebuild") && init?.method === "POST") {
-        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ id: "ep-1", name: "Customer API", module_import_id: "mod-1", module_bundle_name: "agentic-chat", pinned_worker_count: 2, key_preview: "abc123", current_module_revision_id: "rev-22222222", prepared_revision_id: "rev-22222222", prepared_image_ref: "registry.test/prepared/ep-1:rev-22222222", prepared_image_digest: "sha256:prepared", deployed_revision_id: "rev-11111111", restart_generation: 0 }) });
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ id: "ep-1", name: "Customer API", module_import_id: "mod-1", module_bundle_name: "agentic-chat", pinned_worker_count: 2, key_preview: "abc123", current_module_revision_id: "rev-22222222", prepared_revision_id: "rev-22222222", prepared_image_ref: "registry.test/prepared/ep-1:rev-22222222", prepared_image_digest: "sha256:prepared", deployed_revision_id: "rev-11111111", restart_generation: 0, rollout_state: { status: "completed", last_action: "rebuild" }, rollout_operations: [{ id: "op-1", action: "rebuild", status: "completed", restart_generation: 0, created_at: "2025-01-01T00:00:00Z", metadata: { prepared_revision_id: "rev-22222222" } }], rollout_events: [{ id: "evt-1", action: "rebuild", kind: "operation-completed", operation_id: "op-1", created_at: "2025-01-01T00:00:00Z", metadata: { prepared_revision_id: "rev-22222222" } }] }) });
       }
       if (String(url).endsWith("/bundle-endpoints/ep-1/deploy") && init?.method === "POST") {
-        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ id: "ep-1", name: "Customer API", module_import_id: "mod-1", module_bundle_name: "agentic-chat", pinned_worker_count: 2, key_preview: "abc123", current_module_revision_id: "rev-22222222", prepared_revision_id: "rev-22222222", prepared_image_ref: "registry.test/prepared/ep-1:rev-22222222", prepared_image_digest: "sha256:prepared", deployed_revision_id: "rev-22222222", restart_generation: 0 }) });
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ id: "ep-1", name: "Customer API", module_import_id: "mod-1", module_bundle_name: "agentic-chat", pinned_worker_count: 2, key_preview: "abc123", current_module_revision_id: "rev-22222222", prepared_revision_id: "rev-22222222", prepared_image_ref: "registry.test/prepared/ep-1:rev-22222222", prepared_image_digest: "sha256:prepared", deployed_revision_id: "rev-22222222", deployed_image_ref: "registry.test/prepared/ep-1:rev-22222222", deployed_image_digest: "sha256:prepared", restart_generation: 0, rollout_state: { status: "completed", last_action: "deploy" }, rollout_operations: [{ id: "op-1", action: "rebuild", status: "completed", restart_generation: 0, created_at: "2025-01-01T00:00:00Z", metadata: { prepared_revision_id: "rev-22222222" } }, { id: "op-2", action: "deploy", status: "completed", restart_generation: 0, created_at: "2025-01-01T00:05:00Z", metadata: { deployed_revision_id: "rev-22222222" } }], rollout_events: [{ id: "evt-1", action: "rebuild", kind: "operation-completed", operation_id: "op-1", created_at: "2025-01-01T00:00:00Z", metadata: { prepared_revision_id: "rev-22222222" } }, { id: "evt-2", action: "deploy", kind: "operation-completed", operation_id: "op-2", created_at: "2025-01-01T00:05:00Z", metadata: { deployed_revision_id: "rev-22222222" } }] }) });
       }
       if (String(url).endsWith("/bundle-endpoints/ep-1/restart-runtime") && init?.method === "POST") {
-        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ id: "ep-1", name: "Customer API", module_import_id: "mod-1", module_bundle_name: "agentic-chat", pinned_worker_count: 2, key_preview: "abc123", current_module_revision_id: "rev-22222222", prepared_revision_id: "rev-22222222", prepared_image_ref: "registry.test/prepared/ep-1:rev-22222222", prepared_image_digest: "sha256:prepared", deployed_revision_id: "rev-22222222", restart_generation: 1 }) });
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ id: "ep-1", name: "Customer API", module_import_id: "mod-1", module_bundle_name: "agentic-chat", pinned_worker_count: 2, key_preview: "abc123", current_module_revision_id: "rev-22222222", prepared_revision_id: "rev-22222222", prepared_image_ref: "registry.test/prepared/ep-1:rev-22222222", prepared_image_digest: "sha256:prepared", deployed_revision_id: "rev-22222222", deployed_image_ref: "registry.test/prepared/ep-1:rev-22222222", deployed_image_digest: "sha256:prepared", restart_generation: 1, rollout_state: { status: "completed", last_action: "restart-runtime" }, rollout_operations: [{ id: "op-1", action: "rebuild", status: "completed", restart_generation: 0, created_at: "2025-01-01T00:00:00Z", metadata: { prepared_revision_id: "rev-22222222" } }, { id: "op-2", action: "deploy", status: "completed", restart_generation: 0, created_at: "2025-01-01T00:05:00Z", metadata: { deployed_revision_id: "rev-22222222" } }, { id: "op-3", action: "restart-runtime", status: "completed", restart_generation: 1, created_at: "2025-01-01T00:06:00Z", metadata: { restart_generation: 1 } }], rollout_events: [{ id: "evt-1", action: "rebuild", kind: "operation-completed", operation_id: "op-1", created_at: "2025-01-01T00:00:00Z", metadata: { prepared_revision_id: "rev-22222222" } }, { id: "evt-2", action: "deploy", kind: "operation-completed", operation_id: "op-2", created_at: "2025-01-01T00:05:00Z", metadata: { deployed_revision_id: "rev-22222222" } }, { id: "evt-3", action: "restart-runtime", kind: "operation-completed", operation_id: "op-3", created_at: "2025-01-01T00:06:00Z", metadata: { restart_generation: 1 } }] }) });
       }
       return Promise.reject(new Error(`Unexpected URL ${url}`));
     });
@@ -252,6 +280,8 @@ describe("EndpointsPage", () => {
     await userEvent.click(within(endpointCard).getByRole("button", { name: "Restart runtime" }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("/bundle-endpoints/ep-1/restart-runtime"), expect.objectContaining({ method: "POST" })));
     expect(await within(endpointCard).findByText("Live on revision rev-2222 (restart gen 1).")).toBeInTheDocument();
+    expect(within(endpointCard).getByText(/Rollout state completed after restart-runtime/)).toBeInTheDocument();
+    expect(within(endpointCard).getAllByText(/"restart_generation": 1/).length).toBeGreaterThan(0);
   });
 
   it("shows endpoints zero state", async () => {
