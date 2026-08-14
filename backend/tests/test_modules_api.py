@@ -383,6 +383,8 @@ async def fake_rebuild_bundle_endpoint(self, endpoint_id):
     endpoint["current_module_revision_id"] = current_revision_id
     endpoint["prepared_revision_id"] = current_revision_id
     endpoint["prepared_digest"] = f"digest-{current_revision_id}"
+    endpoint["prepared_image_ref"] = f"registry.test/prepared/{endpoint_id}:{current_revision_id}"
+    endpoint["prepared_image_digest"] = f"sha256:{current_revision_id}"
     endpoint["prepared_at"] = "2025-01-01T00:00:00+00:00"
     endpoint["prepared_revision_is_current"] = True
     endpoint["deployed_revision_is_current"] = endpoint.get("deployed_revision_id") == current_revision_id
@@ -394,12 +396,22 @@ async def fake_deploy_bundle_endpoint(self, endpoint_id):
     if endpoint is None:
         return None
     current_revision_id = _current_revision_id_for_module(endpoint["module_import_id"])
-    if endpoint.get("prepared_revision_id") != current_revision_id:
+    if endpoint.get("prepared_revision_id") != current_revision_id or not endpoint.get("prepared_image_ref") or not endpoint.get("prepared_image_digest"):
         raise ValueError("rebuild required before deploy")
     endpoint["current_module_revision_id"] = current_revision_id
     endpoint["deployed_revision_id"] = current_revision_id
     endpoint["deployed_at"] = "2025-01-01T00:05:00+00:00"
     endpoint["deployed_revision_is_current"] = True
+    return endpoint
+
+
+async def fake_restart_bundle_endpoint_runtime(self, endpoint_id):
+    endpoint = ENDPOINTS.get(endpoint_id)
+    if endpoint is None:
+        return None
+    if not endpoint.get("deployed_revision_id"):
+        raise ValueError("deploy required before restart-runtime")
+    endpoint["restart_generation"] = int(endpoint.get("restart_generation") or 0) + 1
     return endpoint
 
 
@@ -549,6 +561,7 @@ def _patch_services(monkeypatch):
     monkeypatch.setattr(main_mod.AppServices, "regenerate_bundle_endpoint_key_global", fake_regenerate_bundle_endpoint_key_global)
     monkeypatch.setattr(main_mod.AppServices, "rebuild_bundle_endpoint", fake_rebuild_bundle_endpoint)
     monkeypatch.setattr(main_mod.AppServices, "deploy_bundle_endpoint", fake_deploy_bundle_endpoint)
+    monkeypatch.setattr(main_mod.AppServices, "restart_bundle_endpoint_runtime", fake_restart_bundle_endpoint_runtime)
     monkeypatch.setattr(main_mod.AppServices, "authenticate_bundle_endpoint", fake_authenticate_bundle_endpoint)
     monkeypatch.setattr(main_mod.AppServices, "enqueue_endpoint_invocation", fake_enqueue_endpoint_invocation)
     monkeypatch.setattr(main_mod.AppServices, "reconcile_endpoint_worker_assignments", fake_reconcile_endpoint_worker_assignments)
@@ -977,6 +990,10 @@ def test_bundle_endpoint_crud_and_key_rotation(monkeypatch):
         assert deploy.json()["deployed_revision_id"] == "rev-mod-endpoint"
         assert deploy.json()["deployed_revision_is_current"] is True
 
+        restart = client.post("/bundle-endpoints/endpoint-1/restart-runtime")
+        assert restart.status_code == 200
+        assert restart.json()["restart_generation"] == 1
+
         updated = client.patch("/bundle-endpoints/endpoint-1", json={"name": "Customer stream", "module_import_id": "mod-endpoint", "lm_profile_id": "lm-1", "pinned_worker_count": 3})
         assert updated.status_code == 200
         assert updated.json()["name"] == "Customer stream"
@@ -1026,6 +1043,8 @@ def test_bundle_endpoint_deploy_requires_rebuild(monkeypatch):
         "key_preview": "abc123",
         "api_key": "secret-key",
         "prepared_revision_id": "rev-old",
+        "prepared_image_ref": None,
+        "prepared_image_digest": None,
         "deployed_revision_id": "rev-old",
         "current_module_revision_id": "rev-new",
         "created_at": None,
@@ -1037,6 +1056,30 @@ def test_bundle_endpoint_deploy_requires_rebuild(monkeypatch):
 
     assert response.status_code == 400
     assert response.json() == {"error": "rebuild required before deploy"}
+
+
+def test_bundle_endpoint_restart_runtime_requires_deploy(monkeypatch):
+    STORE.clear()
+    ENDPOINTS.clear()
+    _patch_services(monkeypatch)
+    ENDPOINTS["endpoint-1"] = {
+        "id": "endpoint-1",
+        "module_import_id": "mod-endpoint",
+        "pinned_worker_count": 1,
+        "name": "Customer stream",
+        "key_preview": "abc123",
+        "api_key": "secret-key",
+        "deployed_revision_id": None,
+        "restart_generation": 0,
+        "created_at": None,
+        "updated_at": None,
+    }
+
+    with TestClient(main_mod.app) as client:
+        response = client.post("/bundle-endpoints/endpoint-1/restart-runtime")
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "deploy required before restart-runtime"}
 
 
 def test_bundle_endpoint_sync_and_stream_invocation(monkeypatch):

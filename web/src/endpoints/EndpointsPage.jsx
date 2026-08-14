@@ -91,16 +91,17 @@ function describeEndpointDeployment(endpoint) {
   const currentRevision = endpoint?.current_module_revision_id || null;
   const preparedRevision = endpoint?.prepared_revision_id || null;
   const deployedRevision = endpoint?.deployed_revision_id || null;
+  const restartGeneration = Number(endpoint?.restart_generation ?? 0);
   if (!currentRevision) {
     return "No module revision available yet.";
   }
-  if (preparedRevision !== currentRevision) {
+  if (preparedRevision !== currentRevision || !endpoint?.prepared_image_ref || !endpoint?.prepared_image_digest) {
     return `Latest bundle revision ${formatRevision(currentRevision)} needs rebuild before deploy.`;
   }
   if (deployedRevision !== currentRevision) {
     return `Prepared revision ${formatRevision(currentRevision)} is ready to deploy.`;
   }
-  return `Live on revision ${formatRevision(currentRevision)}.`;
+  return `Live on revision ${formatRevision(currentRevision)} (restart gen ${restartGeneration}).`;
 }
 
 function EndpointWorkersSection({ endpointWorkers, endpoints }) {
@@ -176,6 +177,14 @@ function EndpointWorkersSection({ endpointWorkers, endpoints }) {
                   <div>
                     <dt>Warmed rev</dt>
                     <dd className="mono">{formatRevision(worker.warmed_revision_id)}</dd>
+                  </div>
+                  <div>
+                    <dt>Desired gen</dt>
+                    <dd className="mono">{worker.desired_restart_generation ?? "-"}</dd>
+                  </div>
+                  <div>
+                    <dt>Warmed gen</dt>
+                    <dd className="mono">{worker.warmed_restart_generation ?? "-"}</dd>
                   </div>
                   <div>
                     <dt>Assignment</dt>
@@ -301,7 +310,8 @@ export function EndpointsPage() {
             <h1 className="t-display" style={{ fontSize: 22 }}>Endpoints</h1>
             <p className="muted t-sm">Manage named bundle endpoints for synchronous JSON and SSE streaming access.</p>
             <p className="muted t-xs">Rebuild prepares the latest bundle revision once; deploy then cuts traffic over to that prepared revision without redoing dependency installation when inputs are unchanged.</p>
-            <p className="muted t-xs">Worker cards show readiness state plus desired and warmed bundle revisions so deploy mismatches are visible without checking container logs.</p>
+            <p className="muted t-xs">Restart runtime forces an in-worker reload of the deployed image/revision by bumping restart generation, without restarting the whole worker container.</p>
+            <p className="muted t-xs">Worker cards show readiness state plus desired and warmed bundle revisions and restart generations so rollout mismatches are visible without checking container logs.</p>
           </div>
           <div className="row gap-2">
             <Button onClick={loadEndpoints} disabled={isLoading}>{isLoading ? "Refreshing..." : "Refresh"}</Button>
@@ -327,7 +337,8 @@ export function EndpointsPage() {
                       <div className="row gap-2 lm-profiles-actions">
                         <Button size="sm" onClick={() => navigate(`/endpoints/${encodeURIComponent(endpoint.id)}/edit`)}>Edit</Button>
                         <Button size="sm" onClick={() => runEndpointAction(endpoint.id, "rebuild")} disabled={actingEndpointId === endpoint.id}>{actingEndpointId === endpoint.id && endpointAction === "rebuild" ? "Rebuilding..." : "Rebuild"}</Button>
-                        <Button size="sm" onClick={() => runEndpointAction(endpoint.id, "deploy")} disabled={actingEndpointId === endpoint.id || !endpoint.current_module_revision_id || endpoint.prepared_revision_id !== endpoint.current_module_revision_id}>{actingEndpointId === endpoint.id && endpointAction === "deploy" ? "Deploying..." : "Deploy"}</Button>
+                        <Button size="sm" onClick={() => runEndpointAction(endpoint.id, "deploy")} disabled={actingEndpointId === endpoint.id || !endpoint.current_module_revision_id || endpoint.prepared_revision_id !== endpoint.current_module_revision_id || !endpoint.prepared_image_ref || !endpoint.prepared_image_digest}>{actingEndpointId === endpoint.id && endpointAction === "deploy" ? "Deploying..." : "Deploy"}</Button>
+                        <Button size="sm" onClick={() => runEndpointAction(endpoint.id, "restart-runtime")} disabled={actingEndpointId === endpoint.id || !endpoint.deployed_revision_id}>{actingEndpointId === endpoint.id && endpointAction === "restart-runtime" ? "Restarting..." : "Restart runtime"}</Button>
                         <Button size="sm" onClick={() => copyCurlCommand(endpoint.id, buildSyncCurlCommand(publicApiBase, endpoint.id, `<your-endpoint-key>`))}>{copiedEndpointId === endpoint.id ? "Copied" : "Copy curl"}</Button>
                         <Button size="sm" variant="danger" className="bundles-delete-btn" onClick={() => deleteEndpoint(endpoint.id)} disabled={deletingId === endpoint.id}>
                           {deletingId === endpoint.id ? "Deleting..." : "Delete"}
@@ -340,6 +351,7 @@ export function EndpointsPage() {
                       <span className="cap mono">Latest rev {formatRevision(endpoint.current_module_revision_id)}</span>
                       <span className="cap mono">Prepared rev {formatRevision(endpoint.prepared_revision_id)}</span>
                       <span className="cap mono">Deployed rev {formatRevision(endpoint.deployed_revision_id)}</span>
+                      <span className="cap mono">Restart gen {endpoint.restart_generation ?? 0}</span>
                       <span className="cap mono">Sync POST {buildApiUrl(`/bundle-endpoints/${endpoint.id}/invoke`)}</span>
                       <span className="cap mono">SSE POST {buildApiUrl(`/bundle-endpoints/${endpoint.id}/stream`)}</span>
                       <span className="cap mono">Key preview ...{endpoint.key_preview || "unknown"}</span>

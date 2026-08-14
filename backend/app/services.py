@@ -995,6 +995,13 @@ class AppServices:
         normalized = str(revision_id or "").strip()
         return normalized[:8] if normalized else "unknown"
 
+    @staticmethod
+    def _format_restart_generation_label(restart_generation: Any) -> str:
+        try:
+            return str(int(restart_generation))
+        except (TypeError, ValueError):
+            return "unknown"
+
     @classmethod
     def _describe_endpoint_worker_visibility(cls, worker: dict[str, Any]) -> dict[str, Any]:
         status = str(worker.get("status") or "unknown").strip().lower() or "unknown"
@@ -1002,9 +1009,15 @@ class AppServices:
         endpoint_id = str(worker.get("endpoint_id") or "").strip() or assigned_endpoint_id
         desired_revision_id = str(worker.get("desired_revision_id") or "").strip() or None
         warmed_revision_id = str(worker.get("warmed_revision_id") or "").strip() or None
+        desired_restart_generation = worker.get("desired_restart_generation")
+        warmed_restart_generation = worker.get("warmed_restart_generation")
         task_id = str(worker.get("task_id") or "").strip() or None
-        last_seen = str(worker.get("last_seen") or "").strip() or None
         revision_matches = bool(desired_revision_id and warmed_revision_id and desired_revision_id == warmed_revision_id)
+        desired_restart_generation_value = int(desired_restart_generation or 0)
+        warmed_restart_generation_value = int(warmed_restart_generation or 0)
+        restart_metadata_ready = desired_restart_generation is not None or warmed_restart_generation is not None
+        restart_generation_matches = desired_restart_generation_value == warmed_restart_generation_value
+        runtime_matches = bool(revision_matches and restart_generation_matches)
 
         if status == "idle":
             return {
@@ -1015,13 +1028,16 @@ class AppServices:
                 "is_revision_ready": False,
             }
         if status == "preparing":
+            summary = f"Preparing revision {cls._format_revision_label(desired_revision_id)}"
+            if desired_restart_generation is not None:
+                summary = f"{summary} for restart generation {cls._format_restart_generation_label(desired_restart_generation)}"
             if warmed_revision_id:
-                summary = (
-                    f"Installing dependencies for desired revision {cls._format_revision_label(desired_revision_id)} "
-                    f"(currently warmed on {cls._format_revision_label(warmed_revision_id)})."
-                )
+                summary = f"{summary} (currently warmed on {cls._format_revision_label(warmed_revision_id)}"
+                if warmed_restart_generation is not None:
+                    summary = f"{summary}, restart generation {cls._format_restart_generation_label(warmed_restart_generation)}"
+                summary = f"{summary})."
             else:
-                summary = f"Installing dependencies for desired revision {cls._format_revision_label(desired_revision_id)}."
+                summary = f"{summary}."
             return {
                 "operator_state": "preparing",
                 "state_label": "Preparing",
@@ -1030,12 +1046,18 @@ class AppServices:
                 "is_revision_ready": False,
             }
         if status == "stale":
-            warmed_text = cls._format_revision_label(warmed_revision_id) if warmed_revision_id else "none"
-            if endpoint_id and desired_revision_id and desired_revision_id != warmed_revision_id:
+            if endpoint_id and desired_revision_id and warmed_revision_id and desired_revision_id != warmed_revision_id:
                 deploy_state = "revision_mismatch"
                 summary = (
                     f"Heartbeat expired. Assigned endpoint expects revision {cls._format_revision_label(desired_revision_id)}; "
-                    f"worker was last warmed on {warmed_text}."
+                    f"worker was last warmed on {cls._format_revision_label(warmed_revision_id)}."
+                )
+            elif endpoint_id and desired_revision_id and revision_matches and restart_metadata_ready and not restart_generation_matches:
+                deploy_state = "restart_generation_mismatch"
+                summary = (
+                    f"Heartbeat expired. Assigned endpoint expects restart generation {cls._format_restart_generation_label(desired_restart_generation)} "
+                    f"on revision {cls._format_revision_label(desired_revision_id)}; worker last reported generation "
+                    f"{cls._format_restart_generation_label(warmed_restart_generation)}."
                 )
             elif endpoint_id:
                 deploy_state = "offline"
@@ -1051,19 +1073,29 @@ class AppServices:
                 "is_revision_ready": False,
             }
         if status == "listening":
-            if endpoint_id and revision_matches:
-                summary = f"Ready for traffic on revision {cls._format_revision_label(desired_revision_id)}."
+            if endpoint_id and runtime_matches:
+                summary = (
+                    f"Ready for traffic on revision {cls._format_revision_label(desired_revision_id)} "
+                    f"(restart generation {cls._format_restart_generation_label(desired_restart_generation)})."
+                )
                 deploy_state = "ready"
-            elif endpoint_id and desired_revision_id and warmed_revision_id:
+            elif endpoint_id and desired_revision_id and warmed_revision_id and desired_revision_id != warmed_revision_id:
                 summary = (
                     f"Heartbeat says listening, but desired revision {cls._format_revision_label(desired_revision_id)} "
                     f"does not match warmed revision {cls._format_revision_label(warmed_revision_id)}."
                 )
                 deploy_state = "revision_mismatch"
+            elif endpoint_id and revision_matches and restart_metadata_ready and not restart_generation_matches:
+                summary = (
+                    f"Heartbeat says listening on revision {cls._format_revision_label(desired_revision_id)}, but desired restart generation "
+                    f"{cls._format_restart_generation_label(desired_restart_generation)} does not match warmed restart generation "
+                    f"{cls._format_restart_generation_label(warmed_restart_generation)}."
+                )
+                deploy_state = "restart_generation_mismatch"
             elif endpoint_id:
                 if desired_revision_id:
                     summary = (
-                        f"Listening for assigned endpoint traffic, but warmed revision metadata is missing for desired revision "
+                        f"Listening for assigned endpoint traffic, but runtime convergence metadata is missing for desired revision "
                         f"{cls._format_revision_label(desired_revision_id)}."
                     )
                 elif warmed_revision_id:
@@ -1082,16 +1114,25 @@ class AppServices:
                 "state_label": "Listening",
                 "deploy_state": deploy_state,
                 "state_summary": summary,
-                "is_revision_ready": bool(endpoint_id and revision_matches),
+                "is_revision_ready": bool(endpoint_id and runtime_matches),
             }
         if status == "running":
-            if revision_matches:
-                summary = f"Serving an invocation on revision {cls._format_revision_label(desired_revision_id)}."
+            if runtime_matches:
+                summary = (
+                    f"Serving an invocation on revision {cls._format_revision_label(desired_revision_id)} "
+                    f"(restart generation {cls._format_restart_generation_label(desired_restart_generation)})."
+                )
                 deploy_state = "serving"
-            elif desired_revision_id or warmed_revision_id:
+            elif desired_revision_id and warmed_revision_id and desired_revision_id != warmed_revision_id:
                 summary = (
                     f"Serving an invocation while desired revision {cls._format_revision_label(desired_revision_id)} "
                     f"differs from warmed revision {cls._format_revision_label(warmed_revision_id)}."
+                )
+                deploy_state = "serving_stale_revision"
+            elif revision_matches and restart_metadata_ready and not restart_generation_matches:
+                summary = (
+                    f"Serving an invocation while desired restart generation {cls._format_restart_generation_label(desired_restart_generation)} "
+                    f"differs from warmed restart generation {cls._format_restart_generation_label(warmed_restart_generation)}."
                 )
                 deploy_state = "serving_stale_revision"
             else:
@@ -1104,7 +1145,7 @@ class AppServices:
                 "state_label": "Running",
                 "deploy_state": deploy_state,
                 "state_summary": summary,
-                "is_revision_ready": revision_matches,
+                "is_revision_ready": runtime_matches,
             }
         if status == "failed":
             summary = "Warmup or invocation failed."
@@ -1208,6 +1249,8 @@ class AppServices:
             "last_error": row["last_error"],
             "desired_revision_id": _clean_optional_text(runtime_metadata.get("desired_revision_id")),
             "warmed_revision_id": _clean_optional_text(runtime_metadata.get("warmed_revision_id")),
+            "desired_restart_generation": runtime_metadata.get("desired_restart_generation"),
+            "warmed_restart_generation": runtime_metadata.get("warmed_restart_generation"),
             "kind": "endpoint",
             "is_stale": is_stale,
             "is_live": not is_stale,
@@ -2082,6 +2125,7 @@ class AppServices:
             return None
         execution_state["bundle_image_ref"] = _clean_optional_text(endpoint.get("deployed_image_ref"))
         execution_state["bundle_image_digest"] = _clean_optional_text(endpoint.get("deployed_image_digest"))
+        execution_state["restart_generation"] = int(endpoint.get("restart_generation") or 0)
         return execution_state
 
     async def import_github_module(self, github_repo_url: str, github_branch: str, github_subpath: str | None = None) -> dict[str, Any]:
@@ -3571,9 +3615,11 @@ class AppServices:
         current_revision_id = str(endpoint.get("current_module_revision_id") or "").strip() or None
         prepared_revision_id = str(endpoint.get("prepared_revision_id") or "").strip() or None
         prepared_digest = str(endpoint.get("prepared_digest") or "").strip() or None
+        prepared_image_ref = str(endpoint.get("prepared_image_ref") or "").strip() or None
+        prepared_image_digest = str(endpoint.get("prepared_image_digest") or "").strip() or None
         if current_revision_id is None:
             raise ValueError("module revision metadata missing")
-        if prepared_revision_id != current_revision_id:
+        if prepared_revision_id != current_revision_id or not prepared_digest or not prepared_image_ref or not prepared_image_digest:
             raise ValueError("rebuild required before deploy")
 
         module_state = await self.resolve_module_execution_state(str(endpoint["module_import_id"]))
@@ -3604,9 +3650,9 @@ class AppServices:
                 """,
                 endpoint_id,
                 prepared_revision_id,
-                endpoint.get("prepared_digest"),
-                endpoint.get("prepared_image_ref"),
-                endpoint.get("prepared_image_digest"),
+                prepared_digest,
+                prepared_image_ref,
+                prepared_image_digest,
                 now,
             )
         payload = await self._append_bundle_endpoint_rollout_history(
@@ -3614,9 +3660,9 @@ class AppServices:
             action="deploy",
             metadata={
                 "deployed_revision_id": prepared_revision_id,
-                "deployed_digest": endpoint.get("prepared_digest"),
-                "deployed_image_ref": endpoint.get("prepared_image_ref"),
-                "deployed_image_digest": endpoint.get("prepared_image_digest"),
+                "deployed_digest": prepared_digest,
+                "deployed_image_ref": prepared_image_ref,
+                "deployed_image_digest": prepared_image_digest,
             },
         )
         return payload
@@ -3625,25 +3671,28 @@ class AppServices:
         endpoint = await self.get_bundle_endpoint(endpoint_id)
         if endpoint is None:
             return None
+        deployed_revision_id = str(endpoint.get("deployed_revision_id") or "").strip() or None
+        if deployed_revision_id is None:
+            raise ValueError("deploy required before restart-runtime")
         next_restart_generation = int(endpoint.get("restart_generation") or 0) + 1
         return await self._append_bundle_endpoint_rollout_history(
             endpoint_id,
             action="restart-runtime",
             metadata={
                 "restart_generation": next_restart_generation,
-                "deployed_revision_id": endpoint.get("deployed_revision_id"),
+                "deployed_revision_id": deployed_revision_id,
             },
             restart_generation=next_restart_generation,
         )
 
-    async def _get_endpoint_desired_revision_id(self, endpoint_id: str) -> str | None:
+    async def _get_endpoint_desired_runtime_state(self, endpoint_id: str) -> tuple[str | None, int]:
         endpoint = await self.get_bundle_endpoint(endpoint_id)
         if endpoint is None:
-            return None
-        return str(endpoint.get("deployed_revision_id") or "").strip() or None
+            return None, 0
+        return str(endpoint.get("deployed_revision_id") or "").strip() or None, int(endpoint.get("restart_generation") or 0)
 
     async def get_endpoint_routing_state(self, endpoint_id: str) -> dict[str, Any]:
-        desired_revision_id = await self._get_endpoint_desired_revision_id(endpoint_id)
+        desired_revision_id, desired_restart_generation = await self._get_endpoint_desired_runtime_state(endpoint_id)
         workers = (await self.list_endpoint_workers())["items"]
         assigned_workers = 0
         ready_workers = 0
@@ -3662,12 +3711,15 @@ class AppServices:
                 and worker_endpoint_id == endpoint_id
                 and str(worker.get("desired_revision_id") or "").strip() == desired_revision_id
                 and str(worker.get("warmed_revision_id") or "").strip() == desired_revision_id
+                and int(worker.get("desired_restart_generation") or 0) == desired_restart_generation
+                and int(worker.get("warmed_restart_generation") or 0) == desired_restart_generation
             ):
                 ready_workers += 1
             status_counts[status] = status_counts.get(status, 0) + 1
         return {
             "endpoint_id": endpoint_id,
             "desired_revision_id": desired_revision_id,
+            "desired_restart_generation": desired_restart_generation,
             "assigned_workers": assigned_workers,
             "ready_workers": ready_workers,
             "status_counts": status_counts,

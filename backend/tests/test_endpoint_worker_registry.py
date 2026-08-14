@@ -906,6 +906,7 @@ def test_endpoint_ready_for_invocation_survives_reconcile_with_newer_idle_worker
         assert routing_state == {
             "endpoint_id": "endpoint-1",
             "desired_revision_id": "rev-1",
+            "desired_restart_generation": 0,
             "assigned_workers": 1,
             "ready_workers": 1,
             "status_counts": {"listening": 1},
