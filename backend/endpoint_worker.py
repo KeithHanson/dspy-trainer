@@ -22,6 +22,44 @@ logger = logging.getLogger(__name__)
 _UNSET = object()
 
 
+def _normalize_log_value(value: object) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return "null"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        return value if value and all(ch not in value for ch in (" ", "\t", "\n", '"', "=")) else json.dumps(value)
+    return json.dumps(value, sort_keys=True, default=str)
+
+
+def _log_worker_event(event: str, /, level: int = logging.INFO, **fields: object) -> None:
+    ordered_fields = {"event": event, **fields}
+    message = " ".join(f"{key}={_normalize_log_value(value)}" for key, value in ordered_fields.items())
+    logger.log(level, message)
+
+
+def _log_assignment_transition(worker_id: str, previous_endpoint_id: str | None, next_endpoint_id: str | None) -> None:
+    previous = str(previous_endpoint_id or "").strip() or None
+    current = str(next_endpoint_id or "").strip() or None
+    if previous == current:
+        return
+    if current is None:
+        _log_worker_event(
+            "endpoint_worker.assignment_lost",
+            worker_id=worker_id,
+            previous_endpoint_id=previous,
+        )
+        return
+    _log_worker_event(
+        "endpoint_worker.assignment_changed",
+        worker_id=worker_id,
+        previous_endpoint_id=previous,
+        endpoint_id=current,
+    )
+
+
 def _build_runtime_identity(*, explicit_worker_id: str | None = None) -> dict[str, object]:
     hostname = socket.gethostname()
     pid = os.getpid()
@@ -199,8 +237,24 @@ async def process_endpoint_job(
     payload = json.loads(raw_payload)
     invocation_id = str(payload.get("invocation_id") or "").strip()
     if payload.get("type") != "endpoint_invocation" or not invocation_id:
-        logger.error("Invalid endpoint job payload: %s", payload)
+        _log_worker_event(
+            "endpoint_worker.invocation_payload_invalid",
+            level=logging.ERROR,
+            worker_id=worker_id,
+            endpoint_id=endpoint_id,
+            payload=payload,
+        )
         return
+    _log_worker_event(
+        "endpoint_worker.invocation_started",
+        worker_id=worker_id,
+        endpoint_id=endpoint_id,
+        invocation_id=invocation_id,
+        desired_revision_id=revision_id,
+        warmed_revision_id=revision_id,
+        restart_generation=restart_generation,
+        stream=bool(payload.get("stream", False)),
+    )
     heartbeat_task = None
     try:
         await _heartbeat(
@@ -238,6 +292,28 @@ async def process_endpoint_job(
             warmed_runtime=warmed_runtime,
             runtime_env_override=runtime_env,
         )
+        _log_worker_event(
+            "endpoint_worker.invocation_finished",
+            worker_id=worker_id,
+            endpoint_id=endpoint_id,
+            invocation_id=invocation_id,
+            desired_revision_id=revision_id,
+            warmed_revision_id=revision_id,
+            restart_generation=restart_generation,
+        )
+    except Exception as exc:
+        _log_worker_event(
+            "endpoint_worker.invocation_failed",
+            level=logging.ERROR,
+            worker_id=worker_id,
+            endpoint_id=endpoint_id,
+            invocation_id=invocation_id,
+            desired_revision_id=revision_id,
+            warmed_revision_id=revision_id,
+            restart_generation=restart_generation,
+            error=str(exc),
+        )
+        raise
     finally:
         if heartbeat_task is not None:
             heartbeat_task.cancel()
@@ -267,13 +343,28 @@ async def ensure_endpoint_assignment_ready(
 ) -> tuple[str | None, int | None, BundleRuntime | None, dict[str, str] | None]:
     execution_state = await services.resolve_bundle_endpoint_execution_state(endpoint_id)
     if execution_state is None:
-        logger.error("Assigned endpoint module not found: %s", endpoint_id)
+        _log_worker_event(
+            "endpoint_worker.assignment_not_ready",
+            level=logging.ERROR,
+            worker_id=worker_id,
+            endpoint_id=endpoint_id,
+            reason="execution_state_missing",
+        )
         await _heartbeat(services, worker_id, "idle", runtime_identity=runtime_identity)
         return None, None, None, None
     desired_revision_id = str(execution_state.get("bundle_revision_id") or "").strip() or None
     desired_restart_generation = int(execution_state.get("restart_generation") or 0)
     if desired_revision_id is None:
-        logger.error("Assigned endpoint revision metadata missing: %s", endpoint_id)
+        _log_worker_event(
+            "endpoint_worker.assignment_not_ready",
+            level=logging.ERROR,
+            worker_id=worker_id,
+            endpoint_id=endpoint_id,
+            reason="revision_metadata_missing",
+            desired_restart_generation=desired_restart_generation,
+            warmed_revision_id=warmed_revision_id,
+            warmed_restart_generation=warmed_restart_generation,
+        )
         await _heartbeat(
             services,
             worker_id,
@@ -290,13 +381,39 @@ async def ensure_endpoint_assignment_ready(
     runtime_env = await services.get_module_runtime_environment(str(execution_state.get("module_id") or ""))
     endpoint = await services.get_bundle_endpoint(endpoint_id)
     lm_profile = await services._get_lm_profile_record(str(endpoint["lm_profile_id"]), include_secret=True) if endpoint and endpoint.get("lm_profile_id") else None
+    reload_reasons: list[str] = []
+    if warmed_runtime is None:
+        reload_reasons.append("runtime_missing")
+    if warmed_revision_id != desired_revision_id:
+        reload_reasons.append("revision_changed")
+    if warmed_restart_generation != desired_restart_generation:
+        reload_reasons.append("restart_generation_changed")
+    action = "warmup_required" if reload_reasons else "reuse_warmed_runtime"
+    _log_worker_event(
+        "endpoint_worker.runtime_decision",
+        worker_id=worker_id,
+        endpoint_id=endpoint_id,
+        action=action,
+        desired_revision_id=desired_revision_id,
+        warmed_revision_id=warmed_revision_id,
+        desired_restart_generation=desired_restart_generation,
+        warmed_restart_generation=warmed_restart_generation,
+        reasons=reload_reasons,
+    )
     try:
         next_runtime = warmed_runtime
-        if (
-            warmed_revision_id != desired_revision_id
-            or warmed_restart_generation != desired_restart_generation
-            or warmed_runtime is None
-        ):
+        if reload_reasons:
+            _log_worker_event(
+                "endpoint_worker.warmup_started",
+                worker_id=worker_id,
+                endpoint_id=endpoint_id,
+                desired_revision_id=desired_revision_id,
+                warmed_revision_id=warmed_revision_id,
+                desired_restart_generation=desired_restart_generation,
+                warmed_restart_generation=warmed_restart_generation,
+                reasons=reload_reasons,
+                bundle_path=execution_state["bundle_path"],
+            )
             await _heartbeat(
                 services,
                 worker_id,
@@ -315,6 +432,16 @@ async def ensure_endpoint_assignment_ready(
                 lm_profile,
                 runtime_env,
             )
+            _log_worker_event(
+                "endpoint_worker.warmup_succeeded",
+                worker_id=worker_id,
+                endpoint_id=endpoint_id,
+                desired_revision_id=desired_revision_id,
+                warmed_revision_id=desired_revision_id,
+                desired_restart_generation=desired_restart_generation,
+                warmed_restart_generation=desired_restart_generation,
+                reasons=reload_reasons,
+            )
         await _heartbeat(
             services,
             worker_id,
@@ -327,7 +454,19 @@ async def ensure_endpoint_assignment_ready(
             warmed_restart_generation=desired_restart_generation,
         )
         return desired_revision_id, desired_restart_generation, next_runtime, runtime_env
-    except Exception:
+    except Exception as exc:
+        _log_worker_event(
+            "endpoint_worker.warmup_failed",
+            level=logging.ERROR,
+            worker_id=worker_id,
+            endpoint_id=endpoint_id,
+            desired_revision_id=desired_revision_id,
+            warmed_revision_id=warmed_revision_id,
+            desired_restart_generation=desired_restart_generation,
+            warmed_restart_generation=warmed_restart_generation,
+            reasons=reload_reasons,
+            error=str(exc),
+        )
         logger.exception("Endpoint worker warmup failed for endpoint %s", endpoint_id)
         await _heartbeat(
             services,
@@ -357,9 +496,14 @@ async def run_endpoint_worker() -> None:
         registration=True,
     )
     runtime_identity["worker_id"] = worker_id
-    logger.info("Endpoint worker started")
-    logger.info("Endpoint worker id: %s", worker_id)
-    logger.info("Endpoint worker runtime instance id: %s", runtime_identity.get("runtime_instance_id"))
+    _log_worker_event(
+        "endpoint_worker.started",
+        worker_id=worker_id,
+        runtime_instance_id=runtime_identity.get("runtime_instance_id"),
+        hostname=runtime_identity.get("hostname"),
+        pid=runtime_identity.get("pid"),
+        session_id=runtime_identity.get("session_id"),
+    )
     assigned_endpoint_id = ""
     warmed_revision_id: str | None = None
     warmed_restart_generation: int | None = None
@@ -369,6 +513,8 @@ async def run_endpoint_worker() -> None:
         while True:
             assignment = await services.get_endpoint_worker_assignment(worker_id)
             endpoint_id = str(assignment.get("endpoint_id") or "").strip() if assignment else ""
+            if endpoint_id != assigned_endpoint_id:
+                _log_assignment_transition(worker_id, assigned_endpoint_id or None, endpoint_id or None)
             if not endpoint_id:
                 assigned_endpoint_id = ""
                 warmed_revision_id = None
@@ -388,6 +534,17 @@ async def run_endpoint_worker() -> None:
                 warmed_runtime=warmed_runtime if endpoint_id == assigned_endpoint_id else None,
             )
             if ready_revision_id is None:
+                _log_worker_event(
+                    "endpoint_worker.assignment_retry_scheduled",
+                    worker_id=worker_id,
+                    endpoint_id=endpoint_id,
+                    desired_revision_id=None,
+                    warmed_revision_id=warmed_revision_id if endpoint_id == assigned_endpoint_id else None,
+                    desired_restart_generation=None,
+                    warmed_restart_generation=warmed_restart_generation if endpoint_id == assigned_endpoint_id else None,
+                    reason="assignment_not_ready",
+                    retry_in_seconds=2,
+                )
                 if endpoint_id != assigned_endpoint_id:
                     warmed_revision_id = None
                     warmed_restart_generation = None
@@ -401,6 +558,16 @@ async def run_endpoint_worker() -> None:
             try:
                 result = await services.redis.execute_command("BRPOP", services._endpoint_queue_name(endpoint_id), 5) if services.redis else None
             except RedisTimeoutError:
+                _log_worker_event(
+                    "endpoint_worker.queue_poll_retry",
+                    worker_id=worker_id,
+                    endpoint_id=endpoint_id,
+                    desired_revision_id=ready_revision_id,
+                    warmed_revision_id=warmed_revision_id,
+                    desired_restart_generation=ready_restart_generation,
+                    warmed_restart_generation=warmed_restart_generation,
+                    reason="redis_timeout",
+                )
                 continue
             if result is None:
                 continue
@@ -417,7 +584,18 @@ async def run_endpoint_worker() -> None:
                     runtime_env=warmed_runtime_env,
                     restart_generation=ready_restart_generation,
                 )
-            except Exception:
+            except Exception as exc:
+                _log_worker_event(
+                    "endpoint_worker.job_processing_failed",
+                    level=logging.ERROR,
+                    worker_id=worker_id,
+                    endpoint_id=endpoint_id,
+                    desired_revision_id=ready_revision_id,
+                    warmed_revision_id=warmed_revision_id,
+                    desired_restart_generation=ready_restart_generation,
+                    warmed_restart_generation=warmed_restart_generation,
+                    error=str(exc),
+                )
                 logger.exception("Endpoint worker job processing failed")
     finally:
         await services.disconnect()

@@ -16,6 +16,7 @@ from worker import process_job
 from endpoint_worker import (
     _build_runtime_identity,
     _heartbeat,
+    _log_assignment_transition,
     ensure_endpoint_assignment_ready,
     process_endpoint_job,
     resolve_endpoint_worker_id,
@@ -47,6 +48,7 @@ class FakeServices:
         self.process_log_updates = []
         self.fail_agent_run = False
         self.endpoint_invocations = []
+        self.fail_endpoint_invocation = False
         self.bundle_requirement_installs = []
         self.bundle_revision_id = "rev-1"
         self.restart_generation = 0
@@ -71,6 +73,8 @@ class FakeServices:
 
     async def run_endpoint_invocation_job(self, invocation_id, endpoint_id, input_payload, worker_id, *, stream, warmed_runtime=None, runtime_env_override=None):
         self.endpoint_invocations.append((invocation_id, endpoint_id, input_payload, worker_id, stream, warmed_runtime, runtime_env_override))
+        if self.fail_endpoint_invocation:
+            raise RuntimeError("endpoint invocation boom")
 
     async def get_bundle_endpoint(self, endpoint_id):
         return {"id": endpoint_id, "module_import_id": "mod-1", "deployed_revision_id": self.bundle_revision_id, "restart_generation": self.restart_generation, "lm_profile_id": None}
@@ -271,7 +275,7 @@ def test_endpoint_worker_heartbeat_preserves_revision_metadata_across_minimal_he
     assert heartbeat["runtime_metadata"]["endpoint_id"] == "endpoint-1"
 
 
-def test_process_endpoint_job_runs_endpoint_invocation_and_restores_listening():
+def test_process_endpoint_job_runs_endpoint_invocation_and_restores_listening(caplog):
     services = FakeServices()
     services.postgres_pool = object()
     runtime_identity = _build_runtime_identity(explicit_worker_id="endpoint-worker-1")
@@ -279,17 +283,18 @@ def test_process_endpoint_job_runs_endpoint_invocation_and_restores_listening():
         _heartbeat(cast(Any, services), "endpoint-worker-1", "idle", runtime_identity=runtime_identity, registration=True)
     )
 
-    asyncio.run(
-        process_endpoint_job(
-            cast(Any, services),
-            json.dumps({"type": "endpoint_invocation", "invocation_id": "inv-1", "input_payload": {"question": "hello"}, "stream": True}),
-            worker_id="endpoint-worker-1",
-            endpoint_id="endpoint-1",
-            revision_id="rev-1",
-            runtime_identity=runtime_identity,
-            restart_generation=2,
+    with caplog.at_level("INFO"):
+        asyncio.run(
+            process_endpoint_job(
+                cast(Any, services),
+                json.dumps({"type": "endpoint_invocation", "invocation_id": "inv-1", "input_payload": {"question": "hello"}, "stream": True}),
+                worker_id="endpoint-worker-1",
+                endpoint_id="endpoint-1",
+                revision_id="rev-1",
+                runtime_identity=runtime_identity,
+                restart_generation=2,
+            )
         )
-    )
 
     assert services.endpoint_invocations == [("inv-1", "endpoint-1", {"question": "hello"}, "endpoint-worker-1", True, None, None)]
     assert services.registry_calls[1][1]["status"] == "running"
@@ -298,9 +303,12 @@ def test_process_endpoint_job_runs_endpoint_invocation_and_restores_listening():
     assert services.registry_calls[-1][1]["status"] == "listening"
     assert services.registry_calls[-1][1]["runtime_metadata"]["desired_revision_id"] == "rev-1"
     assert services.registry_calls[-1][1]["runtime_metadata"]["desired_restart_generation"] == 2
+    assert "event=endpoint_worker.invocation_started" in caplog.text
+    assert "event=endpoint_worker.invocation_finished" in caplog.text
+    assert "invocation_id=inv-1" in caplog.text
 
 
-def test_ensure_endpoint_assignment_ready_preinstalls_dependencies_and_marks_listening():
+def test_ensure_endpoint_assignment_ready_preinstalls_dependencies_and_marks_listening(caplog):
     services = FakeServices()
     services.postgres_pool = object()
     runtime_identity = _build_runtime_identity(explicit_worker_id="endpoint-worker-1")
@@ -308,9 +316,10 @@ def test_ensure_endpoint_assignment_ready_preinstalls_dependencies_and_marks_lis
         _heartbeat(cast(Any, services), "endpoint-worker-1", "idle", runtime_identity=runtime_identity, registration=True)
     )
 
-    ready_revision_id, ready_restart_generation, warmed_runtime, warmed_runtime_env = asyncio.run(
-        ensure_endpoint_assignment_ready(cast(Any, services), "endpoint-worker-1", "endpoint-1", runtime_identity=runtime_identity)
-    )
+    with caplog.at_level("INFO"):
+        ready_revision_id, ready_restart_generation, warmed_runtime, warmed_runtime_env = asyncio.run(
+            ensure_endpoint_assignment_ready(cast(Any, services), "endpoint-worker-1", "endpoint-1", runtime_identity=runtime_identity)
+        )
 
     assert ready_revision_id == "rev-1"
     assert ready_restart_generation == 0
@@ -321,6 +330,11 @@ def test_ensure_endpoint_assignment_ready_preinstalls_dependencies_and_marks_lis
     assert statuses == ["preparing", "listening"]
     assert services.registry_calls[-1][1]["runtime_metadata"]["warmed_revision_id"] == "rev-1"
     assert services.registry_calls[-1][1]["runtime_metadata"]["warmed_restart_generation"] == 0
+    assert "event=endpoint_worker.runtime_decision" in caplog.text
+    assert "action=warmup_required" in caplog.text
+    assert "event=endpoint_worker.warmup_started" in caplog.text
+    assert "event=endpoint_worker.warmup_succeeded" in caplog.text
+    assert 'reasons=["runtime_missing", "revision_changed", "restart_generation_changed"]' in caplog.text
 
 
 def test_ensure_endpoint_assignment_ready_rewarms_when_revision_changes():
@@ -482,7 +496,7 @@ def test_ensure_endpoint_assignment_ready_rewarms_when_restart_generation_change
     assert services.registry_calls[-1][1]["runtime_metadata"]["warmed_restart_generation"] == 3
 
 
-def test_ensure_endpoint_assignment_ready_marks_worker_failed_when_revision_metadata_missing():
+def test_ensure_endpoint_assignment_ready_marks_worker_failed_when_revision_metadata_missing(caplog):
     services = FakeServices()
     services.postgres_pool = object()
     services.bundle_revision_id = None
@@ -491,15 +505,16 @@ def test_ensure_endpoint_assignment_ready_marks_worker_failed_when_revision_meta
         _heartbeat(cast(Any, services), "endpoint-worker-1", "idle", runtime_identity=runtime_identity, registration=True)
     )
 
-    ready_revision_id, ready_restart_generation, warmed_runtime, warmed_runtime_env = asyncio.run(
-        ensure_endpoint_assignment_ready(
-            cast(Any, services),
-            "endpoint-worker-1",
-            "endpoint-1",
-            warmed_revision_id="rev-1",
-            runtime_identity=runtime_identity,
+    with caplog.at_level("INFO"):
+        ready_revision_id, ready_restart_generation, warmed_runtime, warmed_runtime_env = asyncio.run(
+            ensure_endpoint_assignment_ready(
+                cast(Any, services),
+                "endpoint-worker-1",
+                "endpoint-1",
+                warmed_revision_id="rev-1",
+                runtime_identity=runtime_identity,
+            )
         )
-    )
 
     assert ready_revision_id is None
     assert ready_restart_generation is None
@@ -511,3 +526,42 @@ def test_ensure_endpoint_assignment_ready_marks_worker_failed_when_revision_meta
     assert services.registry_calls[-1][1]["last_error"] == "revision_metadata_missing"
     assert services.registry_calls[-1][1]["runtime_metadata"]["desired_revision_id"] is None
     assert services.registry_calls[-1][1]["runtime_metadata"]["warmed_revision_id"] == "rev-1"
+    assert "event=endpoint_worker.assignment_not_ready" in caplog.text
+    assert "reason=revision_metadata_missing" in caplog.text
+
+
+def test_process_endpoint_job_logs_failure_and_restores_listening(caplog):
+    services = FakeServices()
+    services.postgres_pool = object()
+    services.fail_endpoint_invocation = True
+    runtime_identity = _build_runtime_identity(explicit_worker_id="endpoint-worker-1")
+    asyncio.run(
+        _heartbeat(cast(Any, services), "endpoint-worker-1", "idle", runtime_identity=runtime_identity, registration=True)
+    )
+
+    with caplog.at_level("INFO"):
+        with pytest.raises(RuntimeError, match="endpoint invocation boom"):
+            asyncio.run(
+                process_endpoint_job(
+                    cast(Any, services),
+                    json.dumps({"type": "endpoint_invocation", "invocation_id": "inv-2", "input_payload": {"question": "hello"}, "stream": False}),
+                    worker_id="endpoint-worker-1",
+                    endpoint_id="endpoint-1",
+                    revision_id="rev-1",
+                    runtime_identity=runtime_identity,
+                    restart_generation=2,
+                )
+            )
+
+    assert services.registry_calls[-1][1]["status"] == "listening"
+    assert "event=endpoint_worker.invocation_failed" in caplog.text
+    assert 'error="endpoint invocation boom"' in caplog.text
+
+
+def test_log_assignment_transition_emits_change_and_loss(caplog):
+    with caplog.at_level("INFO"):
+        _log_assignment_transition("endpoint-worker-1", None, "endpoint-1")
+        _log_assignment_transition("endpoint-worker-1", "endpoint-1", None)
+
+    assert "event=endpoint_worker.assignment_changed" in caplog.text
+    assert "event=endpoint_worker.assignment_lost" in caplog.text
