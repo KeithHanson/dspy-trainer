@@ -191,6 +191,9 @@ Endpoint worker rollout workflow:
 5. If the deployed image/revision is correct but you need workers to reload it in place, trigger **Restart runtime** to bump restart generation without recreating the container.
 6. Review **Rollout operations** and **Rollout events** in the endpoint row to confirm rebuild/deploy/restart history before handing the rollout off.
 
+> [!IMPORTANT]
+> Prepared-image rebuilds now require the backend container to manage Docker on the host. In local Compose, this is provided by mounting `/var/run/docker.sock` into the backend container and installing the Docker CLI in the backend image.
+
 If startup still fails, recreate backend and worker with rebuild:
 
 ```bash

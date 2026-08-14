@@ -84,6 +84,7 @@ services:
       - bundles_data:/tmp/dspy-trainer/bundles
       - checkouts_data:/tmp/dspy-trainer/checkouts
       - optimization_artifacts_data:/tmp/dspy-trainer/optimization_artifacts
+      - /var/run/docker.sock:/var/run/docker.sock
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready', timeout=3)"]
       interval: 10s

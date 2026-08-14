@@ -570,10 +570,11 @@ LM Profiles store the provider model, API base, model type, optional LM class ov
 
 ### Managed Endpoint Workers
 
-Managed bundle endpoints do not execute inside the backend container. The backend authenticates, enqueues, and relays responses, while dedicated `endpoint-worker` containers perform bundle installation/bootstrap and invocation.
+Managed bundle endpoints do not execute inside the backend container. The backend authenticates, enqueues, relays responses, and now orchestrates prepared-image rebuilds for endpoint bundles, while dedicated `endpoint-worker` containers perform warmup and invocation.
 
 - Set `DSPY_TRAINER_TOTAL_WORKERS` in `.env` to control the number of general worker containers Compose starts.
 - Set `DSPY_TRAINER_TOTAL_ENDPOINT_WORKER_REPLICAS` in `.env` to control how many dedicated endpoint-worker containers Compose starts.
+- Local prepared-image rebuilds require backend access to the host Docker daemon; the provided Compose file mounts `/var/run/docker.sock` into the backend container for this purpose.
 - Compose-backed endpoint workers now self-register into the backend's durable endpoint-worker registry; operator-facing assignment and readiness come directly from those live registry records rather than from an env-defined logical roster.
 - Endpoint-worker heartbeats default to a 5 minute stale threshold (`DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS=300`). Override it in `.env` if you need operator stale detection to move faster or slower.
 - Each endpoint stores a `pinned_worker_count`.
