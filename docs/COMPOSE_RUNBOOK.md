@@ -189,7 +189,7 @@ Endpoint worker rollout workflow:
 3. Watch **Convergence**, **Prepared rev/image**, and the endpoint-worker cards in the UI until workers report the target revision as warmed/prepared.
 4. Trigger **Deploy** to move endpoint traffic to that prepared revision; workers should then cut over without a full dependency reinstall when the preparation inputs are unchanged.
 5. If the deployed image/revision is correct but you need workers to reload it in place, trigger **Restart runtime** to bump restart generation without recreating the container.
-6. Review **Rollout operations** and **Rollout events** in the endpoint row to confirm rebuild/deploy/restart history before handing the rollout off.
+6. Review the endpoint's prepared/deployed revision and image state plus worker convergence before handing the rollout off.
 
 > [!IMPORTANT]
 > Prepared-image rebuilds now require the backend container to manage Docker on the host. In local Compose, this is provided by mounting `/var/run/docker.sock` into the backend container and installing the Docker CLI in the backend image.

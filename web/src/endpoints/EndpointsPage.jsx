@@ -467,10 +467,6 @@ export function EndpointsPage() {
                       <span className="cap mono">Key preview ...{endpoint.key_preview || "unknown"}</span>
                     </div>
                     <p className="muted t-xs" style={{ marginTop: 8 }}>{describeEndpointDeployment(endpoint)}</p>
-                    <div className="row" style={{ gap: 12, marginTop: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
-                      <RolloutHistoryList title="Rollout operations" items={endpoint.rollout_operations} kind="operation" />
-                      <RolloutHistoryList title="Rollout events" items={endpoint.rollout_events} kind="event" />
-                    </div>
                   </div>
                 </article>
               ))}

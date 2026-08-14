@@ -70,10 +70,6 @@ describe("EndpointsPage", () => {
     expect(within(endpointCard).getByText(/Convergence 1\/2 ready · 1 mismatched · 1 stale · target 2/)).toBeInTheDocument();
     expect(within(endpointCard).getByText(/Rollout state completed after deploy/)).toBeInTheDocument();
     expect(within(endpointCard).getByText("Live on revision rev-2222 (restart gen 2).")).toBeInTheDocument();
-    expect(within(endpointCard).getByText("Rollout operations")).toBeInTheDocument();
-    expect(within(endpointCard).getByText("Rollout events")).toBeInTheDocument();
-    expect(within(endpointCard).getAllByText("deploy").length).toBeGreaterThan(0);
-    expect(within(endpointCard).getAllByText(/"deployed_revision_id": "rev-22222222"/).length).toBeGreaterThan(0);
     expect(screen.getByText("Endpoint workers")).toBeInTheDocument();
     expect(screen.getByText(/1 ready of 3 total · 2 live · 1 stale · 2 assigned · 1 unassigned/)).toBeInTheDocument();
     expect(screen.getByText("endpoint-worker-1")).toBeInTheDocument();
@@ -281,7 +277,6 @@ describe("EndpointsPage", () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("/bundle-endpoints/ep-1/restart-runtime"), expect.objectContaining({ method: "POST" })));
     expect(await within(endpointCard).findByText("Live on revision rev-2222 (restart gen 1).")).toBeInTheDocument();
     expect(within(endpointCard).getByText(/Rollout state completed after restart-runtime/)).toBeInTheDocument();
-    expect(within(endpointCard).getAllByText(/"restart_generation": 1/).length).toBeGreaterThan(0);
   });
 
   it("shows endpoints zero state", async () => {
