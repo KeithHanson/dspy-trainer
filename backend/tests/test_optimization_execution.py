@@ -431,6 +431,8 @@ def test_init_db_creates_tables_before_foreign_key_dependents():
     assert lm_profiles_idx < bundle_endpoints_idx
     assert evaluation_plans_idx < optimization_jobs_idx
     assert agent_run_plans_idx < optimization_jobs_idx
+    assert "restart_generation int not null default 0" in queries[bundle_endpoints_idx]
+    assert "rollout_operations jsonb not null default '[]'::jsonb" in queries[bundle_endpoints_idx]
     assert not any("virtual_key" in query for query in queries)
 
 

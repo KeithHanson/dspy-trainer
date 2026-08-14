@@ -98,6 +98,46 @@ def _merge_runtime_metadata(existing: Any, incoming: Any) -> dict[str, Any]:
     return merged
 
 
+def _coerce_json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return dict(decoded) if isinstance(decoded, dict) else {}
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            decoded = json.loads(value.decode())
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return {}
+        return dict(decoded) if isinstance(decoded, dict) else {}
+    return {}
+
+
+def _coerce_json_list(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        return [dict(item) for item in value if isinstance(item, dict)]
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+        return [dict(item) for item in decoded if isinstance(item, dict)] if isinstance(decoded, list) else []
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            decoded = json.loads(value.decode())
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return []
+        return [dict(item) for item in decoded if isinstance(item, dict)] if isinstance(decoded, list) else []
+    return []
+
+
+_ENDPOINT_ROLLOUT_ACTIONS = {"rebuild", "deploy", "restart-runtime"}
+_ENDPOINT_ROLLOUT_HISTORY_LIMIT = 50
+
+
 def _normalize_module_environment_entries(entries: Any) -> list[dict[str, Any]]:
     if entries in (None, ""):
         return []
@@ -1515,9 +1555,18 @@ class AppServices:
                   key_preview text not null,
                   prepared_revision_id text references bundle_revisions(id) on delete set null,
                   prepared_digest text,
+                  prepared_image_ref text,
+                  prepared_image_digest text,
                   prepared_at timestamptz,
                   deployed_revision_id text references bundle_revisions(id) on delete set null,
+                  deployed_digest text,
+                  deployed_image_ref text,
+                  deployed_image_digest text,
                   deployed_at timestamptz,
+                  restart_generation int not null default 0,
+                  rollout_state jsonb not null default '{}'::jsonb,
+                  rollout_operations jsonb not null default '[]'::jsonb,
+                  rollout_events jsonb not null default '[]'::jsonb,
                   created_at timestamptz not null,
                   updated_at timestamptz not null
                 );
@@ -1527,9 +1576,18 @@ class AppServices:
             await conn.execute("alter table bundle_endpoints add column if not exists pinned_worker_count int not null default 1;")
             await conn.execute("alter table bundle_endpoints add column if not exists prepared_revision_id text references bundle_revisions(id) on delete set null;")
             await conn.execute("alter table bundle_endpoints add column if not exists prepared_digest text;")
+            await conn.execute("alter table bundle_endpoints add column if not exists prepared_image_ref text;")
+            await conn.execute("alter table bundle_endpoints add column if not exists prepared_image_digest text;")
             await conn.execute("alter table bundle_endpoints add column if not exists prepared_at timestamptz;")
             await conn.execute("alter table bundle_endpoints add column if not exists deployed_revision_id text references bundle_revisions(id) on delete set null;")
+            await conn.execute("alter table bundle_endpoints add column if not exists deployed_digest text;")
+            await conn.execute("alter table bundle_endpoints add column if not exists deployed_image_ref text;")
+            await conn.execute("alter table bundle_endpoints add column if not exists deployed_image_digest text;")
             await conn.execute("alter table bundle_endpoints add column if not exists deployed_at timestamptz;")
+            await conn.execute("alter table bundle_endpoints add column if not exists restart_generation int not null default 0;")
+            await conn.execute("alter table bundle_endpoints add column if not exists rollout_state jsonb not null default '{}'::jsonb;")
+            await conn.execute("alter table bundle_endpoints add column if not exists rollout_operations jsonb not null default '[]'::jsonb;")
+            await conn.execute("alter table bundle_endpoints add column if not exists rollout_events jsonb not null default '[]'::jsonb;")
             await conn.execute("create index if not exists idx_bundle_endpoints_module_import_id on bundle_endpoints(module_import_id, created_at desc);")
             await conn.execute(
                 """
@@ -2761,6 +2819,9 @@ class AppServices:
         current_module_revision_id = AppServices._row_value(row, "current_module_revision_id")
         prepared_revision_id = AppServices._row_value(row, "prepared_revision_id")
         deployed_revision_id = AppServices._row_value(row, "deployed_revision_id")
+        rollout_state = _coerce_json_object(AppServices._row_value(row, "rollout_state"))
+        rollout_operations = _coerce_json_list(AppServices._row_value(row, "rollout_operations"))
+        rollout_events = _coerce_json_list(AppServices._row_value(row, "rollout_events"))
         payload = {
             "id": row["id"],
             "module_import_id": row["module_import_id"],
@@ -2770,9 +2831,18 @@ class AppServices:
             "key_preview": row["key_preview"],
             "prepared_revision_id": prepared_revision_id,
             "prepared_digest": AppServices._row_value(row, "prepared_digest"),
+            "prepared_image_ref": AppServices._row_value(row, "prepared_image_ref"),
+            "prepared_image_digest": AppServices._row_value(row, "prepared_image_digest"),
             "prepared_at": prepared_at.isoformat() if prepared_at else None,
             "deployed_revision_id": deployed_revision_id,
+            "deployed_digest": AppServices._row_value(row, "deployed_digest"),
+            "deployed_image_ref": AppServices._row_value(row, "deployed_image_ref"),
+            "deployed_image_digest": AppServices._row_value(row, "deployed_image_digest"),
             "deployed_at": deployed_at.isoformat() if deployed_at else None,
+            "restart_generation": int(AppServices._row_value(row, "restart_generation") or 0),
+            "rollout_state": rollout_state,
+            "rollout_operations": rollout_operations,
+            "rollout_events": rollout_events,
             "current_module_revision_id": current_module_revision_id,
             "current_module_commit_sha": AppServices._row_value(row, "current_module_commit_sha"),
             "current_module_bundle_version": AppServices._row_value(row, "current_module_bundle_version"),
@@ -2796,8 +2866,9 @@ class AppServices:
             rows = await conn.fetch(
                 """
                 select e.id, e.module_import_id, e.lm_profile_id, e.pinned_worker_count, e.name, e.key_preview,
-                       e.prepared_revision_id, e.prepared_digest, e.prepared_at,
-                       e.deployed_revision_id, e.deployed_at,
+                       e.prepared_revision_id, e.prepared_digest, e.prepared_image_ref, e.prepared_image_digest, e.prepared_at,
+                       e.deployed_revision_id, e.deployed_digest, e.deployed_image_ref, e.deployed_image_digest, e.deployed_at,
+                       e.restart_generation, e.rollout_state, e.rollout_operations, e.rollout_events,
                        e.created_at, e.updated_at,
                        m.bundle_name as module_bundle_name,
                        m.current_revision_id as current_module_revision_id,
@@ -2820,8 +2891,9 @@ class AppServices:
             row = await conn.fetchrow(
                 """
                 select e.id, e.module_import_id, e.lm_profile_id, e.pinned_worker_count, e.name, e.key_preview,
-                       e.prepared_revision_id, e.prepared_digest, e.prepared_at,
-                       e.deployed_revision_id, e.deployed_at,
+                       e.prepared_revision_id, e.prepared_digest, e.prepared_image_ref, e.prepared_image_digest, e.prepared_at,
+                       e.deployed_revision_id, e.deployed_digest, e.deployed_image_ref, e.deployed_image_digest, e.deployed_at,
+                       e.restart_generation, e.rollout_state, e.rollout_operations, e.rollout_events,
                        e.created_at, e.updated_at,
                        m.bundle_name as module_bundle_name,
                        m.current_revision_id as current_module_revision_id,
@@ -2849,8 +2921,9 @@ class AppServices:
             rows = await conn.fetch(
                 """
                 select e.id, e.module_import_id, e.lm_profile_id, e.pinned_worker_count, e.name, e.key_preview,
-                       e.prepared_revision_id, e.prepared_digest, e.prepared_at,
-                       e.deployed_revision_id, e.deployed_at,
+                       e.prepared_revision_id, e.prepared_digest, e.prepared_image_ref, e.prepared_image_digest, e.prepared_at,
+                       e.deployed_revision_id, e.deployed_digest, e.deployed_image_ref, e.deployed_image_digest, e.deployed_at,
+                       e.restart_generation, e.rollout_state, e.rollout_operations, e.rollout_events,
                        e.created_at, e.updated_at,
                        m.bundle_name as module_bundle_name,
                        m.current_revision_id as current_module_revision_id,
@@ -2897,11 +2970,18 @@ class AppServices:
                 """
                 insert into bundle_endpoints (
                     id, module_import_id, lm_profile_id, pinned_worker_count, name, key_hash, key_preview,
-                    prepared_revision_id, prepared_digest, prepared_at,
-                    deployed_revision_id, deployed_at,
+                    prepared_revision_id, prepared_digest, prepared_image_ref, prepared_image_digest, prepared_at,
+                    deployed_revision_id, deployed_digest, deployed_image_ref, deployed_image_digest, deployed_at,
+                    restart_generation, rollout_state, rollout_operations, rollout_events,
                     created_at, updated_at
                 )
-                values ($1, $2, $3, $4, $5, $6, $7, null, null, null, $8, $9, $10, $11)
+                values (
+                    $1, $2, $3, $4, $5, $6, $7,
+                    null, null, null, null, null,
+                    $8, null, null, null, $9,
+                    0, '{}'::jsonb, '[]'::jsonb, '[]'::jsonb,
+                    $10, $11
+                )
                 returning id, module_import_id, lm_profile_id, pinned_worker_count, name, key_preview, created_at, updated_at
                 """,
                 endpoint_id,
@@ -3020,9 +3100,18 @@ class AppServices:
                     pinned_worker_count = $5,
                     prepared_revision_id = case when $6 then null else prepared_revision_id end,
                     prepared_digest = case when $6 then null else prepared_digest end,
+                    prepared_image_ref = case when $6 then null else prepared_image_ref end,
+                    prepared_image_digest = case when $6 then null else prepared_image_digest end,
                     prepared_at = case when $6 then null else prepared_at end,
                     deployed_revision_id = case when $6 then null else deployed_revision_id end,
+                    deployed_digest = case when $6 then null else deployed_digest end,
+                    deployed_image_ref = case when $6 then null else deployed_image_ref end,
+                    deployed_image_digest = case when $6 then null else deployed_image_digest end,
                     deployed_at = case when $6 then null else deployed_at end,
+                    restart_generation = case when $6 then 0 else restart_generation end,
+                    rollout_state = case when $6 then '{}'::jsonb else rollout_state end,
+                    rollout_operations = case when $6 then '[]'::jsonb else rollout_operations end,
+                    rollout_events = case when $6 then '[]'::jsonb else rollout_events end,
                     updated_at = $7
                 where id = $1
                 returning id, module_import_id, lm_profile_id, pinned_worker_count, name, key_preview, created_at, updated_at
@@ -3217,6 +3306,78 @@ class AppServices:
                 assigned += 1
         return assigned
 
+    async def _append_bundle_endpoint_rollout_history(
+        self,
+        endpoint_id: str,
+        *,
+        action: str,
+        metadata: dict[str, Any] | None = None,
+        restart_generation: int | None = None,
+    ) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        if action not in _ENDPOINT_ROLLOUT_ACTIONS:
+            raise ValueError(f"unsupported rollout action: {action}")
+        endpoint = await self.get_bundle_endpoint(endpoint_id)
+        if endpoint is None:
+            return None
+        now = datetime.now(timezone.utc)
+        now_iso = now.isoformat()
+        effective_restart_generation = int(endpoint.get("restart_generation") or 0) if restart_generation is None else int(restart_generation)
+        operation_metadata = _json_ready(metadata or {})
+        operation_id = str(uuid4())
+        event_id = str(uuid4())
+        operations = _coerce_json_list(endpoint.get("rollout_operations"))
+        operations.append(
+            {
+                "id": operation_id,
+                "action": action,
+                "status": "completed",
+                "restart_generation": effective_restart_generation,
+                "created_at": now_iso,
+                "completed_at": now_iso,
+                "metadata": operation_metadata,
+            }
+        )
+        events = _coerce_json_list(endpoint.get("rollout_events"))
+        events.append(
+            {
+                "id": event_id,
+                "action": action,
+                "kind": "operation-completed",
+                "operation_id": operation_id,
+                "created_at": now_iso,
+                "metadata": operation_metadata,
+            }
+        )
+        rollout_state = {
+            "status": "completed",
+            "last_action": action,
+            "last_operation_id": operation_id,
+            "last_event_id": event_id,
+            "restart_generation": effective_restart_generation,
+            "updated_at": now_iso,
+        }
+        async with self.postgres_pool.acquire() as conn:
+            await conn.execute(
+                """
+                update bundle_endpoints
+                set restart_generation = $2,
+                    rollout_state = $3::jsonb,
+                    rollout_operations = $4::jsonb,
+                    rollout_events = $5::jsonb,
+                    updated_at = $6
+                where id = $1
+                """,
+                endpoint_id,
+                effective_restart_generation,
+                json.dumps(rollout_state),
+                json.dumps(operations[-_ENDPOINT_ROLLOUT_HISTORY_LIMIT:]),
+                json.dumps(events[-_ENDPOINT_ROLLOUT_HISTORY_LIMIT:]),
+                now,
+            )
+        return await self.get_bundle_endpoint(endpoint_id)
+
     async def rebuild_bundle_endpoint(self, endpoint_id: str) -> dict[str, Any] | None:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
@@ -3239,6 +3400,8 @@ class AppServices:
                 update bundle_endpoints
                 set prepared_revision_id = $2,
                     prepared_digest = $3,
+                    prepared_image_ref = null,
+                    prepared_image_digest = null,
                     prepared_at = $4,
                     updated_at = $4
                 where id = $1
@@ -3248,7 +3411,17 @@ class AppServices:
                 digest,
                 now,
             )
-        return await self.get_bundle_endpoint(endpoint_id)
+        payload = await self._append_bundle_endpoint_rollout_history(
+            endpoint_id,
+            action="rebuild",
+            metadata={
+                "prepared_revision_id": revision_id,
+                "prepared_digest": digest,
+                "prepared_image_ref": None,
+                "prepared_image_digest": None,
+            },
+        )
+        return payload
 
     async def deploy_bundle_endpoint(self, endpoint_id: str) -> dict[str, Any] | None:
         if self.postgres_pool is None:
@@ -3268,15 +3441,46 @@ class AppServices:
                 """
                 update bundle_endpoints
                 set deployed_revision_id = $2,
-                    deployed_at = $3,
-                    updated_at = $3
+                    deployed_digest = $3,
+                    deployed_image_ref = $4,
+                    deployed_image_digest = $5,
+                    deployed_at = $6,
+                    updated_at = $6
                 where id = $1
                 """,
                 endpoint_id,
                 prepared_revision_id,
+                endpoint.get("prepared_digest"),
+                endpoint.get("prepared_image_ref"),
+                endpoint.get("prepared_image_digest"),
                 now,
             )
-        return await self.get_bundle_endpoint(endpoint_id)
+        payload = await self._append_bundle_endpoint_rollout_history(
+            endpoint_id,
+            action="deploy",
+            metadata={
+                "deployed_revision_id": prepared_revision_id,
+                "deployed_digest": endpoint.get("prepared_digest"),
+                "deployed_image_ref": endpoint.get("prepared_image_ref"),
+                "deployed_image_digest": endpoint.get("prepared_image_digest"),
+            },
+        )
+        return payload
+
+    async def restart_bundle_endpoint_runtime(self, endpoint_id: str) -> dict[str, Any] | None:
+        endpoint = await self.get_bundle_endpoint(endpoint_id)
+        if endpoint is None:
+            return None
+        next_restart_generation = int(endpoint.get("restart_generation") or 0) + 1
+        return await self._append_bundle_endpoint_rollout_history(
+            endpoint_id,
+            action="restart-runtime",
+            metadata={
+                "restart_generation": next_restart_generation,
+                "deployed_revision_id": endpoint.get("deployed_revision_id"),
+            },
+            restart_generation=next_restart_generation,
+        )
 
     async def _get_endpoint_desired_revision_id(self, endpoint_id: str) -> str | None:
         endpoint = await self.get_bundle_endpoint(endpoint_id)
