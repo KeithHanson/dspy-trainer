@@ -518,6 +518,66 @@ def test_bundle_endpoint_rollout_state_persists_rebuild_deploy_and_restart(monke
     assert [item["action"] for item in restarted["rollout_events"]] == ["rebuild", "deploy", "restart-runtime"]
 
 
+def test_deploy_bundle_endpoint_requires_matching_prepared_digest(tmp_path, monkeypatch):
+    bundle_root = tmp_path / "bundle"
+    bundle_root.mkdir()
+    (bundle_root / "bundle.py").write_text("def run(x):\n    return x\n", encoding="utf-8")
+    (bundle_root / "bundle.toml").write_text('name = "demo-bundle"\nversion = "0.1.0"\n', encoding="utf-8")
+
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+    current_digest = inspect_bundle_preparation(str(bundle_root)).digest
+    state = {
+        "modules": {
+            "mod-1": {"id": "mod-1", "current_revision_id": "rev-1", "current_commit_sha": "abc123", "bundle_version": "0.1.0"},
+        },
+        "endpoints": {
+            "endpoint-1": {
+                "id": "endpoint-1",
+                "module_import_id": "mod-1",
+                "name": "Customer API",
+                "prepared_revision_id": "rev-1",
+                "prepared_digest": "stale-digest",
+                "prepared_image_ref": "registry.test/demo:stale",
+                "prepared_image_digest": "sha256:stale",
+                "deployed_revision_id": None,
+                "deployed_digest": None,
+                "deployed_image_ref": None,
+                "deployed_image_digest": None,
+                "rollout_state": {},
+                "rollout_operations": [],
+                "rollout_events": [],
+            }
+        },
+    }
+    services.postgres_pool = _RolloutPool(state)
+
+    async def fake_get_bundle_endpoint(endpoint_id):
+        return _serialize_endpoint_rollout_payload(state, endpoint_id)
+
+    async def fake_resolve_module_execution_state(module_id):
+        assert module_id == "mod-1"
+        return {
+            "module_id": module_id,
+            "bundle_path": str(bundle_root),
+            "bundle_revision_id": "rev-1",
+            "bundle_commit_sha": "abc123",
+            "bundle_version": "0.1.0",
+            "bundle_name": "demo-bundle",
+        }
+
+    monkeypatch.setattr(services, "get_bundle_endpoint", fake_get_bundle_endpoint)
+    monkeypatch.setattr(services, "resolve_module_execution_state", fake_resolve_module_execution_state)
+
+    with pytest.raises(ValueError, match="rebuild required before deploy"):
+        asyncio.run(services.deploy_bundle_endpoint("endpoint-1"))
+
+    endpoint = state["endpoints"]["endpoint-1"]
+    assert endpoint["deployed_revision_id"] is None
+    assert endpoint["deployed_digest"] is None
+    assert endpoint["prepared_digest"] == "stale-digest"
+    assert current_digest != endpoint["prepared_digest"]
+
+
 def test_resolve_bundle_endpoint_execution_state_requires_deployed_revision(monkeypatch):
     services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
 

@@ -3570,10 +3570,25 @@ class AppServices:
             return None
         current_revision_id = str(endpoint.get("current_module_revision_id") or "").strip() or None
         prepared_revision_id = str(endpoint.get("prepared_revision_id") or "").strip() or None
+        prepared_digest = str(endpoint.get("prepared_digest") or "").strip() or None
         if current_revision_id is None:
             raise ValueError("module revision metadata missing")
         if prepared_revision_id != current_revision_id:
             raise ValueError("rebuild required before deploy")
+
+        module_state = await self.resolve_module_execution_state(str(endpoint["module_import_id"]))
+        if module_state is None:
+            raise ValueError("module execution state not found")
+        bundle_path = str(module_state.get("bundle_path") or "").strip()
+        module_revision_id = str(module_state.get("bundle_revision_id") or "").strip() or None
+        if not bundle_path or module_revision_id is None:
+            raise ValueError("module revision metadata missing")
+        if module_revision_id != current_revision_id:
+            raise ValueError("module revision metadata changed during deploy")
+        current_digest = inspect_bundle_preparation(bundle_path).digest
+        if prepared_digest != current_digest:
+            raise ValueError("rebuild required before deploy")
+
         now = datetime.now(timezone.utc)
         async with self.postgres_pool.acquire() as conn:
             await conn.execute(
