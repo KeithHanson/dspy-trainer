@@ -3,11 +3,13 @@ from __future__ import annotations
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 import hashlib
+import importlib
 import importlib.util
 from importlib import import_module
 import io
 import inspect
 import json
+import linecache
 import logging
 import os
 from pathlib import Path
@@ -150,9 +152,22 @@ def _capture_process_output(log_event: Callable[[str], None] | None):
         handler.finish()
 
 
+def _bundle_source_fingerprint(root: Path) -> str:
+    hasher = hashlib.sha256()
+    hasher.update(str(root).encode("utf-8"))
+    for relative_path in ("module.py", "metric.py", "bundle.toml"):
+        file_path = root / relative_path
+        hasher.update(relative_path.encode("utf-8"))
+        if not file_path.exists():
+            continue
+        hasher.update(file_path.read_bytes())
+    return hasher.hexdigest()[:12]
+
+
 def _bundle_module_name(root: Path, stem: str) -> str:
-    digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:12]
-    return f"dspy_trainer_bundle_{digest}_{stem}"
+    path_digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:12]
+    source_digest = _bundle_source_fingerprint(root)
+    return f"dspy_trainer_bundle_{path_digest}_{source_digest}_{stem}"
 
 
 @contextmanager
@@ -293,6 +308,8 @@ def _build_lm_from_profile(lm_profile: dict[str, Any]) -> Any:
 
 def _load_bundle(bundle_path: str) -> tuple[Path, float, str | None, list[str] | None, ModuleType, ModuleType]:
     root = Path(bundle_path).expanduser().resolve()
+    importlib.invalidate_caches()
+    linecache.clearcache()
     preparation_spec = inspect_bundle_preparation(str(root))
     if preparation_spec.has_requirements:
         activate_bundle_preparation(str(root), get_settings().checkout_root)
