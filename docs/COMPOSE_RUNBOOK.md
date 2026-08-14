@@ -184,11 +184,14 @@ docker compose restart backend
 ```
 
 Endpoint worker rollout workflow:
-1. Trigger **Rebuild** for the endpoint after syncing or editing the bundle so Compose prepares the new shared dependency artifact once.
-2. Wait for endpoint workers to report the target revision as warmed/prepared.
-3. Trigger **Deploy** to move endpoint traffic to that prepared revision; workers should then cut over without a full dependency reinstall when the preparation inputs are unchanged.
+1. Sync the bundle source or save endpoint edits so the endpoint row shows the latest bundle revision that needs rollout.
+2. Trigger **Rebuild** for the endpoint so Compose prepares the shared dependency artifact and prepared image for the latest revision once.
+3. Watch **Convergence**, **Prepared rev/image**, and the endpoint-worker cards in the UI until workers report the target revision as warmed/prepared.
+4. Trigger **Deploy** to move endpoint traffic to that prepared revision; workers should then cut over without a full dependency reinstall when the preparation inputs are unchanged.
+5. If the deployed image/revision is correct but you need workers to reload it in place, trigger **Restart runtime** to bump restart generation without recreating the container.
+6. Review **Rollout operations** and **Rollout events** in the endpoint row to confirm rebuild/deploy/restart history before handing the rollout off.
 
-3. If startup still fails, recreate backend and worker with rebuild:
+If startup still fails, recreate backend and worker with rebuild:
 
 ```bash
 docker compose build --pull backend worker
