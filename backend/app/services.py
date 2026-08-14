@@ -3370,6 +3370,8 @@ class AppServices:
         worker_id: str,
         *,
         stream: bool,
+        warmed_runtime: Any | None = None,
+        runtime_env_override: dict[str, str] | None = None,
     ) -> None:
         endpoint = await self.get_bundle_endpoint(endpoint_id)
         if endpoint is None:
@@ -3380,11 +3382,12 @@ class AppServices:
             await self.publish_endpoint_invocation_event(invocation_id, "error", {"error": "bundle endpoint module not found"})
             return
         try:
-            await self.ensure_bundle_requirements_installed(execution_state["bundle_path"])
-            runtime_env = await self.get_module_runtime_environment(str(endpoint["module_import_id"]))
-            lm_profile = await self._get_lm_profile_record(str(endpoint["lm_profile_id"]), include_secret=True) if endpoint.get("lm_profile_id") else None
+            runtime_env = runtime_env_override if runtime_env_override is not None else await self.get_module_runtime_environment(str(endpoint["module_import_id"]))
+            if warmed_runtime is None:
+                await self.ensure_bundle_requirements_installed(execution_state["bundle_path"])
+                lm_profile = await self._get_lm_profile_record(str(endpoint["lm_profile_id"]), include_secret=True) if endpoint.get("lm_profile_id") else None
             if stream:
-                from app.executor.module_runner import stream_bundle
+                from app.executor.module_runner import stream_bundle, stream_warmed_bundle
 
                 loop = asyncio.get_running_loop()
 
@@ -3394,24 +3397,41 @@ class AppServices:
                         loop,
                     )
 
-                output = await asyncio.to_thread(
-                    stream_bundle,
-                    execution_state["bundle_path"],
-                    input_payload,
-                    emit_event,
-                    lm_profile,
-                    runtime_env,
-                )
+                if warmed_runtime is not None:
+                    output = await asyncio.to_thread(
+                        stream_warmed_bundle,
+                        warmed_runtime,
+                        input_payload,
+                        emit_event,
+                        runtime_env,
+                    )
+                else:
+                    output = await asyncio.to_thread(
+                        stream_bundle,
+                        execution_state["bundle_path"],
+                        input_payload,
+                        emit_event,
+                        lm_profile,
+                        runtime_env,
+                    )
             else:
-                from app.executor.module_runner import invoke_bundle
+                from app.executor.module_runner import invoke_bundle, invoke_warmed_bundle
 
-                output = await asyncio.to_thread(
-                    invoke_bundle,
-                    execution_state["bundle_path"],
-                    input_payload,
-                    lm_profile,
-                    runtime_env,
-                )
+                if warmed_runtime is not None:
+                    output = await asyncio.to_thread(
+                        invoke_warmed_bundle,
+                        warmed_runtime,
+                        input_payload,
+                        runtime_env,
+                    )
+                else:
+                    output = await asyncio.to_thread(
+                        invoke_bundle,
+                        execution_state["bundle_path"],
+                        input_payload,
+                        lm_profile,
+                        runtime_env,
+                    )
             await self.publish_endpoint_invocation_event(invocation_id, "final", output)
         except Exception as exc:
             await self.publish_endpoint_invocation_event(invocation_id, "error", {"error": str(exc), "worker_id": worker_id})
