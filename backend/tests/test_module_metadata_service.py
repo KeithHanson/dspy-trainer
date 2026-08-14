@@ -186,10 +186,10 @@ class _RolloutConn:
         if normalized.startswith("update bundle_endpoints set prepared_revision_id = $2"):
             endpoint["prepared_revision_id"] = params[1]
             endpoint["prepared_digest"] = params[2]
-            endpoint["prepared_image_ref"] = None
-            endpoint["prepared_image_digest"] = None
-            endpoint["prepared_at"] = params[3]
-            endpoint["updated_at"] = params[3]
+            endpoint["prepared_image_ref"] = params[3]
+            endpoint["prepared_image_digest"] = params[4]
+            endpoint["prepared_at"] = params[5]
+            endpoint["updated_at"] = params[5]
             return "UPDATE 1"
         if normalized.startswith("update bundle_endpoints set deployed_revision_id = $2"):
             endpoint["deployed_revision_id"] = params[1]
@@ -481,6 +481,18 @@ def test_bundle_endpoint_rollout_state_persists_rebuild_deploy_and_restart(monke
     monkeypatch.setattr(services, "resolve_module_execution_state", fake_resolve_module_execution_state)
     monkeypatch.setattr(services, "ensure_bundle_requirements_installed", fake_ensure_bundle_requirements_installed)
 
+    async def fake_build_prepared_bundle_image(**kwargs):
+        assert kwargs["endpoint_id"] == "endpoint-1"
+        assert kwargs["revision_id"] == "rev-1"
+        assert kwargs["existing_image_ref"] is None
+        return {
+            "image_ref": "dspy-trainer/prepared-endpoints/endpoint-1:rev-rev-1-prep-bundle-digest",
+            "image_digest": "sha256:prepared",
+            "reused": False,
+        }
+
+    monkeypatch.setattr(services, "_build_prepared_bundle_image", fake_build_prepared_bundle_image)
+
     rebuilt = asyncio.run(services.rebuild_bundle_endpoint("endpoint-1"))
     deployed = asyncio.run(services.deploy_bundle_endpoint("endpoint-1"))
     restarted = asyncio.run(services.restart_bundle_endpoint_runtime("endpoint-1"))
@@ -488,11 +500,15 @@ def test_bundle_endpoint_rollout_state_persists_rebuild_deploy_and_restart(monke
     assert rebuilt is not None
     assert rebuilt["prepared_revision_id"] == "rev-1"
     assert rebuilt["prepared_digest"]
+    assert rebuilt["prepared_image_ref"] == "dspy-trainer/prepared-endpoints/endpoint-1:rev-rev-1-prep-bundle-digest"
+    assert rebuilt["prepared_image_digest"] == "sha256:prepared"
     assert rebuilt["rollout_operations"][0]["action"] == "rebuild"
+    assert rebuilt["rollout_operations"][0]["metadata"]["prepared_image_reused"] is False
 
     assert deployed is not None
     assert deployed["deployed_revision_id"] == "rev-1"
     assert deployed["deployed_digest"] == rebuilt["prepared_digest"]
+    assert deployed["deployed_image_ref"] == rebuilt["prepared_image_ref"]
     assert deployed["rollout_operations"][1]["action"] == "deploy"
 
     assert restarted is not None
@@ -500,6 +516,66 @@ def test_bundle_endpoint_rollout_state_persists_rebuild_deploy_and_restart(monke
     assert restarted["rollout_state"]["last_action"] == "restart-runtime"
     assert [item["action"] for item in restarted["rollout_operations"]] == ["rebuild", "deploy", "restart-runtime"]
     assert [item["action"] for item in restarted["rollout_events"]] == ["rebuild", "deploy", "restart-runtime"]
+
+
+def test_deploy_bundle_endpoint_requires_matching_prepared_digest(tmp_path, monkeypatch):
+    bundle_root = tmp_path / "bundle"
+    bundle_root.mkdir()
+    (bundle_root / "bundle.py").write_text("def run(x):\n    return x\n", encoding="utf-8")
+    (bundle_root / "bundle.toml").write_text('name = "demo-bundle"\nversion = "0.1.0"\n', encoding="utf-8")
+
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+    current_digest = inspect_bundle_preparation(str(bundle_root)).digest
+    state = {
+        "modules": {
+            "mod-1": {"id": "mod-1", "current_revision_id": "rev-1", "current_commit_sha": "abc123", "bundle_version": "0.1.0"},
+        },
+        "endpoints": {
+            "endpoint-1": {
+                "id": "endpoint-1",
+                "module_import_id": "mod-1",
+                "name": "Customer API",
+                "prepared_revision_id": "rev-1",
+                "prepared_digest": "stale-digest",
+                "prepared_image_ref": "registry.test/demo:stale",
+                "prepared_image_digest": "sha256:stale",
+                "deployed_revision_id": None,
+                "deployed_digest": None,
+                "deployed_image_ref": None,
+                "deployed_image_digest": None,
+                "rollout_state": {},
+                "rollout_operations": [],
+                "rollout_events": [],
+            }
+        },
+    }
+    services.postgres_pool = _RolloutPool(state)
+
+    async def fake_get_bundle_endpoint(endpoint_id):
+        return _serialize_endpoint_rollout_payload(state, endpoint_id)
+
+    async def fake_resolve_module_execution_state(module_id):
+        assert module_id == "mod-1"
+        return {
+            "module_id": module_id,
+            "bundle_path": str(bundle_root),
+            "bundle_revision_id": "rev-1",
+            "bundle_commit_sha": "abc123",
+            "bundle_version": "0.1.0",
+            "bundle_name": "demo-bundle",
+        }
+
+    monkeypatch.setattr(services, "get_bundle_endpoint", fake_get_bundle_endpoint)
+    monkeypatch.setattr(services, "resolve_module_execution_state", fake_resolve_module_execution_state)
+
+    with pytest.raises(ValueError, match="rebuild required before deploy"):
+        asyncio.run(services.deploy_bundle_endpoint("endpoint-1"))
+
+    endpoint = state["endpoints"]["endpoint-1"]
+    assert endpoint["deployed_revision_id"] is None
+    assert endpoint["deployed_digest"] is None
+    assert endpoint["prepared_digest"] == "stale-digest"
+    assert current_digest != endpoint["prepared_digest"]
 
 
 def test_resolve_bundle_endpoint_execution_state_requires_deployed_revision(monkeypatch):
@@ -519,7 +595,36 @@ def test_resolve_bundle_endpoint_execution_state_requires_deployed_revision(monk
     monkeypatch.setattr(services, "resolve_module_execution_state", fake_resolve_module_execution_state)
 
     assert asyncio.run(services.resolve_bundle_endpoint_execution_state("endpoint-1")) is None
-    assert asyncio.run(services._get_endpoint_desired_revision_id("endpoint-1")) is None
+
+
+def test_resolve_bundle_endpoint_execution_state_includes_deployed_image_metadata(monkeypatch):
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+
+    async def fake_get_bundle_endpoint(endpoint_id):
+        return {
+            "id": endpoint_id,
+            "module_import_id": "mod-1",
+            "deployed_revision_id": "rev-1",
+            "deployed_image_ref": "registry.test/prepared/endpoint-1:rev-1",
+            "deployed_image_digest": "sha256:deployed",
+        }
+
+    async def fake_resolve_bundle_revision_execution_state(revision_id):
+        assert revision_id == "rev-1"
+        return {"module_id": "mod-1", "bundle_path": "/tmp/bundle", "bundle_revision_id": revision_id}
+
+    monkeypatch.setattr(services, "get_bundle_endpoint", fake_get_bundle_endpoint)
+    monkeypatch.setattr(services, "resolve_bundle_revision_execution_state", fake_resolve_bundle_revision_execution_state)
+
+    payload = asyncio.run(services.resolve_bundle_endpoint_execution_state("endpoint-1"))
+
+    assert payload == {
+        "module_id": "mod-1",
+        "bundle_path": "/tmp/bundle",
+        "bundle_revision_id": "rev-1",
+        "bundle_image_ref": "registry.test/prepared/endpoint-1:rev-1",
+        "bundle_image_digest": "sha256:deployed",
+    }
 
 
 def test_build_module_payload_includes_github_and_revision_metadata():
@@ -971,6 +1076,184 @@ def test_ensure_bundle_requirements_installed_surfaces_system_command_failure(tm
         asyncio.run(services.ensure_bundle_requirements_installed(str(bundle_root)))
 
     assert str(exc_info.value) == "failed"
+
+
+def test_build_prepared_bundle_image_builds_revision_and_digest_tagged_image(tmp_path, monkeypatch):
+    services = AppServices(
+        Settings(
+            postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer",
+            checkout_root=str(tmp_path / "checkouts"),
+            prepared_endpoint_image_repository="registry.test/prepared-endpoints",
+        )
+    )
+    bundle_root = tmp_path / "bundle"
+    bundle_root.mkdir()
+    (bundle_root / "bundle.toml").write_text(
+        "name='x'\nversion='0.1.0'\nscore_pass_threshold=0.8\n[runtime]\nsystem_dependency_commands=['echo image-build']\n",
+        encoding="utf-8",
+    )
+    (bundle_root / "requirements.txt").write_text("httpx==0.27.0\n", encoding="utf-8")
+    spec = inspect_bundle_preparation(str(bundle_root))
+    prepared_dir = bundle_preparation_cache_root(str(tmp_path / "checkouts")) / spec.digest
+    (prepared_dir / "site-packages").mkdir(parents=True)
+    (prepared_dir / "prepared.json").write_text("{}", encoding="utf-8")
+
+    calls: list[tuple[str, ...]] = []
+    dockerfile_text = ""
+
+    async def fake_run_subprocess(*argv, cwd=None):
+        nonlocal dockerfile_text
+        del cwd
+        calls.append(tuple(argv))
+        if argv[0:2] == ("docker", "build"):
+            dockerfile_text = (Path(argv[4]) / "Dockerfile").read_text(encoding="utf-8")
+            return ("", "")
+        if argv[0:3] == ("docker", "image", "inspect"):
+            return ("sha256:built", "")
+        return ("", "")
+
+    monkeypatch.setattr(services, "_run_subprocess", fake_run_subprocess)
+
+    payload = asyncio.run(
+        services._build_prepared_bundle_image(
+            endpoint_id="endpoint-1",
+            bundle_path=str(bundle_root),
+            revision_id="rev-1",
+            digest=spec.digest,
+            existing_image_ref=None,
+            existing_image_digest=None,
+        )
+    )
+
+    assert payload == {
+        "image_ref": f"registry.test/prepared-endpoints/endpoint-1:rev-rev-1-prep-{spec.digest[:24]}",
+        "image_digest": "sha256:built",
+        "reused": False,
+    }
+    assert calls[0][0:3] == ("docker", "build", "--tag")
+    assert calls[0][3] == payload["image_ref"]
+    assert "FROM python:3.11-slim" in dockerfile_text
+    assert 'RUN ["/bin/sh", "-lc", "echo image-build"]' in dockerfile_text
+    assert calls[1] == ("docker", "image", "inspect", payload["image_ref"], "--format", "{{.Id}}")
+
+
+def test_build_prepared_bundle_image_reuses_existing_matching_local_image(tmp_path, monkeypatch):
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_run_subprocess(*argv, cwd=None):
+        del cwd
+        calls.append(tuple(argv))
+        return ("sha256:prepared", "")
+
+    monkeypatch.setattr(services, "_run_subprocess", fake_run_subprocess)
+
+    payload = asyncio.run(
+        services._build_prepared_bundle_image(
+            endpoint_id="endpoint-1",
+            bundle_path=str(tmp_path / "bundle"),
+            revision_id="rev-1",
+            digest="digest-1",
+            existing_image_ref="registry.test/prepared/endpoint-1:rev-1",
+            existing_image_digest="sha256:prepared",
+        )
+    )
+
+    assert payload == {
+        "image_ref": "registry.test/prepared/endpoint-1:rev-1",
+        "image_digest": "sha256:prepared",
+        "reused": True,
+    }
+    assert calls == [
+        ("docker", "image", "inspect", "registry.test/prepared/endpoint-1:rev-1", "--format", "{{.Id}}")
+    ]
+
+
+def test_rebuild_bundle_endpoint_reuses_matching_prepared_image_metadata(tmp_path, monkeypatch):
+    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer", checkout_root=str(tmp_path / "checkouts")))
+    bundle_root = tmp_path / "bundle"
+    bundle_root.mkdir()
+    (bundle_root / "requirements.txt").write_text("httpx==0.27.0\n", encoding="utf-8")
+    digest = inspect_bundle_preparation(str(bundle_root)).digest
+    state = {
+        "modules": {"mod-1": {"id": "mod-1", "current_revision_id": "rev-1", "current_commit_sha": "abc123", "bundle_version": "0.1.0"}},
+        "endpoints": {
+            "endpoint-1": {
+                "id": "endpoint-1",
+                "module_import_id": "mod-1",
+                "lm_profile_id": None,
+                "pinned_worker_count": 1,
+                "name": "Customer API",
+                "key_preview": "abc123",
+                "prepared_revision_id": "rev-1",
+                "prepared_digest": digest,
+                "prepared_image_ref": "registry.test/prepared-endpoints/endpoint-1:rev-rev-1-prep-cache",
+                "prepared_image_digest": "sha256:prepared",
+                "prepared_at": None,
+                "deployed_revision_id": None,
+                "deployed_digest": None,
+                "deployed_image_ref": None,
+                "deployed_image_digest": None,
+                "deployed_at": None,
+                "restart_generation": 0,
+                "rollout_state": {},
+                "rollout_operations": [],
+                "rollout_events": [],
+                "created_at": None,
+                "updated_at": None,
+            }
+        },
+    }
+    services.postgres_pool = _RolloutPool(state)
+
+    async def fake_get_bundle_endpoint(endpoint_id):
+        return _serialize_endpoint_rollout_payload(state, endpoint_id)
+
+    async def fake_resolve_module_execution_state(module_id):
+        return {
+            "module_id": module_id,
+            "bundle_path": str(bundle_root),
+            "bundle_revision_id": "rev-1",
+            "bundle_commit_sha": "abc123",
+            "bundle_version": "0.1.0",
+            "bundle_name": "demo-bundle",
+        }
+
+    async def fake_ensure_bundle_requirements_installed(bundle_path):
+        assert bundle_path == str(bundle_root)
+        return None
+
+    observed_kwargs: list[dict[str, Any]] = []
+
+    async def fake_build_prepared_bundle_image(**kwargs):
+        observed_kwargs.append(kwargs)
+        return {
+            "image_ref": kwargs["existing_image_ref"],
+            "image_digest": kwargs["existing_image_digest"],
+            "reused": True,
+        }
+
+    monkeypatch.setattr(services, "get_bundle_endpoint", fake_get_bundle_endpoint)
+    monkeypatch.setattr(services, "resolve_module_execution_state", fake_resolve_module_execution_state)
+    monkeypatch.setattr(services, "ensure_bundle_requirements_installed", fake_ensure_bundle_requirements_installed)
+    monkeypatch.setattr(services, "_build_prepared_bundle_image", fake_build_prepared_bundle_image)
+
+    payload = asyncio.run(services.rebuild_bundle_endpoint("endpoint-1"))
+
+    assert payload is not None
+    assert payload["prepared_image_ref"] == "registry.test/prepared-endpoints/endpoint-1:rev-rev-1-prep-cache"
+    assert payload["prepared_image_digest"] == "sha256:prepared"
+    assert payload["rollout_operations"][0]["metadata"]["prepared_image_reused"] is True
+    assert observed_kwargs == [
+        {
+            "endpoint_id": "endpoint-1",
+            "bundle_path": str(bundle_root),
+            "revision_id": "rev-1",
+            "digest": digest,
+            "existing_image_ref": "registry.test/prepared-endpoints/endpoint-1:rev-rev-1-prep-cache",
+            "existing_image_digest": "sha256:prepared",
+        }
+    ]
 
 
 def test_json_ready_serializes_decimal_values():

@@ -18,6 +18,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from types import SimpleNamespace
 import tomllib
 import traceback
@@ -440,6 +441,11 @@ def _normalize_budget(value: Any, *, default: str = "medium") -> str:
     if normalized in {"light", "medium", "heavy"}:
         return normalized
     raise ValueError("budget must be one of: light, medium, heavy")
+
+
+def _sanitize_docker_image_component(value: Any, *, fallback: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-._")
+    return normalized or fallback
 
 
 class AppServices:
@@ -2071,7 +2077,12 @@ class AppServices:
         deployed_revision_id = str(endpoint.get("deployed_revision_id") or "").strip()
         if not deployed_revision_id:
             return None
-        return await self.resolve_bundle_revision_execution_state(deployed_revision_id)
+        execution_state = await self.resolve_bundle_revision_execution_state(deployed_revision_id)
+        if execution_state is None:
+            return None
+        execution_state["bundle_image_ref"] = _clean_optional_text(endpoint.get("deployed_image_ref"))
+        execution_state["bundle_image_digest"] = _clean_optional_text(endpoint.get("deployed_image_digest"))
+        return execution_state
 
     async def import_github_module(self, github_repo_url: str, github_branch: str, github_subpath: str | None = None) -> dict[str, Any]:
         normalized_repo_url = _normalize_github_repo_url(github_repo_url)
@@ -3378,6 +3389,123 @@ class AppServices:
             )
         return await self.get_bundle_endpoint(endpoint_id)
 
+    async def _run_subprocess(self, *argv: str, cwd: str | Path | None = None) -> tuple[str, str]:
+        process = await asyncio.create_subprocess_exec(
+            *argv,
+            cwd=str(cwd) if cwd is not None else None,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout_bytes, stderr_bytes = await process.communicate()
+        stdout = stdout_bytes.decode("utf-8", errors="ignore").strip()
+        stderr = stderr_bytes.decode("utf-8", errors="ignore").strip()
+        if process.returncode != 0:
+            raise RuntimeError(stderr or stdout or f"command failed: {' '.join(argv)}")
+        return stdout, stderr
+
+    def _prepared_bundle_image_repository(self, endpoint_id: str) -> str:
+        base_repository = str(self.settings.prepared_endpoint_image_repository or "").strip().strip("/")
+        if not base_repository:
+            raise RuntimeError("DSPY_TRAINER_PREPARED_ENDPOINT_IMAGE_REPOSITORY must not be empty")
+        endpoint_component = _sanitize_docker_image_component(endpoint_id, fallback="endpoint")
+        return f"{base_repository}/{endpoint_component}"
+
+    def _prepared_bundle_image_tag(self, revision_id: str, digest: str) -> str:
+        revision_component = _sanitize_docker_image_component(revision_id, fallback="revision")[:48]
+        digest_component = _sanitize_docker_image_component(digest, fallback="digest")[:24]
+        return f"rev-{revision_component}-prep-{digest_component}"
+
+    async def _inspect_local_image_id(self, image_ref: str) -> str | None:
+        try:
+            stdout, _ = await self._run_subprocess(
+                str(self.settings.docker_executable or "docker"),
+                "image",
+                "inspect",
+                image_ref,
+                "--format",
+                "{{.Id}}",
+            )
+        except RuntimeError:
+            return None
+        return _clean_optional_text(stdout)
+
+    async def _build_prepared_bundle_image(
+        self,
+        *,
+        endpoint_id: str,
+        bundle_path: str,
+        revision_id: str,
+        digest: str,
+        existing_image_ref: str | None,
+        existing_image_digest: str | None,
+    ) -> dict[str, Any]:
+        existing_ref = _clean_optional_text(existing_image_ref)
+        existing_digest = _clean_optional_text(existing_image_digest)
+        if existing_ref and existing_digest and await self._inspect_local_image_id(existing_ref) == existing_digest:
+            logger.info(
+                "prepared_bundle_image_reused endpoint_id=%s revision_id=%s digest=%s image_ref=%s image_digest=%s",
+                endpoint_id,
+                revision_id,
+                digest,
+                existing_ref,
+                existing_digest,
+            )
+            return {"image_ref": existing_ref, "image_digest": existing_digest, "reused": True}
+
+        spec = inspect_bundle_preparation(bundle_path)
+        repository = self._prepared_bundle_image_repository(endpoint_id)
+        image_ref = f"{repository}:{self._prepared_bundle_image_tag(revision_id, digest)}"
+        prepared_site_packages_dir = bundle_preparation_artifact_dir(self._bundle_preparation_cache_root, digest) / "site-packages"
+        with tempfile.TemporaryDirectory(prefix="prepared-bundle-image-") as temp_dir:
+            context_root = Path(temp_dir)
+            bundle_context = context_root / "bundle"
+            shutil.copytree(spec.bundle_root, bundle_context)
+            site_packages_context = context_root / "site-packages"
+            if prepared_site_packages_dir.exists():
+                shutil.copytree(prepared_site_packages_dir, site_packages_context)
+            else:
+                site_packages_context.mkdir(parents=True, exist_ok=True)
+            dockerfile_lines = [
+                f"FROM {self.settings.prepared_endpoint_image_base}",
+                "ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/opt/bundle:/opt/prepared/site-packages",
+                "WORKDIR /opt/bundle",
+            ]
+            for command in spec.system_dependency_commands:
+                dockerfile_lines.append(f"RUN {json.dumps(['/bin/sh', '-lc', command])}")
+            dockerfile_lines.extend(
+                [
+                    "COPY site-packages/ /opt/prepared/site-packages/",
+                    "COPY bundle/ /opt/bundle/",
+                ]
+            )
+            (context_root / "Dockerfile").write_text("\n".join(dockerfile_lines) + "\n", encoding="utf-8")
+            logger.info(
+                "prepared_bundle_image_build_started endpoint_id=%s revision_id=%s digest=%s image_ref=%s",
+                endpoint_id,
+                revision_id,
+                digest,
+                image_ref,
+            )
+            await self._run_subprocess(
+                str(self.settings.docker_executable or "docker"),
+                "build",
+                "--tag",
+                image_ref,
+                str(context_root),
+            )
+        image_digest = await self._inspect_local_image_id(image_ref)
+        if image_digest is None:
+            raise RuntimeError(f"prepared image digest unavailable for {image_ref}")
+        logger.info(
+            "prepared_bundle_image_build_succeeded endpoint_id=%s revision_id=%s digest=%s image_ref=%s image_digest=%s",
+            endpoint_id,
+            revision_id,
+            digest,
+            image_ref,
+            image_digest,
+        )
+        return {"image_ref": image_ref, "image_digest": image_digest, "reused": False}
+
     async def rebuild_bundle_endpoint(self, endpoint_id: str) -> dict[str, Any] | None:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
@@ -3393,6 +3521,14 @@ class AppServices:
             raise ValueError("module revision metadata missing")
         await self.ensure_bundle_requirements_installed(bundle_path)
         digest = inspect_bundle_preparation(bundle_path).digest
+        image_metadata = await self._build_prepared_bundle_image(
+            endpoint_id=endpoint_id,
+            bundle_path=bundle_path,
+            revision_id=revision_id,
+            digest=digest,
+            existing_image_ref=endpoint.get("prepared_image_ref") if str(endpoint.get("prepared_revision_id") or "").strip() == revision_id and str(endpoint.get("prepared_digest") or "").strip() == digest else None,
+            existing_image_digest=endpoint.get("prepared_image_digest") if str(endpoint.get("prepared_revision_id") or "").strip() == revision_id and str(endpoint.get("prepared_digest") or "").strip() == digest else None,
+        )
         now = datetime.now(timezone.utc)
         async with self.postgres_pool.acquire() as conn:
             await conn.execute(
@@ -3400,15 +3536,17 @@ class AppServices:
                 update bundle_endpoints
                 set prepared_revision_id = $2,
                     prepared_digest = $3,
-                    prepared_image_ref = null,
-                    prepared_image_digest = null,
-                    prepared_at = $4,
-                    updated_at = $4
+                    prepared_image_ref = $4,
+                    prepared_image_digest = $5,
+                    prepared_at = $6,
+                    updated_at = $6
                 where id = $1
                 """,
                 endpoint_id,
                 revision_id,
                 digest,
+                image_metadata["image_ref"],
+                image_metadata["image_digest"],
                 now,
             )
         payload = await self._append_bundle_endpoint_rollout_history(
@@ -3417,8 +3555,9 @@ class AppServices:
             metadata={
                 "prepared_revision_id": revision_id,
                 "prepared_digest": digest,
-                "prepared_image_ref": None,
-                "prepared_image_digest": None,
+                "prepared_image_ref": image_metadata["image_ref"],
+                "prepared_image_digest": image_metadata["image_digest"],
+                "prepared_image_reused": bool(image_metadata.get("reused")),
             },
         )
         return payload
@@ -3431,10 +3570,25 @@ class AppServices:
             return None
         current_revision_id = str(endpoint.get("current_module_revision_id") or "").strip() or None
         prepared_revision_id = str(endpoint.get("prepared_revision_id") or "").strip() or None
+        prepared_digest = str(endpoint.get("prepared_digest") or "").strip() or None
         if current_revision_id is None:
             raise ValueError("module revision metadata missing")
         if prepared_revision_id != current_revision_id:
             raise ValueError("rebuild required before deploy")
+
+        module_state = await self.resolve_module_execution_state(str(endpoint["module_import_id"]))
+        if module_state is None:
+            raise ValueError("module execution state not found")
+        bundle_path = str(module_state.get("bundle_path") or "").strip()
+        module_revision_id = str(module_state.get("bundle_revision_id") or "").strip() or None
+        if not bundle_path or module_revision_id is None:
+            raise ValueError("module revision metadata missing")
+        if module_revision_id != current_revision_id:
+            raise ValueError("module revision metadata changed during deploy")
+        current_digest = inspect_bundle_preparation(bundle_path).digest
+        if prepared_digest != current_digest:
+            raise ValueError("rebuild required before deploy")
+
         now = datetime.now(timezone.utc)
         async with self.postgres_pool.acquire() as conn:
             await conn.execute(

@@ -24,6 +24,9 @@ class Settings(BaseSettings):
 
     postgres_dsn: str = Field(default="")
     checkout_root: str = Field(default="/tmp/dspy-trainer/checkouts")
+    docker_executable: str = Field(default="docker")
+    prepared_endpoint_image_repository: str = Field(default="dspy-trainer/prepared-endpoints")
+    prepared_endpoint_image_base: str = Field(default="python:3.11-slim")
     github_pat: str = Field(default="", alias="GITHUB_PAT")
     git_commit_name: str = Field(default="DSPy Trainer", alias="GIT_COMMIT_NAME")
     git_commit_email: str = Field(default="dspy-trainer@local", alias="GIT_COMMIT_EMAIL")
