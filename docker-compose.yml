@@ -30,7 +30,10 @@ services:
       start_period: 5s
 
   mlflow:
-    image: ghcr.io/mlflow/mlflow:latest
+    build:
+      context: .
+      dockerfile: ops/mlflow/Dockerfile
+    image: dspy-trainer-mlflow
     container_name: dspy-trainer-mlflow
     depends_on:
       postgres:
