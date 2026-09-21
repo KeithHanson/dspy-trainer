@@ -146,6 +146,8 @@ A **managed endpoint** exposes a validated bundle to external callers with a rot
 - Create, rename, delete, and rotate keys from the bundle detail page
 - `POST /bundle-endpoints/{id}/invoke` returns one JSON output payload
 - `POST /bundle-endpoints/{id}/stream` returns an SSE stream of incremental `delta` events followed by a `final` event
+- Each invocation is traced in MLflow under the `dspy-trainer-managed-endpoints` experiment, tagged with its invocation, endpoint, worker, module, profile, and bundle revision identifiers
+- Trace inputs and outputs capture the endpoint payload, while DSPy autologging records model execution as child spans
 - Streaming bundles must implement `emit(..., emit=<callback>)` on the built program and return a final prediction payload
 
 ---

@@ -124,6 +124,73 @@ def _json_ready(value: Any) -> Any:
     return json.loads(json.dumps(value, default=str))
 
 
+_ENDPOINT_MLFLOW_EXPERIMENT = "dspy-trainer-managed-endpoints"
+
+
+def _run_endpoint_invocation_with_mlflow(
+    operation: Callable[[], dict[str, Any]],
+    *,
+    tracking_uri: str,
+    input_payload: dict[str, Any],
+    attributes: dict[str, Any],
+) -> tuple[dict[str, Any], str | None]:
+    """Run one managed-endpoint invocation inside an MLflow trace.
+
+    Telemetry setup failures must not make a healthy endpoint unavailable. Once
+    the bundle operation starts, however, its own exception is always preserved.
+    """
+    try:
+        import mlflow
+
+        mlflow.set_tracking_uri(tracking_uri)
+        mlflow.set_experiment(_ENDPOINT_MLFLOW_EXPERIMENT)
+        dspy_mlflow = getattr(mlflow, "dspy", None)
+        if dspy_mlflow is not None and hasattr(dspy_mlflow, "autolog"):
+            dspy_mlflow.autolog(log_compiles=True, log_evals=True, log_traces_from_compile=True)
+    except Exception as exc:
+        logger.warning("MLflow endpoint tracing setup failed; invoking without telemetry: %s", exc)
+        return operation(), None
+
+    operation_started = False
+    output_sentinel = object()
+    output: dict[str, Any] | object = output_sentinel
+    trace_id: str | None = None
+    normalized_attributes = {
+        key: _json_ready(value)
+        for key, value in attributes.items()
+        if value not in (None, "")
+    }
+    trace_tags = {key: str(value) for key, value in normalized_attributes.items()}
+    request_preview = json.dumps(_json_ready(input_payload), ensure_ascii=False)[:1000]
+
+    try:
+        with mlflow.start_span(
+            name="managed_endpoint.invoke",
+            span_type="CHAIN",
+            attributes=normalized_attributes,
+        ) as span:
+            trace_id = str(getattr(span, "trace_id", "") or "") or None
+            span.set_inputs(_json_ready(input_payload))
+            mlflow.update_current_trace(tags=trace_tags, request_preview=request_preview)
+            operation_started = True
+            output = operation()
+            normalized_output = _json_ready(output)
+            span.set_outputs(normalized_output)
+            mlflow.update_current_trace(
+                response_preview=json.dumps(normalized_output, ensure_ascii=False)[:1000]
+            )
+    except Exception as exc:
+        if not operation_started:
+            logger.warning("MLflow endpoint trace creation failed; invoking without telemetry: %s", exc)
+            return operation(), None
+        if output is not output_sentinel:
+            logger.warning("MLflow endpoint trace finalization failed after invocation succeeded: %s", exc)
+            return output, trace_id  # type: ignore[return-value]
+        raise
+
+    return output, trace_id  # type: ignore[return-value]
+
+
 def _normalize_bundle_endpoint_name(value: Any) -> str:
     name = str(value or "").strip()
     if not name:
@@ -3179,24 +3246,50 @@ class AppServices:
                         loop,
                     )
 
-                output = await asyncio.to_thread(
-                    stream_bundle,
-                    module_state["bundle_path"],
-                    input_payload,
-                    emit_event,
-                    lm_profile,
-                    runtime_env,
-                )
+                def operation() -> dict[str, Any]:
+                    return stream_bundle(
+                        module_state["bundle_path"],
+                        input_payload,
+                        emit_event,
+                        lm_profile,
+                        runtime_env,
+                    )
             else:
                 from app.executor.module_runner import invoke_bundle
 
-                output = await asyncio.to_thread(
-                    invoke_bundle,
-                    module_state["bundle_path"],
-                    input_payload,
-                    lm_profile,
-                    runtime_env,
-                )
+                def operation() -> dict[str, Any]:
+                    return invoke_bundle(
+                        module_state["bundle_path"],
+                        input_payload,
+                        lm_profile,
+                        runtime_env,
+                    )
+
+            trace_attributes = {
+                "invocation_id": invocation_id,
+                "endpoint_id": endpoint_id,
+                "endpoint_name": endpoint.get("name"),
+                "worker_id": worker_id,
+                "stream": bool(stream),
+                "module_import_id": endpoint.get("module_import_id"),
+                "lm_profile_id": endpoint.get("lm_profile_id"),
+                "bundle_revision_id": module_state.get("revision_id"),
+                "bundle_commit_sha": module_state.get("commit_sha") or module_state.get("current_commit_sha"),
+            }
+            output, trace_id = await asyncio.to_thread(
+                _run_endpoint_invocation_with_mlflow,
+                operation,
+                tracking_uri=self.settings.mlflow_tracking_uri,
+                input_payload=input_payload,
+                attributes=trace_attributes,
+            )
+            logger.info(
+                "Managed endpoint invocation completed invocation_id=%s endpoint_id=%s worker_id=%s mlflow_trace_id=%s",
+                invocation_id,
+                endpoint_id,
+                worker_id,
+                trace_id or "unavailable",
+            )
             await self.publish_endpoint_invocation_event(invocation_id, "final", output)
         except Exception as exc:
             await self.publish_endpoint_invocation_event(invocation_id, "error", {"error": str(exc), "worker_id": worker_id})
