@@ -13,7 +13,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import Settings
-from app.services import AppServices, _classify_sync_status, _json_ready
+from app.services import AppServices, _classify_sync_status, _json_ready, _run_endpoint_invocation_with_mlflow
 
 
 class _FakeAsyncProcess:
@@ -485,6 +485,117 @@ def test_publish_endpoint_invocation_event_serializes_decimal_payloads():
     channel, payload = publisher.messages[0]
     assert channel.endswith("inv-1")
     assert '"655129.55"' in payload
+
+
+class _FakeMlflowSpan:
+    trace_id = "tr-test"
+
+    def __init__(self):
+        self.inputs = None
+        self.outputs = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        del exc_type, exc, traceback
+        return False
+
+    def set_inputs(self, value):
+        self.inputs = value
+
+    def set_outputs(self, value):
+        self.outputs = value
+
+
+class _FakeMlflow:
+    def __init__(self):
+        self.span = _FakeMlflowSpan()
+        self.tracking_uri = None
+        self.experiment = None
+        self.span_kwargs = None
+        self.trace_updates = []
+        self.autolog_calls = []
+        self.dspy = SimpleNamespace(autolog=lambda **kwargs: self.autolog_calls.append(kwargs))
+
+    def set_tracking_uri(self, value):
+        self.tracking_uri = value
+
+    def set_experiment(self, value):
+        self.experiment = value
+
+    def start_span(self, **kwargs):
+        self.span_kwargs = kwargs
+        return self.span
+
+    def update_current_trace(self, **kwargs):
+        self.trace_updates.append(kwargs)
+
+
+def test_run_endpoint_invocation_with_mlflow_records_root_trace_and_output(monkeypatch):
+    fake_mlflow = _FakeMlflow()
+    monkeypatch.setitem(sys.modules, "mlflow", fake_mlflow)
+
+    output, trace_id = _run_endpoint_invocation_with_mlflow(
+        lambda: {"r_count": 3},
+        tracking_uri="http://mlflow:5000",
+        input_payload={"message": "strawberry"},
+        attributes={"invocation_id": "inv-1", "endpoint_id": "endpoint-1", "unused": None},
+    )
+
+    assert output == {"r_count": 3}
+    assert trace_id == "tr-test"
+    assert fake_mlflow.tracking_uri == "http://mlflow:5000"
+    assert fake_mlflow.experiment == "dspy-trainer-managed-endpoints"
+    assert fake_mlflow.span_kwargs == {
+        "name": "managed_endpoint.invoke",
+        "span_type": "CHAIN",
+        "attributes": {"invocation_id": "inv-1", "endpoint_id": "endpoint-1"},
+    }
+    assert fake_mlflow.span.inputs == {"message": "strawberry"}
+    assert fake_mlflow.span.outputs == {"r_count": 3}
+    assert fake_mlflow.trace_updates[0]["tags"]["invocation_id"] == "inv-1"
+    assert fake_mlflow.autolog_calls == [
+        {"log_compiles": True, "log_evals": True, "log_traces_from_compile": True}
+    ]
+
+
+def test_run_endpoint_invocation_with_mlflow_falls_back_once_when_setup_fails(monkeypatch):
+    fake_mlflow = _FakeMlflow()
+    fake_mlflow.set_tracking_uri = lambda value: (_ for _ in ()).throw(RuntimeError("offline"))
+    monkeypatch.setitem(sys.modules, "mlflow", fake_mlflow)
+    calls = []
+
+    output, trace_id = _run_endpoint_invocation_with_mlflow(
+        lambda: calls.append("called") or {"ok": True},
+        tracking_uri="http://mlflow:5000",
+        input_payload={"message": "hello"},
+        attributes={"invocation_id": "inv-1"},
+    )
+
+    assert output == {"ok": True}
+    assert trace_id is None
+    assert calls == ["called"]
+
+
+def test_run_endpoint_invocation_with_mlflow_preserves_bundle_error(monkeypatch):
+    fake_mlflow = _FakeMlflow()
+    monkeypatch.setitem(sys.modules, "mlflow", fake_mlflow)
+    calls = []
+
+    def fail():
+        calls.append("called")
+        raise ValueError("bundle failed")
+
+    with pytest.raises(ValueError, match="bundle failed"):
+        _run_endpoint_invocation_with_mlflow(
+            fail,
+            tracking_uri="http://mlflow:5000",
+            input_payload={"message": "hello"},
+            attributes={"invocation_id": "inv-1"},
+        )
+
+    assert calls == ["called"]
 
 
 def test_module_env_encryption_key_error_mentions_lm_profile_api_keys():

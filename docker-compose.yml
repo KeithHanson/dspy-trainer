@@ -30,7 +30,10 @@ services:
       start_period: 5s
 
   mlflow:
-    image: ghcr.io/mlflow/mlflow:latest
+    build:
+      context: .
+      dockerfile: ops/mlflow/Dockerfile
+    image: dspy-trainer-mlflow
     container_name: dspy-trainer-mlflow
     depends_on:
       postgres:
@@ -40,13 +43,16 @@ services:
       MLFLOW_BACKEND_SCHEMA: mlflow
       MLFLOW_BACKEND_STORE_URI: postgresql+psycopg2://postgres:postgres@postgres:5432/dspy_trainer?options=-csearch_path%3Dmlflow
       MLFLOW_WEB_WORKERS: ${MLFLOW_WEB_WORKERS:-4}
-      MLFLOW_STATIC_PREFIX: ${MLFLOW_STATIC_PREFIX:-/mlflow}
+      # Serve MLflow at ROOT (no path prefix). Caddy presents it under /mlflow for the
+      # browser by stripping the prefix; internal clients use the root tracking URI so the
+      # span-ingest endpoint (/v1/traces, which ignores --static-prefix) is reachable.
+      MLFLOW_STATIC_PREFIX: ${MLFLOW_STATIC_PREFIX:-}
       CADDY_HTTP_PORT: ${CADDY_HTTP_PORT:-8080}
     volumes:
       - ./ops/mlflow/start.sh:/opt/mlflow/start.sh:ro
       - mlflow_artifacts:/mlflow/artifacts
     healthcheck:
-      test: ["CMD", "python", "-c", "import os, urllib.request; base=os.environ.get('MLFLOW_STATIC_PREFIX', '/mlflow').rstrip('/') or '/mlflow'; urllib.request.urlopen(f'http://localhost:5000{base}/', timeout=3)"]
+      test: ["CMD", "python", "-c", "import os, urllib.request; base=os.environ.get('MLFLOW_STATIC_PREFIX', '').rstrip('/'); urllib.request.urlopen(f'http://localhost:5000{base}/', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 10
@@ -62,6 +68,7 @@ services:
       DSPY_TRAINER_REDIS_URL: redis://redis:6379/0
       DSPY_TRAINER_QUEUE_NAME: dspy-trainer:jobs
       DSPY_TRAINER_MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_TRACKING_URI: http://mlflow:5000
       # Optional operator override; leave unset to use the backend default heartbeat TTL.
       DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS:
       DSPY_TRAINER_CORS_ALLOW_ORIGINS: ${DSPY_TRAINER_CORS_ALLOW_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080,http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173}
@@ -103,6 +110,7 @@ services:
       DSPY_TRAINER_REDIS_URL: redis://redis:6379/0
       DSPY_TRAINER_QUEUE_NAME: dspy-trainer:jobs
       DSPY_TRAINER_MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_TRACKING_URI: http://mlflow:5000
       DSPY_TRAINER_GITHUB_PAT: ${GITHUB_PAT:-}
       DSPY_TRAINER_GIT_COMMIT_NAME: ${GIT_COMMIT_NAME:-DSPy Trainer}
       DSPY_TRAINER_GIT_COMMIT_EMAIL: ${GIT_COMMIT_EMAIL:-dspy-trainer@local}
@@ -139,6 +147,7 @@ services:
       DSPY_TRAINER_REDIS_URL: redis://redis:6379/0
       DSPY_TRAINER_QUEUE_NAME: dspy-trainer:jobs
       DSPY_TRAINER_MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_TRACKING_URI: http://mlflow:5000
       # Optional operator override; leave unset to use the backend default heartbeat TTL.
       DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS:
       DSPY_TRAINER_GITHUB_PAT: ${GITHUB_PAT:-}
