@@ -10,11 +10,9 @@ All settings use the `DSPY_TRAINER_` prefix.
 - `DSPY_TRAINER_REDIS_URL` (default: `redis://localhost:6379/0`)
 - `DSPY_TRAINER_QUEUE_NAME` (default: `dspy-trainer:jobs`)
 - `DSPY_TRAINER_MLFLOW_TRACKING_URI` (default: `http://localhost:5001`)
-- `DSPY_TRAINER_LITELLM_BASE_URL` (default: `http://localhost:4000`)
-- `DSPY_TRAINER_LITELLM_API_KEY` (optional; required when LiteLLM health endpoint is protected)
 - `DSPY_TRAINER_BACKEND_HOST` (default: `0.0.0.0`)
 - `DSPY_TRAINER_BACKEND_PORT` (default: `8000`)
-- `DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY` (required for module environment storage)
+- `DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY` (required for module environment storage and LM Profile provider API key storage)
 
 Generate the module environment encryption key with:
 

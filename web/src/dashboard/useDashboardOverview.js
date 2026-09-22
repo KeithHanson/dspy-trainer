@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { createDashboardDataAdapter } from "./data/dashboardDataAdapter";
 import { createLiveDashboardProvider } from "./data/liveDashboardProvider";
+import { normalizeApiBaseUrl } from "../api/base";
 
 const defaultAdapter = createDashboardDataAdapter(
-  createLiveDashboardProvider(import.meta.env.VITE_API_BASE_URL || "http://localhost:8000"),
+  createLiveDashboardProvider(normalizeApiBaseUrl()),
 );
 
 export function useDashboardOverview(adapter = defaultAdapter) {

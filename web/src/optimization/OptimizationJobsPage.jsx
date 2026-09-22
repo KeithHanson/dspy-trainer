@@ -4,6 +4,7 @@ import { Button } from "../components/primitives/Button";
 import { EmptyState } from "../components/states/EmptyState";
 import { ErrorState } from "../components/states/ErrorState";
 import { LoadingState } from "../components/states/LoadingState";
+import { normalizeApiBaseUrl } from "../api/base";
 
 const JOBS_POLL_MS = 2500;
 
@@ -38,7 +39,7 @@ function parseOptimizationProgress(executionLog) {
 export function OptimizationJobsPage() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
-  const apiBase = useMemo(() => (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, ""), []);
+  const apiBase = useMemo(() => normalizeApiBaseUrl(), []);
   const jobId = searchParams.get("job") || "";
 
   const [jobs, setJobs] = useState([]);

@@ -226,7 +226,7 @@ def test_capture_process_output_captures_named_dspy_logger():
     assert any("Iteration 44: Selected program 0 score: 0.7777777777777778" in line for line in captured)
 
 
-def test_build_lm_profile_alias_omits_upstream_api_base(monkeypatch):
+def test_build_lm_profile_uses_direct_provider_config(monkeypatch):
     captured: dict[str, object] = {}
 
     class CaptureLM:
@@ -240,43 +240,16 @@ def test_build_lm_profile_alias_omits_upstream_api_base(monkeypatch):
             "id": "profile-123",
             "model": "azure/some-deployment",
             "api_base": "https://example.cognitiveservices.azure.com",
-            "proxy_api_base": "http://litellm-proxy:4000",
-            "virtual_key": "sk-virtual-123",
+            "api_key": "sk-provider-123",
             "model_type": "responses",
             "lm_class_path": "ignored.path.CaptureLM",
             "default_params": {},
         }
     )
 
-    assert captured["model"] == "openai/lm-profile:profile-123"
-    assert captured["api_key"] == "sk-virtual-123"
-    assert captured["api_base"] == "http://litellm-proxy:4000"
-
-
-def test_build_lm_profile_alias_uses_default_proxy_when_not_provided(monkeypatch):
-    captured: dict[str, object] = {}
-
-    class CaptureLM:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-
-    monkeypatch.setattr(module_runner, "_load_class", lambda _class_path: CaptureLM)
-
-    module_runner._build_lm_from_profile(
-        {
-            "id": "profile-456",
-            "model": "azure/some-deployment",
-            "api_base": "https://example.cognitiveservices.azure.com",
-            "virtual_key": "sk-virtual-456",
-            "model_type": "responses",
-            "lm_class_path": "ignored.path.CaptureLM",
-            "default_params": {},
-        }
-    )
-
-    assert captured["model"] == "openai/lm-profile:profile-456"
-    assert captured["api_key"] == "sk-virtual-456"
-    assert captured["api_base"] == "http://litellm-proxy:4000"
+    assert captured["model"] == "azure/some-deployment"
+    assert captured["api_key"] == "sk-provider-123"
+    assert captured["api_base"] == "https://example.cognitiveservices.azure.com"
 
 
 def test_build_lm_profile_uses_azure_responses_compat_class_by_default(monkeypatch):
@@ -297,7 +270,7 @@ def test_build_lm_profile_uses_azure_responses_compat_class_by_default(monkeypat
             "id": "profile-789",
             "model": "azure/codex-5.3-eval-deployment-1",
             "api_base": "https://example.cognitiveservices.azure.com",
-            "virtual_key": "sk-virtual-789",
+            "api_key": "sk-provider-789",
             "model_type": "responses",
             "default_params": {},
         }

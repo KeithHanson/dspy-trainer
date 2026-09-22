@@ -11,7 +11,7 @@ from app import main as main_mod
 
 PROFILES: dict[str, dict] = {}
 NEXT_PROFILE_ID = 1
-FORWARDED_KEYS: list[str] = []
+FORWARDED_KEYS: list[str | None] = []
 
 
 async def fake_connect(self):
@@ -22,10 +22,9 @@ async def fake_disconnect(self):
     return None
 
 
-async def fake_create_lm_profile(self, name, model, api_base, model_type, default_params, lm_class_path, upstream_api_key):
+async def fake_create_lm_profile(self, name, model, api_base, model_type, default_params, lm_class_path, api_key):
     global NEXT_PROFILE_ID
-    if upstream_api_key:
-        FORWARDED_KEYS.append(upstream_api_key)
+    FORWARDED_KEYS.append(api_key)
     profile_id = f"lm-{NEXT_PROFILE_ID}"
     NEXT_PROFILE_ID += 1
     profile = {
@@ -36,7 +35,7 @@ async def fake_create_lm_profile(self, name, model, api_base, model_type, defaul
         "model_type": model_type,
         "default_params": default_params,
         "lm_class_path": lm_class_path,
-        "virtual_key": f"vk-{profile_id}",
+        "has_api_key": bool(api_key),
         "created_at": "2026-01-01T00:00:00+00:00",
         "updated_at": "2026-01-01T00:00:00+00:00",
     }
@@ -52,16 +51,11 @@ async def fake_get_lm_profile(self, lm_profile_id):
     return PROFILES.get(lm_profile_id)
 
 
-async def fake_update_lm_profile(self, lm_profile_id, name, model, api_base, model_type, default_params, lm_class_path, upstream_api_key):
-    if upstream_api_key:
-        FORWARDED_KEYS.append(upstream_api_key)
+async def fake_update_lm_profile(self, lm_profile_id, name, model, api_base, model_type, default_params, lm_class_path, api_key):
+    FORWARDED_KEYS.append(api_key)
     current = PROFILES.get(lm_profile_id)
     if current is None:
         return None
-    next_model = model if model is not None else current["model"]
-    next_api_base = api_base if api_base is not None else current["api_base"]
-    if (next_model != current["model"] or next_api_base != current["api_base"]) and not upstream_api_key:
-        raise RuntimeError("upstream_api_key is required when model or api_base changes")
     if name is not None:
         current["name"] = name
     if model is not None:
@@ -73,14 +67,8 @@ async def fake_update_lm_profile(self, lm_profile_id, name, model, api_base, mod
     if default_params is not None:
         current["default_params"] = default_params
     current["lm_class_path"] = lm_class_path
-    return current
-
-
-async def fake_rotate_lm_profile_virtual_key(self, lm_profile_id):
-    current = PROFILES.get(lm_profile_id)
-    if current is None:
-        return None
-    current["virtual_key"] = f"vk-rotated-{lm_profile_id}"
+    if api_key is not None:
+        current["has_api_key"] = bool(api_key)
     return current
 
 
@@ -88,7 +76,7 @@ async def fake_test_lm_profile_connection(self, lm_profile_id):
     current = PROFILES.get(lm_profile_id)
     if current is None:
         return None
-    return {"ok": True, "model": f"lm-profile:{lm_profile_id}", "reply": "connection-ok", "raw": {"choices": []}}
+    return {"ok": True, "model": current["model"], "reply": "connection-ok", "raw": ["connection-ok"]}
 
 
 async def fake_delete_lm_profile(self, lm_profile_id):
@@ -107,7 +95,6 @@ def _patch_services(monkeypatch):
     monkeypatch.setattr(main_mod.AppServices, "get_lm_profile", fake_get_lm_profile)
     monkeypatch.setattr(main_mod.AppServices, "update_lm_profile", fake_update_lm_profile)
     monkeypatch.setattr(main_mod.AppServices, "delete_lm_profile", fake_delete_lm_profile)
-    monkeypatch.setattr(main_mod.AppServices, "rotate_lm_profile_virtual_key", fake_rotate_lm_profile_virtual_key)
     monkeypatch.setattr(main_mod.AppServices, "test_lm_profile_connection", fake_test_lm_profile_connection)
 
 
@@ -127,11 +114,11 @@ def test_lm_profile_crud(monkeypatch):
             json={
                 "name": "Codex Responses",
                 "model": "openai/codex-5.3",
-                "api_base": "http://litellm-proxy:4000",
+                "api_base": "https://api.openai.com",
                 "model_type": "responses",
                 "default_params": {"temperature": 0.0},
                 "lm_class_path": "dspy.LM",
-                "upstream_api_key": "sk-upstream-create",
+                "api_key": "sk-provider-create",
             },
         )
         assert created.status_code == 200
@@ -144,18 +131,18 @@ def test_lm_profile_crud(monkeypatch):
         fetched = client.get(f"/lm-profiles/{profile_id}")
         assert fetched.status_code == 200
         assert fetched.json()["model"] == "openai/codex-5.3"
-        assert fetched.json()["virtual_key"] == f"vk-{profile_id}"
+        assert fetched.json()["has_api_key"] is True
 
         updated = client.patch(
             f"/lm-profiles/{profile_id}",
-            json={"name": "Codex Stable", "default_params": {"temperature": 0.1}, "upstream_api_key": "sk-upstream-update"},
+            json={"name": "Codex Stable", "default_params": {"temperature": 0.1}, "api_key": "sk-provider-update"},
         )
         assert updated.status_code == 200
         assert updated.json()["name"] == "Codex Stable"
         assert updated.json()["default_params"]["temperature"] == 0.1
-        assert "upstream_api_key" not in created.json()
-        assert "upstream_api_key" not in updated.json()
-        assert FORWARDED_KEYS == ["sk-upstream-create", "sk-upstream-update"]
+        assert "api_key" not in created.json()
+        assert "api_key" not in updated.json()
+        assert FORWARDED_KEYS == ["sk-provider-create", "sk-provider-update"]
 
         deleted = client.delete(f"/lm-profiles/{profile_id}")
         assert deleted.status_code == 200
@@ -163,27 +150,6 @@ def test_lm_profile_crud(monkeypatch):
 
         missing = client.get(f"/lm-profiles/{profile_id}")
         assert missing.status_code == 404
-
-
-def test_lm_profile_rotate_virtual_key(monkeypatch):
-    _reset_state()
-    _patch_services(monkeypatch)
-    with TestClient(main_mod.app) as client:
-        created = client.post(
-            "/lm-profiles",
-            json={
-                "name": "Rotate Me",
-                "model": "openai/codex-5.3",
-                "api_base": "http://litellm-proxy:4000",
-                "model_type": "responses",
-                "default_params": {"temperature": 0.0},
-                "upstream_api_key": "sk-upstream-create",
-            },
-        )
-        profile_id = created.json()["id"]
-        rotated = client.post(f"/lm-profiles/{profile_id}/rotate-key")
-        assert rotated.status_code == 200
-        assert rotated.json()["virtual_key"] == f"vk-rotated-{profile_id}"
 
 
 def test_lm_profile_test_connection(monkeypatch):
@@ -195,10 +161,10 @@ def test_lm_profile_test_connection(monkeypatch):
             json={
                 "name": "Probe",
                 "model": "openai/codex-5.3",
-                "api_base": "http://litellm-proxy:4000",
+                "api_base": "https://api.openai.com",
                 "model_type": "responses",
                 "default_params": {"temperature": 0.0},
-                "upstream_api_key": "sk-upstream-create",
+                "api_key": "sk-provider-create",
             },
         )
         profile_id = created.json()["id"]
@@ -208,43 +174,20 @@ def test_lm_profile_test_connection(monkeypatch):
         assert tested.json()["reply"] == "connection-ok"
 
 
-def test_lm_profile_update_model_requires_upstream_api_key(monkeypatch):
+def test_lm_profile_create_accepts_legacy_upstream_api_key_alias(monkeypatch):
     _reset_state()
     _patch_services(monkeypatch)
     with TestClient(main_mod.app) as client:
         created = client.post(
             "/lm-profiles",
             json={
-                "name": "Base",
+                "name": "Legacy",
                 "model": "openai/codex-5.3",
-                "api_base": "http://litellm-proxy:4000",
+                "api_base": "https://api.openai.com",
                 "model_type": "responses",
                 "default_params": {},
-                "upstream_api_key": "sk-upstream-create",
+                "upstream_api_key": "sk-legacy",
             },
         )
-        profile_id = created.json()["id"]
-        updated = client.patch(
-            f"/lm-profiles/{profile_id}",
-            json={"model": "openai/o3"},
-        )
-        assert updated.status_code == 502
-        assert "upstream_api_key is required" in updated.json()["error"]
-
-
-def test_lm_profile_create_requires_upstream_api_key(monkeypatch):
-    _reset_state()
-    _patch_services(monkeypatch)
-    with TestClient(main_mod.app) as client:
-        created = client.post(
-            "/lm-profiles",
-            json={
-                "name": "Missing key",
-                "model": "openai/codex-5.3",
-                "api_base": "http://litellm-proxy:4000",
-                "model_type": "responses",
-                "default_params": {"temperature": 0.0},
-            },
-        )
-        assert created.status_code == 400
-        assert "upstream_api_key is required" in created.json()["error"]
+        assert created.status_code == 200
+        assert created.json()["has_api_key"] is True

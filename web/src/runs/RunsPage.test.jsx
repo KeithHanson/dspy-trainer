@@ -210,7 +210,7 @@ describe("RunsPage", () => {
     expect(averageScoreLabel).toBeInTheDocument();
     expect(averageScoreLabel.closest(".runs-kpi")?.textContent).toContain("-");
     expect(await screen.findByText("Workers")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Open MLflow eval run" })).toHaveAttribute("href", "http://localhost:5001/#/experiments/42/runs/run-mlf-1/evaluations");
+    expect(screen.getByRole("link", { name: "Open MLflow eval run" })).toHaveAttribute("href", "/mlflow/#/experiments/42/runs/run-mlf-1/evaluations");
     expect(screen.getByRole("button", { name: "Cancel run" })).toBeInTheDocument();
     expect((await screen.findAllByText("running")).length).toBeGreaterThan(0);
     vi.unstubAllGlobals();

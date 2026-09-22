@@ -9,11 +9,11 @@ from zipfile import ZIP_DEFLATED, ZipFile
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 from app.config import get_cors_origins_from_env, get_settings
 from app.executor import run_bundle_eval
-from app.services import AppServices, ModuleSyncError
+from app.services import AppServices, EndpointUnavailableError, ModuleSyncError
 from app.validator import validate_bundle
 
 
@@ -21,7 +21,7 @@ from app.validator import validate_bundle
 async def lifespan(app: FastAPI):
     settings = get_settings()
     services = AppServices(settings)
-    await services.connect()
+    await services.connect_backend()
     app.state.services = services
     yield
     await services.disconnect()
@@ -71,6 +71,17 @@ def _read_endpoint_api_key(request: Request) -> str:
 
 def _format_sse_event(event: str, payload: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, default=str)}\n\n"
+
+
+def _endpoint_unavailable_response(exc: EndpointUnavailableError) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": str(exc),
+            "code": exc.code,
+            "routing_state": exc.routing_state,
+        },
+    )
 
 
 def _iter_sample_bundle_files(bundle_dir: Path) -> list[Path]:
@@ -246,7 +257,7 @@ class LmProfileCreateRequest(BaseModel):
     model_type: str = "responses"
     default_params: dict[str, Any] = Field(default_factory=dict)
     lm_class_path: str | None = None
-    upstream_api_key: str | None = None
+    api_key: str | None = Field(default=None, validation_alias=AliasChoices("api_key", "upstream_api_key"))
 
 
 class LmProfileUpdateRequest(BaseModel):
@@ -256,28 +267,7 @@ class LmProfileUpdateRequest(BaseModel):
     model_type: str | None = None
     default_params: dict[str, Any] | None = None
     lm_class_path: str | None = None
-    upstream_api_key: str | None = None
-
-
-class LiteLLMKeyCreateRequest(BaseModel):
-    models: list[str] = Field(default_factory=list)
-    aliases: dict[str, str] = Field(default_factory=dict)
-    metadata: dict[str, Any] = Field(default_factory=dict)
-    duration: str | None = None
-    key_alias: str | None = None
-    team_id: str | None = None
-    user_id: str | None = None
-
-
-class LiteLLMKeyUpdateRequest(BaseModel):
-    key: str
-    models: list[str] | None = None
-    aliases: dict[str, str] | None = None
-    metadata: dict[str, Any] | None = None
-    duration: str | None = None
-    max_budget: float | None = None
-    rpm_limit: int | None = None
-    tpm_limit: int | None = None
+    api_key: str | None = Field(default=None, validation_alias=AliasChoices("api_key", "upstream_api_key"))
 
 
 @app.get("/health")
@@ -295,7 +285,6 @@ async def ready(request: Request):
             "postgres": status.postgres,
             "redis": status.redis,
             "mlflow": status.mlflow,
-            "litellm": status.litellm,
         },
         "github": {
             "configured": services.github_pat_configured(),
@@ -659,6 +648,10 @@ async def invoke_bundle_endpoint(endpoint_id: str, request: Request):
         return JSONResponse(status_code=401, content={"error": "invalid endpoint id or api key"})
     if services.redis is None:
         return JSONResponse(status_code=503, content={"error": "queue not initialized"})
+    try:
+        await services.ensure_endpoint_ready_for_invocation(endpoint_id)
+    except EndpointUnavailableError as exc:
+        return _endpoint_unavailable_response(exc)
     redis_client = services.redis
     invocation_id = str(__import__("uuid").uuid4())
     channel = services._endpoint_invocation_channel(invocation_id)
@@ -685,6 +678,8 @@ async def invoke_bundle_endpoint(endpoint_id: str, request: Request):
             if event_name == "error":
                 return JSONResponse(status_code=500, content=event_body)
         return JSONResponse(status_code=504, content={"error": "endpoint invocation timed out"})
+    except EndpointUnavailableError as exc:
+        return _endpoint_unavailable_response(exc)
     except RuntimeError as exc:
         return JSONResponse(status_code=400, content={"error": str(exc)})
     finally:
@@ -709,6 +704,10 @@ async def stream_bundle_endpoint(endpoint_id: str, request: Request):
         return JSONResponse(status_code=401, content={"error": "invalid endpoint id or api key"})
     if services.redis is None:
         return JSONResponse(status_code=503, content={"error": "queue not initialized"})
+    try:
+        await services.ensure_endpoint_ready_for_invocation(endpoint_id)
+    except EndpointUnavailableError as exc:
+        return _endpoint_unavailable_response(exc)
     redis_client = services.redis
 
     async def event_stream():
@@ -739,6 +738,8 @@ async def stream_bundle_endpoint(endpoint_id: str, request: Request):
                 yield _format_sse_event(event_name, event_body)
                 if event_name in {"final", "error"}:
                     break
+        except EndpointUnavailableError as exc:
+            yield _format_sse_event("error", {"error": str(exc), "code": exc.code, "routing_state": exc.routing_state})
         except Exception as exc:
             yield _format_sse_event("error", {"error": str(exc)})
         finally:
@@ -1223,8 +1224,6 @@ async def create_evaluation_plan(request: Request, payload: EvaluationPlanCreate
 @app.post("/lm-profiles")
 async def create_lm_profile(request: Request, payload: LmProfileCreateRequest):
     services: AppServices = request.app.state.services
-    if not payload.upstream_api_key or not payload.upstream_api_key.strip():
-        return JSONResponse(status_code=400, content={"error": "upstream_api_key is required when creating an lm profile"})
     try:
         return await services.create_lm_profile(
             name=payload.name,
@@ -1233,7 +1232,7 @@ async def create_lm_profile(request: Request, payload: LmProfileCreateRequest):
             model_type=payload.model_type,
             default_params=payload.default_params,
             lm_class_path=payload.lm_class_path,
-            upstream_api_key=payload.upstream_api_key,
+            api_key=payload.api_key,
         )
     except RuntimeError as exc:
         return JSONResponse(status_code=502, content={"error": str(exc)})
@@ -1266,7 +1265,7 @@ async def update_lm_profile(lm_profile_id: str, request: Request, payload: LmPro
             model_type=payload.model_type,
             default_params=payload.default_params,
             lm_class_path=payload.lm_class_path,
-            upstream_api_key=payload.upstream_api_key,
+            api_key=payload.api_key,
         )
     except RuntimeError as exc:
         return JSONResponse(status_code=502, content={"error": str(exc)})
@@ -1284,18 +1283,6 @@ async def delete_lm_profile(lm_profile_id: str, request: Request):
     return {"id": lm_profile_id, "deleted": True}
 
 
-@app.post("/lm-profiles/{lm_profile_id}/rotate-key")
-async def rotate_lm_profile_key(lm_profile_id: str, request: Request):
-    services: AppServices = request.app.state.services
-    try:
-        result = await services.rotate_lm_profile_virtual_key(lm_profile_id)
-    except RuntimeError as exc:
-        return JSONResponse(status_code=502, content={"error": str(exc)})
-    if result is None:
-        return JSONResponse(status_code=404, content={"error": "lm profile not found"})
-    return result
-
-
 @app.post("/lm-profiles/{lm_profile_id}/test-connection")
 async def test_lm_profile_connection(lm_profile_id: str, request: Request):
     services: AppServices = request.app.state.services
@@ -1306,62 +1293,6 @@ async def test_lm_profile_connection(lm_profile_id: str, request: Request):
     if result is None:
         return JSONResponse(status_code=404, content={"error": "lm profile not found"})
     return result
-
-
-@app.get("/litellm/keys")
-async def list_litellm_keys(request: Request):
-    services: AppServices = request.app.state.services
-    return await services.list_litellm_keys()
-
-
-@app.post("/litellm/keys")
-async def create_litellm_key(request: Request, payload: LiteLLMKeyCreateRequest):
-    services: AppServices = request.app.state.services
-    return await services.create_litellm_key(
-        models=payload.models,
-        aliases=payload.aliases,
-        metadata=payload.metadata,
-        duration=payload.duration,
-        key_alias=payload.key_alias,
-        team_id=payload.team_id,
-        user_id=payload.user_id,
-    )
-
-
-@app.get("/litellm/keys/{key}")
-async def get_litellm_key(key: str, request: Request):
-    services: AppServices = request.app.state.services
-    return await services.get_litellm_key_info(key)
-
-
-@app.patch("/litellm/keys/{key}")
-async def update_litellm_key(key: str, request: Request, payload: LiteLLMKeyUpdateRequest):
-    services: AppServices = request.app.state.services
-    effective_key = payload.key or key
-    if effective_key != key:
-        return JSONResponse(status_code=400, content={"error": "path key and payload key must match"})
-    return await services.update_litellm_key(
-        key=effective_key,
-        models=payload.models,
-        aliases=payload.aliases,
-        metadata=payload.metadata,
-        duration=payload.duration,
-        max_budget=payload.max_budget,
-        rpm_limit=payload.rpm_limit,
-        tpm_limit=payload.tpm_limit,
-    )
-
-
-@app.post("/litellm/keys/{key}/revoke")
-async def revoke_litellm_key(key: str, request: Request):
-    services: AppServices = request.app.state.services
-    return await services.revoke_litellm_key(key)
-
-
-@app.post("/litellm/keys/{key}/restore")
-async def restore_litellm_key(key: str, request: Request):
-    services: AppServices = request.app.state.services
-    return await services.restore_litellm_key(key)
 
 
 @app.get("/evaluation-plans")

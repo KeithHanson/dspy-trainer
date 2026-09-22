@@ -115,14 +115,13 @@ describe("AppShell", () => {
       </MemoryRouter>,
     );
 
-    expect(screen.getByRole("link", { name: "MLFlow" })).toHaveAttribute("href", "http://localhost:5001");
-    expect(screen.getByRole("link", { name: "LiteLLM Proxy" })).toHaveAttribute("href", "http://localhost:4000");
+    expect(screen.getByRole("link", { name: "MLFlow" })).toHaveAttribute("href", "/mlflow");
     expect(screen.queryByText("Operator")).not.toBeInTheDocument();
     vi.unstubAllGlobals();
   });
 
-  it("shows runs live dot only when a run is active", async () => {
-    stubActivityFetch([{ id: "plan-1", status: "running", running_tasks: 1 }]);
+  it("uses the proxy-relative /api base for activity polling by default", async () => {
+    const fetchMock = stubActivityFetch([{ id: "plan-1", status: "running", running_tasks: 1 }]);
     render(
       <MemoryRouter initialEntries={["/dashboard"]}>
         <AppShell>
@@ -135,6 +134,10 @@ describe("AppShell", () => {
       expect(screen.getByRole("link", { name: "Eval Runs" })).toHaveTextContent("Eval Runs");
       expect(document.querySelector(".d-live")).not.toBeNull();
     });
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      "/api/agent-run-plans?limit=50&offset=0",
+      "/api/optimization/jobs?limit=50&offset=0",
+    ]);
     vi.unstubAllGlobals();
   });
 

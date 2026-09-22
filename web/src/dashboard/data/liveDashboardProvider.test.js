@@ -43,7 +43,7 @@ describe("liveDashboardProvider", () => {
     expect(overview.recentJobs[0].bundleName).toBe("support-triage v3");
   });
 
-  it("fetches plans/modules/workers from API", async () => {
+  it("defaults dashboard API fetches to the proxy-relative /api base", async () => {
     const fetchMock = vi.fn((url) => {
       const asString = String(url);
       if (asString.includes("/agent-run-plans")) {
@@ -59,11 +59,31 @@ describe("liveDashboardProvider", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const provider = createLiveDashboardProvider("http://localhost:8000");
+    const provider = createLiveDashboardProvider();
     const overview = await provider.getOverview();
 
     expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      "/api/agent-run-plans?limit=50&offset=0",
+      "/api/modules",
+      "/api/workers",
+    ]);
     expect(overview).toHaveProperty("summaryLine");
+    vi.unstubAllGlobals();
+  });
+
+  it("preserves an explicitly configured absolute API base", async () => {
+    const fetchMock = vi.fn(() => Promise.resolve({ ok: true, json: async () => [] }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = createLiveDashboardProvider("http://localhost:8000/");
+    await provider.getOverview();
+
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      "http://localhost:8000/agent-run-plans?limit=50&offset=0",
+      "http://localhost:8000/modules",
+      "http://localhost:8000/workers",
+    ]);
     vi.unstubAllGlobals();
   });
 });

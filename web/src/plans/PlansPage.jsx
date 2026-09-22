@@ -4,6 +4,7 @@ import { Button } from "../components/primitives/Button";
 import { EmptyState } from "../components/states/EmptyState";
 import { ErrorState } from "../components/states/ErrorState";
 import { LoadingState } from "../components/states/LoadingState";
+import { normalizeApiBaseUrl } from "../api/base";
 
 const PROJECT_ID = "proj-1";
 const SCENARIO_ID = "scn-1";
@@ -68,7 +69,7 @@ export function PlansPage() {
 }
 
 function PlansList({ onCreate, onEdit, onRunNavigate, showSavedNotice }) {
-  const plansUrl = useMemo(() => `${(import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, "")}/evaluation-plans`, []);
+  const plansUrl = useMemo(() => `${normalizeApiBaseUrl()}/evaluation-plans`, []);
   const [plans, setPlans] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
@@ -100,7 +101,7 @@ function PlansList({ onCreate, onEdit, onRunNavigate, showSavedNotice }) {
   useEffect(() => {
     const loadProfileNames = async () => {
       try {
-        const response = await fetch(`${(import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, "")}/lm-profiles`, { method: "GET" });
+        const response = await fetch(`${normalizeApiBaseUrl()}/lm-profiles`, { method: "GET" });
         if (!response.ok) {
           return;
         }
@@ -129,7 +130,7 @@ function PlansList({ onCreate, onEdit, onRunNavigate, showSavedNotice }) {
       if (!plan.module_import_id) {
         throw new Error("This plan has no saved module bundle. Edit the plan and select a bundle before running.");
       }
-      const moduleResp = await fetch(`${(import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, "")}/modules/${plan.module_import_id}`, { method: "GET" });
+      const moduleResp = await fetch(`${normalizeApiBaseUrl()}/modules/${plan.module_import_id}`, { method: "GET" });
       if (!moduleResp.ok) {
         throw new Error("Could not load the module bundle for this plan. Re-open the plan and reselect a bundle, then retry.");
       }
@@ -138,7 +139,7 @@ function PlansList({ onCreate, onEdit, onRunNavigate, showSavedNotice }) {
       if (!bundlePath || typeof bundlePath !== "string") {
         throw new Error("This plan's module bundle has no runnable source path. Re-upload the bundle and update the plan.");
       }
-      const createRunResp = await fetch(`${(import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, "")}/agent-run-plans`, {
+      const createRunResp = await fetch(`${normalizeApiBaseUrl()}/agent-run-plans`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -157,7 +158,7 @@ function PlansList({ onCreate, onEdit, onRunNavigate, showSavedNotice }) {
         throw new Error(`Could not start run (${createRunResp.status}). Please retry.`);
       }
       const runPlanPayload = await createRunResp.json();
-      const enqueueResp = await fetch(`${(import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, "")}/agent-run-plans/${runPlanPayload.id}/enqueue`, { method: "POST" });
+      const enqueueResp = await fetch(`${normalizeApiBaseUrl()}/agent-run-plans/${runPlanPayload.id}/enqueue`, { method: "POST" });
       if (!enqueueResp.ok) {
         throw new Error(`Run was created but could not be queued (${enqueueResp.status}). Please retry.`);
       }
@@ -252,7 +253,7 @@ function PlansList({ onCreate, onEdit, onRunNavigate, showSavedNotice }) {
 }
 
 function PlanBuilder({ onBack, planId }) {
-  const apiBase = useMemo(() => (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, ""), []);
+  const apiBase = useMemo(() => normalizeApiBaseUrl(), []);
   const [modules, setModules] = useState([]);
   const [datasets, setDatasets] = useState([]);
   const [lmProfiles, setLmProfiles] = useState([]);

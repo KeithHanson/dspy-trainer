@@ -4,12 +4,7 @@ import { Button } from "../components/primitives/Button";
 import { EmptyState } from "../components/states/EmptyState";
 import { ErrorState } from "../components/states/ErrorState";
 import { LoadingState } from "../components/states/LoadingState";
-
-function buildApiUrl(path) {
-  const base = import.meta.env.VITE_API_BASE_URL?.trim();
-  if (!base) return path;
-  return `${base.replace(/\/$/, "")}${path}`;
-}
+import { buildAbsoluteApiUrl, buildApiUrl, normalizeApiBaseUrl } from "../api/base";
 
 async function readApiError(response, fallback) {
   try {
@@ -66,13 +61,19 @@ function EndpointWorkerStatusPill({ status }) {
   return <span className={`plans-status ${toneClass}`}>{status || "unknown"}</span>;
 }
 
-function describeEndpointWorkerState(status, taskId, endpointId) {
+function describeEndpointWorkerState(status, taskId, endpointId, stateSummary) {
+  if (stateSummary) return stateSummary;
   if (status === "listening") return endpointId ? "Ready for assigned endpoint traffic" : "Ready";
   if (status === "idle") return "Waiting for an endpoint assignment";
   if (status === "preparing") return "Installing bundle dependencies";
+  if (status === "stale") return "Heartbeat expired";
   if (status === "running") return taskId ? "Processing endpoint invocation" : "Busy";
   if (status === "failed") return "Warmup or execution failed";
   return "Heartbeat reported";
+}
+
+function formatRevision(value) {
+  return value ? String(value).slice(0, 8) : "-";
 }
 
 function formatWorkerLastSeen(value) {
@@ -87,12 +88,17 @@ function formatWorkerLastSeen(value) {
 }
 
 function EndpointWorkersSection({ endpointWorkers, endpoints }) {
-  const workers = Array.isArray(endpointWorkers) ? endpointWorkers : [];
-  const totalWorkers = workers.length;
-  const readyWorkers = workers.filter((worker) => worker?.status === "listening").length;
-  const busyWorkers = workers.filter((worker) => worker?.status === "running").length;
-  const preparingWorkers = workers.filter((worker) => worker?.status === "preparing").length;
-  const failedWorkers = workers.filter((worker) => worker?.status === "failed").length;
+  const workersPayload = endpointWorkers && typeof endpointWorkers === "object" ? endpointWorkers : {};
+  const workers = Array.isArray(workersPayload.items) ? workersPayload.items : [];
+  const totalWorkers = Number(workersPayload.total_workers ?? workers.length);
+  const readyWorkers = Number(workersPayload.ready_workers ?? workers.filter((worker) => worker?.deploy_state === "ready").length);
+  const liveWorkers = Number(workersPayload.live_workers ?? workers.filter((worker) => worker?.is_live).length);
+  const staleWorkers = Number(workersPayload.stale_workers ?? workers.filter((worker) => !worker?.is_live).length);
+  const assignedWorkers = Number(workersPayload.assigned_workers ?? workers.filter((worker) => worker?.assigned_endpoint_id).length);
+  const unassignedWorkers = Number(workersPayload.unassigned_workers ?? workers.filter((worker) => !worker?.assigned_endpoint_id).length);
+  const preparingWorkers = Number(workersPayload.warming_workers ?? workers.filter((worker) => worker?.status === "preparing").length);
+  const runningWorkers = Number(workersPayload.running_workers ?? workers.filter((worker) => worker?.status === "running").length);
+  const failedWorkers = Number(workersPayload.failed_workers ?? workers.filter((worker) => worker?.status === "failed").length);
   const endpointNameById = new Map((Array.isArray(endpoints) ? endpoints : []).map((endpoint) => [endpoint.id, endpoint.name || endpoint.id]));
 
   return (
@@ -102,18 +108,21 @@ function EndpointWorkersSection({ endpointWorkers, endpoints }) {
           <h3 className="t-h2" style={{ marginBottom: 6 }}>Endpoint workers</h3>
           <p className="muted t-sm">
             {readyWorkers} ready of {totalWorkers} total
-            {busyWorkers ? ` · ${busyWorkers} busy` : ""}
-            {preparingWorkers ? ` · ${preparingWorkers} preparing` : ""}
+            {liveWorkers || staleWorkers ? ` · ${liveWorkers} live · ${staleWorkers} stale` : ""}
+            {assignedWorkers || unassignedWorkers ? ` · ${assignedWorkers} assigned · ${unassignedWorkers} unassigned` : ""}
+            {runningWorkers ? ` · ${runningWorkers} running` : ""}
+            {preparingWorkers ? ` · ${preparingWorkers} warming` : ""}
             {failedWorkers ? ` · ${failedWorkers} failed` : ""}
           </p>
         </div>
       </div>
       {!workers.length ? (
-        <div className="dashboard-zero">No endpoint workers reported yet.</div>
+        <div className="dashboard-zero">No endpoint workers registered yet.</div>
       ) : (
         <div className="runs-workers-grid">
           {workers.map((worker) => {
-            const endpointLabel = worker.endpoint_id ? (endpointNameById.get(worker.endpoint_id) || worker.endpoint_id) : "Unassigned";
+            const assignedEndpointId = worker.assigned_endpoint_id || worker.endpoint_id || null;
+            const endpointLabel = assignedEndpointId ? (endpointNameById.get(assignedEndpointId) || assignedEndpointId) : "Unassigned";
             return (
               <article key={worker.worker_id} className="runs-worker-card">
                 <div className="row between" style={{ gap: 10, alignItems: "center" }}>
@@ -121,7 +130,7 @@ function EndpointWorkersSection({ endpointWorkers, endpoints }) {
                     <div className="mono cap" style={{ overflowWrap: "anywhere" }}>{worker.worker_id}</div>
                     <div className="muted t-xs">Last seen {formatWorkerLastSeen(worker.last_seen)}</div>
                   </div>
-                  <EndpointWorkerStatusPill status={worker.status} />
+                  <EndpointWorkerStatusPill status={worker.state_label || worker.status} />
                 </div>
                 <dl className="runs-worker-meta">
                   <div>
@@ -134,11 +143,27 @@ function EndpointWorkersSection({ endpointWorkers, endpoints }) {
                   </div>
                   <div>
                     <dt>State</dt>
-                    <dd>{describeEndpointWorkerState(worker.status, worker.task_id, worker.endpoint_id)}</dd>
+                    <dd>{describeEndpointWorkerState(worker.status, worker.task_id, assignedEndpointId, worker.state_summary)}</dd>
+                  </div>
+                  <div>
+                    <dt>Heartbeat</dt>
+                    <dd>{worker.is_live ? "Live" : "Stale"}</dd>
+                  </div>
+                  <div>
+                    <dt>Deploy</dt>
+                    <dd>{worker.deploy_state || (assignedEndpointId ? "assigned" : "unassigned")}</dd>
+                  </div>
+                  <div>
+                    <dt>Desired rev</dt>
+                    <dd className="mono">{formatRevision(worker.desired_revision_id)}</dd>
+                  </div>
+                  <div>
+                    <dt>Warmed rev</dt>
+                    <dd className="mono">{formatRevision(worker.warmed_revision_id)}</dd>
                   </div>
                   <div>
                     <dt>Assignment</dt>
-                    <dd>{worker.endpoint_id ? "Pinned" : "Available"}</dd>
+                    <dd>{assignedEndpointId ? "Assigned" : "Unassigned"}</dd>
                   </div>
                 </dl>
               </article>
@@ -152,9 +177,10 @@ function EndpointWorkersSection({ endpointWorkers, endpoints }) {
 
 export function EndpointsPage() {
   const navigate = useNavigate();
-  const apiBase = useMemo(() => (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, ""), []);
+  const apiBase = useMemo(() => normalizeApiBaseUrl(), []);
+  const publicApiBase = useMemo(() => buildAbsoluteApiUrl(""), []);
   const [endpoints, setEndpoints] = useState([]);
-  const [endpointWorkers, setEndpointWorkers] = useState([]);
+  const [endpointWorkers, setEndpointWorkers] = useState({ items: [], total_workers: 0 });
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
   const [deletingId, setDeletingId] = useState("");
@@ -167,9 +193,9 @@ export function EndpointsPage() {
         throw new Error(`Could not load endpoint workers (${response.status})`);
       }
       const payload = await response.json();
-      setEndpointWorkers(Array.isArray(payload?.items) ? payload.items : []);
+      setEndpointWorkers(payload && typeof payload === "object" ? payload : { items: [], total_workers: 0 });
     } catch {
-      setEndpointWorkers([]);
+      setEndpointWorkers({ items: [], total_workers: 0 });
     }
   };
 
@@ -236,6 +262,7 @@ export function EndpointsPage() {
           <div className="col gap-1">
             <h1 className="t-display" style={{ fontSize: 22 }}>Endpoints</h1>
             <p className="muted t-sm">Manage named bundle endpoints for synchronous JSON and SSE streaming access.</p>
+            <p className="muted t-xs">Worker cards show readiness state plus desired and warmed bundle revisions so deploy mismatches are visible without checking container logs.</p>
           </div>
           <div className="row gap-2">
             <Button onClick={loadEndpoints} disabled={isLoading}>{isLoading ? "Refreshing..." : "Refresh"}</Button>
@@ -260,7 +287,7 @@ export function EndpointsPage() {
                       </div>
                       <div className="row gap-2 lm-profiles-actions">
                         <Button size="sm" onClick={() => navigate(`/endpoints/${encodeURIComponent(endpoint.id)}/edit`)}>Edit</Button>
-                        <Button size="sm" onClick={() => copyCurlCommand(endpoint.id, buildSyncCurlCommand(apiBase, endpoint.id, `<your-endpoint-key>`))}>{copiedEndpointId === endpoint.id ? "Copied" : "Copy curl"}</Button>
+                        <Button size="sm" onClick={() => copyCurlCommand(endpoint.id, buildSyncCurlCommand(publicApiBase, endpoint.id, `<your-endpoint-key>`))}>{copiedEndpointId === endpoint.id ? "Copied" : "Copy curl"}</Button>
                         <Button size="sm" variant="danger" className="bundles-delete-btn" onClick={() => deleteEndpoint(endpoint.id)} disabled={deletingId === endpoint.id}>
                           {deletingId === endpoint.id ? "Deleting..." : "Delete"}
                         </Button>
@@ -288,7 +315,8 @@ export function EndpointsPage() {
 }
 
 export function EndpointEditorPage() {
-  const apiBase = useMemo(() => (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, ""), []);
+  const apiBase = useMemo(() => normalizeApiBaseUrl(), []);
+  const publicApiBase = useMemo(() => buildAbsoluteApiUrl(""), []);
   const location = useLocation();
   const navigate = useNavigate();
   const { endpointId } = useParams();
@@ -302,8 +330,8 @@ export function EndpointEditorPage() {
   const [bundles, setBundles] = useState([]);
   const [lmProfiles, setLmProfiles] = useState([]);
   const [apiKey, setApiKey] = useState(typeof location.state?.apiKey === "string" ? location.state.apiKey : "");
-  const syncCurlCommand = buildSyncCurlCommand(apiBase, endpointId, apiKey);
-  const streamCurlCommand = buildStreamCurlCommand(apiBase, endpointId, apiKey);
+  const syncCurlCommand = buildSyncCurlCommand(publicApiBase, endpointId, apiKey);
+  const streamCurlCommand = buildStreamCurlCommand(publicApiBase, endpointId, apiKey);
 
   useEffect(() => {
     const load = async () => {

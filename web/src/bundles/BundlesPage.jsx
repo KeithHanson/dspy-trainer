@@ -5,6 +5,7 @@ import { Icon } from "../components/Icon";
 import { EmptyState } from "../components/states/EmptyState";
 import { ErrorState } from "../components/states/ErrorState";
 import { LoadingState } from "../components/states/LoadingState";
+import { buildApiUrl } from "../api/base";
 
 const VALIDATION_CHECKS = [
   {
@@ -150,12 +151,6 @@ score_pass_threshold = 0.8
 `,
   },
 ];
-
-function buildApiUrl(path) {
-  const base = import.meta.env.VITE_API_BASE_URL?.trim();
-  if (!base) return path;
-  return `${base.replace(/\/$/, "")}${path}`;
-}
 
 const IMPORT_GUIDANCE = [
   "Repository root is cloned exactly as-is, then an optional subfolder can be validated as the bundle root.",

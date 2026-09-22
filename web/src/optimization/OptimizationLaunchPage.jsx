@@ -4,6 +4,7 @@ import { Button } from "../components/primitives/Button";
 import { Icon } from "../components/Icon";
 import { ErrorState } from "../components/states/ErrorState";
 import { LoadingState } from "../components/states/LoadingState";
+import { normalizeApiBaseUrl } from "../api/base";
 
 const PROJECT_ID = "proj-1";
 
@@ -125,7 +126,7 @@ function summarizeRunPlanTasks(tasks, sourceType) {
 }
 
 export function OptimizationLaunchPage() {
-  const apiBase = useMemo(() => (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, ""), []);
+  const apiBase = useMemo(() => normalizeApiBaseUrl(), []);
   const [modules, setModules] = useState([]);
   const [lmProfiles, setLmProfiles] = useState([]);
   const [selectedModuleId, setSelectedModuleId] = useState("");

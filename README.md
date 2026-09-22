@@ -17,7 +17,7 @@ Building production LLM programs requires iteration—lots of it. DSPy Trainer g
 - **Repeatable evaluations**: Run the same tests against different models, prompts, or optimized versions
 - **Automated optimization**: Let DSPy's optimizers (MIPROv2, BootstrapFewShot, GEPA) improve your program automatically
 - **Full provenance**: Every eval and optimization links to MLflow tracking with commit SHA, metrics, and artifacts
-- **No vendor lock-in**: Uses LiteLLM for model routing—swap providers without code changes
+- **No vendor lock-in**: Point LM Profiles at direct provider endpoints without changing bundle code
 
 ---
 
@@ -28,8 +28,9 @@ Building production LLM programs requires iteration—lots of it. DSPy Trainer g
 ```bash
 cp .env.sample .env
 # Edit .env - at minimum, add your GITHUB_PAT
-# If you plan to store module environment entries in the UI,
-# also generate DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY:
+# If you plan to store module environment entries in the UI OR
+# save LM Profile provider API keys in the UI, also generate
+# DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY:
 # python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
@@ -43,16 +44,18 @@ docker compose up -d --remove-orphans
 
 If MLflow trace or run requests time out under load, increase `MLFLOW_WEB_WORKERS` in `.env` before restarting the stack.
 
-For non-local deployments, set `VITE_API_BASE_URL`, `VITE_MLFLOW_BASE_URL`, and `VITE_LITELLM_BASE_URL` in `.env` before rebuilding the web image. The backend automatically derives additional allowed CORS origins from those public URLs, and you can extend the allowlist further with `DSPY_TRAINER_CORS_ALLOW_ORIGINS`.
+The default local Compose setup now routes operator/browser traffic through Caddy on `http://localhost:8080`. The web build defaults to relative proxy paths (`/api`, `/mlflow`) so the UI, API, and MLflow links stay on one origin. For non-local deployments, set `CADDY_HTTP_PORT` as needed and override `VITE_API_BASE_URL` and `VITE_MLFLOW_BASE_URL` in `.env` before rebuilding the web image. Compose forwards `CADDY_HTTP_PORT` into the MLflow container so its allowed-hosts list matches the proxy port you expose. The backend automatically derives additional allowed CORS origins from absolute public URLs, and you can extend the allowlist further with `DSPY_TRAINER_CORS_ALLOW_ORIGINS`.
 
 ### 3. Access the Platform
 
-| Service | URL |
+| Surface | URL |
 |---------|-----|
-| **Web UI** | http://localhost:3000 |
-| **Backend API** | http://localhost:8000 |
-| **MLflow** | http://localhost:5001 |
-| **LiteLLM Proxy** | http://localhost:4000 |
+| **Web UI** | http://localhost:8080/ |
+| **Backend API** | http://localhost:8080/api/ |
+| **Backend API docs** | http://localhost:8080/api/docs |
+| **MLflow** | http://localhost:8080/mlflow/ |
+
+Postgres (`5432`) and Redis (`6379`) remain published directly for local developer tooling. Browser/operator traffic should use the Caddy surface above.
 
 ### 4. Your First Eval
 
@@ -129,11 +132,11 @@ An **optimization job** uses DSPy optimizers to improve your program:
 
 ### 🤖 LM Profile
 
-An **LM profile** configures model routing through LiteLLM:
+An **LM profile** configures direct provider runtime access:
 
 - Model name (e.g., `openai/gpt-4o-mini`)
 - Temperature, max tokens, timeouts
-- API keys and virtual key aliases
+- Optional provider API key storage
 - Swap providers without changing bundle code
 
 ### 🔌 Managed Endpoint
@@ -143,6 +146,8 @@ A **managed endpoint** exposes a validated bundle to external callers with a rot
 - Create, rename, delete, and rotate keys from the bundle detail page
 - `POST /bundle-endpoints/{id}/invoke` returns one JSON output payload
 - `POST /bundle-endpoints/{id}/stream` returns an SSE stream of incremental `delta` events followed by a `final` event
+- Each invocation is traced in MLflow under the `dspy-trainer-managed-endpoints` experiment, tagged with its invocation, endpoint, worker, module, profile, and bundle revision identifiers
+- Trace inputs and outputs capture the endpoint payload, while DSPy autologging records model execution as child spans
 - Streaming bundles must implement `emit(..., emit=<callback>)` on the built program and return a final prediction payload
 
 ---
@@ -190,7 +195,7 @@ DSPy handles execution, optimization, and prompt engineering for you.
 └──────┬──────┘
        │
 ┌──────┴──────────────────────────────┐
-│  Postgres  │  Redis  │  MLflow  │  LiteLLM │
+│  Postgres  │  Redis  │  MLflow  │
 └─────────────────────────────────────┘
 ```
 
@@ -200,7 +205,7 @@ DSPy handles execution, optimization, and prompt engineering for you.
 - **Postgres**: Primary app store
 - **Redis**: Queue + worker coordination
 - **MLflow**: Experiment tracking with metadata stored in a dedicated Postgres `mlflow` schema and artifacts on a Docker volume
-- **LiteLLM**: Unified LLM gateway
+- **LM Profiles**: Stored direct-provider runtime config
 
 For current stack operations and service expectations, see [`docs/COMPOSE_RUNBOOK.md`](docs/COMPOSE_RUNBOOK.md).
 
@@ -538,11 +543,12 @@ Key variables in `.env`:
 | `GITHUB_PAT` | GitHub API access for bundle import/sync | ✅ |
 | `GIT_COMMIT_NAME` | Git author name for optimization commits | Recommended |
 | `GIT_COMMIT_EMAIL` | Git author email for optimization commits | Recommended |
-| `DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY` | Encrypts module environment entries stored in Postgres | Required for module env UI |
-| `DSPY_TRAINER_TOTAL_ENDPOINT_WORKERS` | Number of dedicated endpoint worker containers in Compose | Optional |
+| `DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY` | Encrypts module environment entries and LM Profile provider API keys stored in Postgres | Required for module env UI and LM Profile API key storage |
+| `DSPY_TRAINER_TOTAL_WORKERS` | Number of general worker containers in Compose | Optional |
+| `DSPY_TRAINER_TOTAL_ENDPOINT_WORKER_REPLICAS` | Number of dedicated endpoint worker containers in Compose | Optional |
+| `DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS` | Seconds before an endpoint-worker heartbeat is marked stale | Optional |
 | `DSPY_TRAINER_POSTGRES_DSN` | Postgres connection | ✅ (auto in Compose) |
 | `DSPY_TRAINER_REDIS_URL` | Redis connection | ✅ (auto in Compose) |
-| `LITELLM_MASTER_KEY` | LiteLLM proxy auth | ✅ (auto in Compose) |
 
 See [`.env.sample`](.env.sample) for full reference.
 
@@ -552,9 +558,9 @@ Generate `DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY` with:
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-### LiteLLM Configuration
+### LM Profile Configuration
 
-LiteLLM runs as an internal proxy. Model routing is configured via **LM Profiles** in the Web UI:
+LM Profiles store direct provider endpoint configuration in the Web UI:
 
 1. Go to LM Profiles page
 2. Click "Create Profile"
@@ -562,16 +568,21 @@ LiteLLM runs as an internal proxy. Model routing is configured via **LM Profiles
 4. Add API key or select existing key
 5. Configure temperature, max tokens, etc.
 
-LM Profiles provision virtual keys in LiteLLM dynamically.
+LM Profiles store the provider model, API base, model type, optional LM class override, and optional provider API key.
 
 ### Managed Endpoint Workers
 
 Managed bundle endpoints do not execute inside the backend container. The backend authenticates, enqueues, and relays responses, while dedicated `endpoint-worker` containers perform bundle installation/bootstrap and invocation.
 
-- Set `DSPY_TRAINER_TOTAL_ENDPOINT_WORKERS` in `.env` to control the size of the endpoint-worker pool.
+- Set `DSPY_TRAINER_TOTAL_WORKERS` in `.env` to control the number of general worker containers Compose starts.
+- Set `DSPY_TRAINER_TOTAL_ENDPOINT_WORKER_REPLICAS` in `.env` to control how many dedicated endpoint-worker containers Compose starts.
+- Compose-backed endpoint workers now self-register into the backend's durable endpoint-worker registry; operator-facing assignment and readiness come directly from those live registry records rather than from an env-defined logical roster.
+- Endpoint-worker heartbeats default to a 5 minute stale threshold (`DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS=300`). Override it in `.env` if you need operator stale detection to move faster or slower.
 - Each endpoint stores a `pinned_worker_count`.
-- Endpoint workers are assigned deterministically to endpoints based on those pinned counts.
+- Endpoint workers are assigned deterministically to endpoints based on those pinned counts and the current registry-backed worker set.
 - Only workers assigned to a given endpoint consume that endpoint's invocation queue.
+- `GET /endpoint-workers` exposes operator-facing readiness details for each endpoint worker from the durable endpoint-worker registry, including `deploy_state`, `state_summary`, and the desired versus warmed bundle revisions.
+- Common endpoint worker states: `idle` (unassigned), `preparing` (installing the desired revision / warming up), `listening` (ready), `running` (serving traffic), `failed` (warmup or invocation failure), and `stale` (heartbeat expired / non-live).
 
 ---
 
@@ -602,8 +613,9 @@ npm run build
 
 # compose health
 docker compose ps
-curl -fsS http://localhost:8000/ready
-curl -fsS http://localhost:3000/health
+curl -fsS http://localhost:8080/health
+curl -fsS http://localhost:8080/api/ready
+curl -fsS http://localhost:8080/mlflow/
 ```
 
 If you change backend runtime behavior that affects running containers, rebuild or recreate the affected services before handoff.
@@ -651,7 +663,7 @@ The backend exposes a comprehensive REST API. Key endpoints:
 - `GET /lm-profiles` - List profiles
 - `PATCH /lm-profiles/{id}` - Update profile
 
-**Interactive API docs:** http://localhost:8000/docs (when running)
+**Interactive API docs:** http://localhost:8080/api/docs (when running through the default local Caddy proxy)
 
 ---
 
@@ -682,7 +694,7 @@ dspy-trainer/
 │   │   ├── config.py         # Pydantic settings
 │   │   ├── executor/         # Bundle execution
 │   │   ├── validator/        # Bundle validation
-│   │   └── lm/               # LiteLLM integration
+│   │   └── lm/               # LM runtime adapters
 │   ├── worker.py             # Redis queue worker
 │   ├── tests/
 │   └── sample_bundles/       # Example bundle
@@ -696,7 +708,7 @@ dspy-trainer/
 │   │   └── lmProfiles/
 │   └── package.json
 ├── docs/              # Architecture & ops docs
-├── ops/               # LiteLLM proxy config
+├── ops/               # operational helpers
 ├── dspy/              # DSPy reference submodule
 └── docker-compose.yml
 ```
@@ -718,20 +730,21 @@ See [`.serena/memories/conventions.md`](.serena/memories/conventions.md) for det
 A: A bundle is the packaging format DSPy Trainer uses. Your DSPy program lives in `module.py` inside the bundle.
 
 **Q: Can I use my own LLM provider?**  
-A: Yes! LiteLLM supports 100+ providers. Just create an LM Profile with your provider's model name.
+A: Yes. Create an LM Profile with your provider's model name, base URL, and API key if required.
 
 **Q: Do I need to use GitHub?**  
 A: Yes, for now. GitHub-first design enables commit provenance and collaborative workflows.
 
 **Q: Can I run this on a remote server?**  
-A: Yes. It's a Docker Compose stack, so adjust ports, DNS, and reverse proxying as needed. The current web shell is unauthenticated, so no Auth0 or hosted login setup is required.
+A: Yes. It's a Docker Compose stack, so adjust ports and DNS as needed. The current web shell is unauthenticated, so no Auth0 or hosted login setup is required.
+A: Yes. It's a Docker Compose stack with Caddy providing the default local reverse-proxy surface. Adjust ports, DNS, and proxy URLs as needed. The current web shell is unauthenticated, so no Auth0 or hosted login setup is required.
 
 **Q: How do I scale worker capacity?**  
-A: Increase worker replicas in `docker-compose.yml`:
-```yaml
-worker:
-  deploy:
-    replicas: 4
+A: Set the worker replica env vars in `.env`, then recreate the stack:
+```env
+DSPY_TRAINER_TOTAL_WORKERS=4
+DSPY_TRAINER_TOTAL_ENDPOINT_WORKER_REPLICAS=16
+DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS=300
 ```
 
 **Q: Can I use this for production LLM apps?**  
@@ -757,7 +770,7 @@ See [`AGENTS.md`](AGENTS.md) for detailed contribution guidelines.
 ## Resources
 
 - **DSPy Framework**: https://dspy.ai
-- **LiteLLM Docs**: https://docs.litellm.ai
+
 - **MLflow Docs**: https://mlflow.org/docs/latest/index.html
 - **Compose Runbook**: [`docs/COMPOSE_RUNBOOK.md`](docs/COMPOSE_RUNBOOK.md)
 
