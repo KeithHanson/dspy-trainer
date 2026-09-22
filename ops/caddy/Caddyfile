@@ -20,7 +20,6 @@
 	handle /mlflow/* {
 		uri strip_prefix /mlflow
 		reverse_proxy mlflow:5000 {
-			header_up Host mlflow:5000
 			header_up X-Forwarded-Prefix /mlflow
 		}
 	}

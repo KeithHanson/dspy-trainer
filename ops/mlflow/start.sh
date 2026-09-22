@@ -29,6 +29,10 @@ MLFLOW_WEB_WORKERS="${MLFLOW_WEB_WORKERS:-4}"
 MLFLOW_STATIC_PREFIX="${MLFLOW_STATIC_PREFIX:-}"
 CADDY_HTTP_PORT="${CADDY_HTTP_PORT:-8080}"
 MLFLOW_ALLOWED_HOSTS="mlflow,mlflow:5000,localhost,localhost:5000,localhost:5001,localhost:${CADDY_HTTP_PORT},127.0.0.1,127.0.0.1:5000,127.0.0.1:5001,127.0.0.1:${CADDY_HTTP_PORT}"
+if [ -n "${MLFLOW_ALLOWED_HOSTS_EXTRA:-}" ]; then
+  MLFLOW_ALLOWED_HOSTS="${MLFLOW_ALLOWED_HOSTS},${MLFLOW_ALLOWED_HOSTS_EXTRA}"
+fi
+MLFLOW_CORS_ALLOWED_ORIGINS="${MLFLOW_CORS_ALLOWED_ORIGINS:-http://localhost:${CADDY_HTTP_PORT},http://127.0.0.1:${CADDY_HTTP_PORT}}"
 
 # Only mount under a path prefix if one is explicitly set. Left empty, MLflow serves at
 # root so BOTH the REST API and the span-ingest endpoint (/v1/traces, which does not honor
@@ -44,6 +48,7 @@ exec mlflow server \
   --port 5000 \
   --workers "$MLFLOW_WEB_WORKERS" \
   --allowed-hosts "$MLFLOW_ALLOWED_HOSTS" \
+  --cors-allowed-origins "$MLFLOW_CORS_ALLOWED_ORIGINS" \
   $STATIC_PREFIX_ARG \
   --backend-store-uri "$MLFLOW_BACKEND_STORE_URI" \
   --default-artifact-root /mlflow/artifacts
