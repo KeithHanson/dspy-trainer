@@ -30,12 +30,19 @@ import httpx
 import redis.asyncio as redis
 
 from app.config import Settings
+from app.revision_image_builder import BuildContextError, FrozenRevisionSource, freeze_revision_source
+from app.revision_image_coordinator import (
+    PostgresRevisionImageBuildStore,
+    RevisionImageBuildStore,
+    RevisionImageEnqueueError,
+)
 from app.revision_images import (
     MAX_BUILD_LOG_BYTES,
     MAX_FAILURE_REASON_CHARS,
     build_endpoint_deployment_payload,
     build_managed_container_payload,
     build_revision_image_payload,
+    build_revision_image_summary_payload,
     validate_endpoint_deployment_transition,
     validate_managed_container_transition,
     validate_revision_image_build_transition,
@@ -474,13 +481,57 @@ def _normalize_budget(value: Any, *, default: str = "medium") -> str:
 
 
 class AppServices:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        revision_build_store: RevisionImageBuildStore | None = None,
+    ) -> None:
         self.settings = settings
         self.redis: redis.Redis | None = None
         self.postgres_pool: asyncpg.Pool | None = None
         self.http_client: httpx.AsyncClient | None = None
         self._installed_bundle_requirements: dict[str, str] = {}
         self._bundle_requirements_lock = asyncio.Lock()
+        self._revision_snapshot_store = (
+            Path(getattr(settings, "checkout_root", "/tmp/dspy-trainer/checkouts"))
+            .expanduser()
+            .resolve()
+            / ".revision-image-snapshots"
+        )
+        self._revision_build_store = revision_build_store
+        if self._revision_build_store is None:
+            base_image_id = str(
+                os.getenv("DSPY_TRAINER_DEPLOYER_BACKEND_BASE_IMAGE_ID") or ""
+            ).strip()
+            deployment_id = str(
+                os.getenv("DSPY_TRAINER_DEPLOYMENT_ID") or ""
+            ).strip()
+            if base_image_id and deployment_id:
+                self._revision_build_store = PostgresRevisionImageBuildStore(
+                    postgres_dsn=settings.postgres_dsn,
+                    instance_id=f"backend-{uuid4().hex[:12]}",
+                    deployment_id=deployment_id,
+                    base_image_id=base_image_id,
+                    image_repository=str(
+                        os.getenv("DSPY_TRAINER_DEPLOYER_IMAGE_REPOSITORY")
+                        or "dspy-trainer-revision"
+                    ).strip(),
+                    platform_version=str(
+                        os.getenv("DSPY_TRAINER_DEPLOYER_PLATFORM_VERSION") or "local"
+                    ).strip(),
+                    build_log_max_bytes=min(
+                        MAX_BUILD_LOG_BYTES,
+                        max(
+                            1,
+                            int(
+                                os.getenv("DSPY_TRAINER_DEPLOYER_BUILD_LOG_MAX_BYTES")
+                                or MAX_BUILD_LOG_BYTES
+                            ),
+                        ),
+                    ),
+                    leader_timeout_seconds=15.0,
+                )
 
     def _get_module_env_fernet(self) -> Fernet:
         key = str(self.settings.module_env_encryption_key or "").strip()
@@ -945,6 +996,8 @@ class AppServices:
     async def connect(self) -> None:
         self.redis = redis.Redis.from_url(self.settings.redis_url, decode_responses=True)
         self.postgres_pool = await asyncpg.create_pool(dsn=self.settings.postgres_dsn, min_size=1, max_size=3)
+        if isinstance(self._revision_build_store, PostgresRevisionImageBuildStore):
+            self._revision_build_store.set_operation_pool(self.postgres_pool)
         self.http_client = httpx.AsyncClient(timeout=5.0)
         await self.init_db()
 
@@ -954,10 +1007,32 @@ class AppServices:
             return
         cleared_registrations = await self.clear_endpoint_worker_registrations()
         logger.info("Cleared %s endpoint worker registrations during backend startup", cleared_registrations)
+        await self._reconcile_revision_builds(trigger="startup")
+
+    async def _reconcile_revision_builds(self, *, trigger: str) -> int:
+        if self._revision_build_store is None:
+            logger.warning(
+                "revision_image_enqueue_skipped trigger=%s reason=build_store_not_configured",
+                trigger,
+            )
+            return 0
+        try:
+            inserted = await self._revision_build_store.reconcile_eligible_revisions()
+        except Exception:
+            logger.exception("revision_image_enqueue_failed trigger=%s", trigger)
+            return 0
+        logger.info(
+            "revision_image_enqueue_reconciled trigger=%s inserted=%s",
+            trigger,
+            inserted,
+        )
+        return inserted
 
     async def disconnect(self) -> None:
         if self.http_client is not None:
             await self.http_client.aclose()
+        if self._revision_build_store is not None:
+            await self._revision_build_store.disconnect()
         if self.postgres_pool is not None:
             await self.postgres_pool.close()
         if self.redis is not None:
@@ -2085,7 +2160,57 @@ class AppServices:
         bundle_name: str | None,
         bundle_version: str | None,
         source_event: str,
+        source_snapshot_path: str | None = None,
+        source_content_digest: str | None = None,
     ) -> str:
+        normalized_snapshot_path = _clean_optional_text(source_snapshot_path)
+        normalized_content_digest = _clean_optional_text(source_content_digest)
+        if normalized_snapshot_path and normalized_content_digest:
+            current = await conn.fetchrow(
+                """
+                select r.id, r.commit_sha, r.source_event,
+                       r.source_snapshot_path, r.source_content_digest
+                from module_imports m
+                left join bundle_revisions r on r.id = m.current_revision_id
+                where m.id = $1
+                for update of m
+                """,
+                module_id,
+            )
+            if current is not None and current["id"]:
+                same_source_identity = (
+                    current["source_content_digest"] == normalized_content_digest
+                    and current["commit_sha"] == commit_sha
+                    and current["source_event"] == source_event
+                )
+                if same_source_identity:
+                    return str(current["id"])
+                if (
+                    current["source_content_digest"] is None
+                    and current["commit_sha"] == commit_sha
+                    and current["source_event"] == source_event
+                ):
+                    await conn.execute(
+                        """
+                        update bundle_revisions
+                        set commit_sha = $2,
+                            checkout_path = $3,
+                            bundle_name = $4,
+                            bundle_version = $5,
+                            source_snapshot_path = $6,
+                            source_content_digest = $7
+                        where id = $1
+                        """,
+                        current["id"],
+                        _clean_optional_text(commit_sha),
+                        _clean_optional_text(checkout_path),
+                        _clean_optional_text(bundle_name),
+                        _clean_optional_text(bundle_version),
+                        normalized_snapshot_path,
+                        normalized_content_digest,
+                    )
+                    return str(current["id"])
+
         revision_id = str(uuid4())
         now = datetime.now(timezone.utc)
         await conn.execute(
@@ -2098,9 +2223,11 @@ class AppServices:
               bundle_name,
               bundle_version,
               source_event,
+              source_snapshot_path,
+              source_content_digest,
               created_at
             )
-            values ($1, $2, $3, $4, $5, $6, $7, $8)
+            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             """,
             revision_id,
             module_id,
@@ -2109,6 +2236,8 @@ class AppServices:
             _clean_optional_text(bundle_name),
             _clean_optional_text(bundle_version),
             source_event,
+            normalized_snapshot_path,
+            normalized_content_digest,
             now,
         )
         await conn.execute(
@@ -2200,6 +2329,92 @@ class AppServices:
             )
         return dict(row) if row is not None else None
 
+    async def freeze_validated_source(self, bundle_path: str) -> FrozenRevisionSource:
+        return await asyncio.to_thread(
+            freeze_revision_source,
+            Path(bundle_path),
+            self._revision_snapshot_store,
+        )
+
+    async def record_validated_revision(
+        self,
+        module_id: str,
+        *,
+        bundle_path: str,
+        commit_sha: str | None,
+        bundle_name: str | None,
+        bundle_version: str | None,
+        source_event: str,
+        frozen_source: FrozenRevisionSource | None = None,
+    ) -> dict[str, str]:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        frozen = frozen_source or await self.freeze_validated_source(bundle_path)
+        async with self.postgres_pool.acquire() as conn:
+            revision_id = await self._create_bundle_revision(
+                conn,
+                module_id,
+                commit_sha=commit_sha,
+                checkout_path=bundle_path,
+                bundle_name=bundle_name,
+                bundle_version=bundle_version,
+                source_event=source_event,
+                source_snapshot_path=str(frozen.path),
+                source_content_digest=frozen.content_digest,
+            )
+        return {
+            "revision_id": revision_id,
+            "source_snapshot_path": str(frozen.path),
+            "source_content_digest": frozen.content_digest,
+        }
+
+    async def persist_module_validation(
+        self,
+        module_id: str,
+        *,
+        module_state: dict[str, Any],
+        report: Any,
+        frozen_source: FrozenRevisionSource,
+    ) -> bool:
+        bundle_name = (
+            report.metadata.get("name")
+            if isinstance(report.metadata.get("name"), str)
+            else None
+        )
+        bundle_version = (
+            report.metadata.get("version")
+            if isinstance(report.metadata.get("version"), str)
+            else None
+        )
+        revision_id = module_state.get("bundle_revision_id")
+        if report.passed:
+            revision = await self.record_validated_revision(
+                module_id,
+                bundle_path=module_state["bundle_path"],
+                commit_sha=module_state.get("bundle_commit_sha"),
+                bundle_name=bundle_name,
+                bundle_version=bundle_version,
+                source_event="validation",
+                frozen_source=frozen_source,
+            )
+            revision_id = revision["revision_id"]
+        await self._update_module_bundle_metadata_record(
+            module_id,
+            bundle_name=bundle_name,
+            bundle_version=bundle_version,
+        )
+        found = await self.set_validation_status(
+            module_id,
+            "passed" if report.passed else "failed",
+            report.diagnostics,
+            revision_id=revision_id,
+            commit_sha=module_state.get("bundle_commit_sha"),
+            bundle_version=bundle_version,
+        )
+        if found and report.passed:
+            await self._reconcile_revision_builds(trigger="manual_validation")
+        return found
+
     async def _set_module_sync_state(
         self,
         module_id: str,
@@ -2213,9 +2428,14 @@ class AppServices:
         bundle_name: str | None = None,
         bundle_version: str | None = None,
         checkout_path: str | None = None,
-    ) -> None:
+        frozen_source: FrozenRevisionSource | None = None,
+        persist: bool = True,
+    ) -> str | None:
+        if not persist:
+            return None
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
+        revision_id: str | None = None
         async with self.postgres_pool.acquire() as conn:
             await conn.execute(
                 """
@@ -2236,7 +2456,7 @@ class AppServices:
                 synced_now,
             )
             if source_event:
-                await self._create_bundle_revision(
+                revision_id = await self._create_bundle_revision(
                     conn,
                     module_id,
                     commit_sha=current_commit_sha,
@@ -2244,8 +2464,80 @@ class AppServices:
                     bundle_name=bundle_name,
                     bundle_version=bundle_version,
                     source_event=source_event,
+                    source_snapshot_path=(
+                        str(frozen_source.path) if frozen_source is not None else None
+                    ),
+                    source_content_digest=(
+                        frozen_source.content_digest if frozen_source is not None else None
+                    ),
                 )
-
+        return revision_id
+    async def _finalize_synced_module(
+        self,
+        module_id: str,
+        *,
+        current_commit_sha: str,
+        bundle_name: str | None,
+        bundle_version: str | None,
+        checkout_path: str,
+        frozen_source: FrozenRevisionSource,
+        diagnostics: list[dict[str, Any]],
+    ) -> str:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            async with conn.transaction():
+                revision_id = await self._create_bundle_revision(
+                    conn,
+                    module_id,
+                    commit_sha=current_commit_sha,
+                    bundle_name=bundle_name,
+                    bundle_version=bundle_version,
+                    source_event="sync",
+                    checkout_path=checkout_path,
+                    source_snapshot_path=str(frozen_source.path),
+                    source_content_digest=frozen_source.content_digest,
+                )
+                module_result = await conn.execute(
+                    """
+                    update module_imports
+                    set current_commit_sha = $2,
+                        upstream_commit_sha = $2,
+                        sync_status = 'synced',
+                        last_sync_error = null,
+                        last_synced_at = now(),
+                        bundle_name = coalesce($3, bundle_name),
+                        bundle_version = coalesce($4, bundle_version),
+                        updated_at = now()
+                    where id = $1
+                    """,
+                    module_id,
+                    current_commit_sha,
+                    bundle_name,
+                    bundle_version,
+                )
+                if module_result == "UPDATE 0":
+                    raise RuntimeError("module not found")
+                validation_result = await conn.execute(
+                    """
+                    update runtime_bundles
+                    set validation_status = 'passed',
+                        diagnostics = $2::jsonb,
+                        validation_revision_id = $3,
+                        validation_commit_sha = $4,
+                        validation_bundle_version = $5,
+                        updated_at = now()
+                    where module_import_id = $1
+                    """,
+                    module_id,
+                    __import__("json").dumps(diagnostics),
+                    revision_id,
+                    current_commit_sha,
+                    bundle_version,
+                )
+                if validation_result == "UPDATE 0":
+                    raise RuntimeError("module runtime not found")
+        return revision_id
     async def resolve_module_execution_state(
         self,
         module_id: str,
@@ -2294,10 +2586,13 @@ class AppServices:
             bundle_root = checkout_path / normalized_subpath if normalized_subpath else checkout_path
             if not bundle_root.exists() or not bundle_root.is_dir():
                 raise ValueError("github_subpath does not exist in the repository")
-            report = validate_bundle(str(bundle_root))
+            try:
+                frozen_source = await self.freeze_validated_source(str(bundle_root))
+            except BuildContextError as exc:
+                raise ValueError(str(exc)) from exc
+            report = validate_bundle(str(frozen_source.path))
             if not report.passed:
                 raise ValueError(report.summary)
-
             created = await self.create_module_import(
                 "github",
                 str(bundle_root),
@@ -2312,10 +2607,31 @@ class AppServices:
                 sync_status="synced",
                 bundle_name=report.metadata.get("name") if isinstance(report.metadata.get("name"), str) else None,
                 bundle_version=report.metadata.get("version") if isinstance(report.metadata.get("version"), str) else None,
+                source_snapshot_path=(
+                    str(frozen_source.path) if frozen_source is not None else None
+                ),
+                source_content_digest=(
+                    frozen_source.content_digest if frozen_source is not None else None
+                ),
             )
-            found = await self.set_validation_status(module_id, "passed", report.diagnostics)
+            found = await self.set_validation_status(
+                module_id,
+                "passed",
+                report.diagnostics,
+                revision_id=created["current_revision_id"],
+                commit_sha=current_commit_sha,
+                bundle_version=(
+                    report.metadata.get("version")
+                    if isinstance(report.metadata.get("version"), str)
+                    else None
+                ),
+            )
             if not found:
                 raise RuntimeError("imported module could not be marked validated")
+            await self._reconcile_revision_builds(trigger="github_import")
+            created["image_build"] = await self.get_revision_image_state(
+                created["current_revision_id"]
+            )
             created["validation_status"] = "passed"
             created["diagnostics"] = report.diagnostics
             created["checkout_path"] = str(checkout_path)
@@ -2329,7 +2645,9 @@ class AppServices:
                 shutil.rmtree(checkout_path, ignore_errors=True)
             raise
 
-    async def refresh_module_sync_status(self, module_id: str) -> dict[str, Any]:
+    async def refresh_module_sync_status(
+        self, module_id: str, *, persist: bool = True
+    ) -> dict[str, Any]:
         module = await self._get_module_source_record(module_id)
         if module is None:
             raise ValueError("module not found")
@@ -2366,6 +2684,7 @@ class AppServices:
                 upstream_commit_sha=upstream_commit_sha,
                 sync_status=sync_status,
                 last_sync_error=None,
+                persist=persist,
             )
             return {
                 "module_id": module_id,
@@ -2386,6 +2705,7 @@ class AppServices:
                 upstream_commit_sha=upstream_commit_sha or current_commit_sha,
                 sync_status="sync_error",
                 last_sync_error=str(exc),
+                persist=persist,
             )
             raise ModuleSyncError(
                 str(exc),
@@ -2402,7 +2722,7 @@ class AppServices:
             )
 
     async def sync_module(self, module_id: str) -> dict[str, Any]:
-        sync_state = await self.refresh_module_sync_status(module_id)
+        sync_state = await self.refresh_module_sync_status(module_id, persist=False)
         module = await self._get_module_source_record(module_id)
         if module is None:
             raise ValueError("module not found")
@@ -2422,34 +2742,58 @@ class AppServices:
         checkout_path = Path(str(module.get("checkout_path") or "").strip()).expanduser().resolve()
         clone_url = _github_clone_url(repo_url, normalized_pat)
 
+        previous_commit_sha = str(module.get("current_commit_sha") or "").strip()
+        checkout_advanced = False
         try:
             await self._run_git_command(["git", "fetch", clone_url, branch], cwd=checkout_path)
             await self._run_git_command(["git", "merge", "--ff-only", "FETCH_HEAD"], cwd=checkout_path)
+            checkout_advanced = True
             current_commit_sha = await self._run_git_command(["git", "rev-parse", "HEAD"], cwd=checkout_path)
             bundle_root = Path(self._module_bundle_root_path(module)).expanduser().resolve()
-            report = validate_bundle(str(bundle_root))
+            try:
+                frozen_source = await self.freeze_validated_source(str(bundle_root))
+            except BuildContextError as exc:
+                raise RuntimeError(str(exc)) from exc
+            report = validate_bundle(str(frozen_source.path))
             if not report.passed:
                 raise RuntimeError(report.summary)
-            await self.set_module_bundle_metadata(
-                module_id,
-                report.metadata.get("name") if isinstance(report.metadata.get("name"), str) else None,
-                report.metadata.get("version") if isinstance(report.metadata.get("version"), str) else None,
+            bundle_name = (
+                report.metadata.get("name")
+                if isinstance(report.metadata.get("name"), str)
+                else None
             )
-            found = await self.set_validation_status(module_id, "passed", report.diagnostics)
-            if not found:
-                raise RuntimeError("module not found")
-            await self._set_module_sync_state(
+            bundle_version = (
+                report.metadata.get("version")
+                if isinstance(report.metadata.get("version"), str)
+                else None
+            )
+            revision_id = await self._finalize_synced_module(
                 module_id,
                 current_commit_sha=current_commit_sha,
-                upstream_commit_sha=current_commit_sha,
-                sync_status="synced",
-                last_sync_error=None,
-                synced_now=True,
-                source_event="sync",
-                bundle_name=report.metadata.get("name") if isinstance(report.metadata.get("name"), str) else None,
-                bundle_version=report.metadata.get("version") if isinstance(report.metadata.get("version"), str) else None,
-                checkout_path=str(checkout_path),
+                bundle_name=bundle_name,
+                bundle_version=bundle_version,
+                checkout_path=str(bundle_root),
+                frozen_source=frozen_source,
+                diagnostics=report.diagnostics,
             )
+            checkout_advanced = False
+            try:
+                await self._reconcile_revision_builds(trigger="sync")
+                image_build = await self.get_revision_image_state(revision_id)
+            except Exception as exc:
+                logger.exception(
+                    "revision_image_post_finalize_failed trigger=sync module_id=%s revision_id=%s",
+                    module_id,
+                    revision_id,
+                )
+                image_build = {
+                    "status": "enqueue_failed",
+                    "eligible": True,
+                    "error": str(exc),
+                    "current_build": None,
+                    "ready_build": None,
+                    "history_count": 0,
+                }
             return {
                 "module_id": module_id,
                 "sync_status": "synced",
@@ -2460,16 +2804,26 @@ class AppServices:
                 "github_subpath": module.get("github_subpath"),
                 "last_sync_error": None,
                 "synced": True,
+                "current_revision_id": revision_id,
+                "image_build": image_build,
             }
-        except ModuleSyncError:
-            raise
         except Exception as exc:
-            await self._set_module_sync_state(
+            if checkout_advanced and previous_commit_sha:
+                try:
+                    await self._run_git_command(
+                        ["git", "reset", "--hard", previous_commit_sha],
+                        cwd=checkout_path,
+                    )
+                except Exception:
+                    logger.exception(
+                        "module_sync_checkout_rollback_failed module_id=%s commit=%s",
+                        module_id,
+                        previous_commit_sha,
+                    )
+            logger.warning(
+                "module_sync_source_finalization_failed module_id=%s: %s",
                 module_id,
-                current_commit_sha=str(module.get("current_commit_sha") or "").strip(),
-                upstream_commit_sha=str(sync_state.get("upstream_commit_sha") or module.get("upstream_commit_sha") or "").strip(),
-                sync_status="sync_error",
-                last_sync_error=str(exc),
+                exc,
             )
             raise ModuleSyncError(
                 str(exc),
@@ -2507,6 +2861,8 @@ class AppServices:
         bundle_version: str | None = None,
         github_secrets_environment_name: str | None = None,
         environment_entries: list[dict[str, Any]] | None = None,
+        source_snapshot_path: str | None = None,
+        source_content_digest: str | None = None,
     ) -> dict[str, Any]:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
@@ -2589,6 +2945,8 @@ class AppServices:
                 bundle_name=bundle_name,
                 bundle_version=bundle_version,
                 source_event="import",
+                source_snapshot_path=source_snapshot_path,
+                source_content_digest=source_content_digest,
             )
         return {"id": module_id, "status": "imported", "current_revision_id": current_revision_id}
 
@@ -2819,6 +3177,103 @@ class AppServices:
             "evaluation_contract": bundle_metadata.get("evaluation_contract"),
         }
 
+    async def _revision_image_states(
+        self, revision_ids: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        if self.postgres_pool is None or not revision_ids:
+            return {}
+        async with self.postgres_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                select r.id as requested_revision_id,
+                       (m.deleted_at is null
+                        and m.sync_status = 'synced'
+                        and m.current_revision_id = r.id
+                        and rb.validation_status = 'passed'
+                        and rb.validation_revision_id = r.id) as source_eligible,
+                       (m.deleted_at is null
+                        and m.sync_status = 'synced'
+                        and m.current_revision_id = r.id
+                        and rb.validation_status = 'passed'
+                        and rb.validation_revision_id = r.id
+                        and r.source_snapshot_path is not null
+                        and r.source_content_digest is not null) as eligible,
+                       r.source_snapshot_path, r.source_content_digest,
+                       b.id, b.revision_id, b.generation, b.source_commit,
+                       b.source_content_digest, b.local_tag, b.image_id, b.image_digest,
+                       b.base_image_id, b.status, b.attempt, b.available_at,
+                       b.claim_owner, b.claim_expires_at, b.failure_reason,
+                       b.retry_of_build_id, b.queued_at, b.started_at, b.finished_at,
+                       b.created_at, b.updated_at
+                from bundle_revisions r
+                join module_imports m on m.id = r.module_import_id
+                left join runtime_bundles rb on rb.module_import_id = m.id
+                left join revision_image_builds b on b.revision_id = r.id
+                where r.id = any($1::text[])
+                order by r.id, b.generation desc
+                """,
+                revision_ids,
+            )
+        grouped: dict[str, list[Any]] = {revision_id: [] for revision_id in revision_ids}
+        eligible: dict[str, bool] = {revision_id: False for revision_id in revision_ids}
+        source_eligible: dict[str, bool] = {revision_id: False for revision_id in revision_ids}
+        snapshot_present: dict[str, bool] = {revision_id: False for revision_id in revision_ids}
+        for row in rows:
+            revision_id = str(row["requested_revision_id"])
+            eligible[revision_id] = bool(row["eligible"])
+            source_eligible[revision_id] = bool(row["source_eligible"])
+            snapshot_present[revision_id] = bool(
+                row["source_snapshot_path"] and row["source_content_digest"]
+            )
+            if row["id"] is not None:
+                grouped.setdefault(revision_id, []).append(row)
+        states: dict[str, dict[str, Any]] = {}
+        for revision_id in revision_ids:
+            builds = grouped.get(revision_id, [])
+            latest = builds[0] if builds else None
+            ready = next((row for row in builds if row["status"] == "ready"), None)
+            if latest is not None:
+                status = latest["status"]
+                error = None
+            elif source_eligible.get(revision_id, False) and not snapshot_present.get(revision_id, False):
+                status = "snapshot_failed"
+                error = "validated revision has no immutable source snapshot"
+            elif eligible.get(revision_id, False):
+                status = "enqueue_failed"
+                error = "eligible revision has no image build generation"
+            else:
+                status = "not_eligible"
+                error = None
+            states[revision_id] = {
+                "status": status,
+                "error": error,
+                "eligible": eligible.get(revision_id, False),
+                "current_build": (
+                    build_revision_image_summary_payload(latest)
+                    if latest is not None
+                    else None
+                ),
+                "ready_build": (
+                    build_revision_image_summary_payload(ready)
+                    if ready is not None
+                    else None
+                ),
+                "history_count": len(builds),
+            }
+        return states
+
+    async def get_revision_image_state(self, revision_id: str) -> dict[str, Any]:
+        return (await self._revision_image_states([revision_id])).get(
+            revision_id,
+            {
+                "status": "not_eligible",
+                "eligible": False,
+                "current_build": None,
+                "ready_build": None,
+                "history_count": 0,
+            },
+        )
+
     async def list_modules(self) -> list[dict[str, Any]]:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
@@ -2845,7 +3300,27 @@ class AppServices:
                 order by m.created_at desc
                 """
             )
-        return [self._build_module_payload(row) for row in rows]
+        modules = [self._build_module_payload(row) for row in rows]
+        states = await self._revision_image_states(
+            [
+                str(module["current_revision_id"])
+                for module in modules
+                if module.get("current_revision_id")
+            ]
+        )
+        for module in modules:
+            revision_id = module.get("current_revision_id")
+            module["image_build"] = states.get(
+                str(revision_id),
+                {
+                    "status": "not_eligible",
+                    "eligible": False,
+                    "current_build": None,
+                    "ready_build": None,
+                    "history_count": 0,
+                },
+            )
+        return modules
 
     async def get_module(self, module_id: str) -> dict[str, Any] | None:
         modules = await self.list_modules()
@@ -3109,6 +3584,121 @@ class AppServices:
                 build_id,
             )
         return build_revision_image_payload(row) if row is not None else None
+
+    async def list_revision_image_build_statuses(
+        self,
+        *,
+        module_id: str | None = None,
+        revision_id: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        if status is not None and status not in {
+            "queued", "building", "ready", "failed", "superseded", "pruned"
+        }:
+            raise ValueError("unknown revision image build status")
+        bounded_limit = min(100, max(1, int(limit)))
+        bounded_offset = max(0, int(offset))
+        clauses: list[str] = []
+        params: list[Any] = []
+        for column, value in (
+            ("r.module_import_id", module_id),
+            ("b.revision_id", revision_id),
+            ("b.status", status),
+        ):
+            if value is None:
+                continue
+            params.append(value)
+            clauses.append(f"{column} = ${len(params)}")
+        where = f"where {' and '.join(clauses)}" if clauses else ""
+        params.extend((bounded_limit, bounded_offset))
+        async with self.postgres_pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                select b.id, b.revision_id, b.generation, b.source_commit,
+                       b.source_snapshot_path, b.source_content_digest, b.local_tag,
+                       b.image_id, b.image_digest, b.base_image_id, b.status, b.attempt,
+                       b.available_at, b.claim_owner, b.claim_expires_at, b.build_log,
+                       b.failure_reason, b.retry_of_build_id, b.queued_at, b.started_at,
+                       b.finished_at, b.created_at, b.updated_at,
+                       r.module_import_id as module_id,
+                       count(*) over() as total_count
+                from revision_image_builds b
+                join bundle_revisions r on r.id = b.revision_id
+                {where}
+                order by b.created_at desc, b.id desc
+                limit ${len(params) - 1} offset ${len(params)}
+                """,
+                *params,
+            )
+        items = []
+        for row in rows:
+            item = build_revision_image_summary_payload(row)
+            item["module_id"] = row["module_id"]
+            items.append(item)
+        total = int(rows[0]["total_count"]) if rows else 0
+        next_offset = bounded_offset + len(items)
+        return {
+            "items": items,
+            "limit": bounded_limit,
+            "offset": bounded_offset,
+            "next_offset": next_offset if next_offset < total else None,
+            "total": total,
+        }
+
+    async def get_revision_image_build_status(
+        self, build_id: str
+    ) -> dict[str, Any] | None:
+        build = await self.get_revision_image_build(build_id)
+        return build_revision_image_summary_payload(build) if build is not None else None
+
+    async def get_revision_image_build_logs(
+        self,
+        build_id: str,
+        *,
+        offset: int = 0,
+        limit: int = 16_384,
+    ) -> dict[str, Any] | None:
+        build = await self.get_revision_image_build(build_id)
+        if build is None:
+            return None
+        encoded = str(build.get("build_log") or "").encode("utf-8", errors="replace")
+        bounded_offset = min(len(encoded), max(0, int(offset)))
+        bounded_limit = min(65_536, max(1, int(limit)))
+        end = min(len(encoded), bounded_offset + bounded_limit)
+        text = encoded[bounded_offset:end].decode("utf-8", errors="ignore")
+        return {
+            "build_id": build_id,
+            "offset": bounded_offset,
+            "limit": bounded_limit,
+            "next_offset": end if end < len(encoded) else None,
+            "total_bytes": len(encoded),
+            "text": text,
+        }
+
+    def _require_revision_build_store(self) -> RevisionImageBuildStore:
+        if self._revision_build_store is None:
+            raise RuntimeError("revision image build coordinator is not configured")
+        return self._revision_build_store
+
+    async def retry_revision_image_build(self, build_id: str) -> dict[str, Any]:
+        queued_id = await self._require_revision_build_store().enqueue_retry(build_id)
+        queued = await self.get_revision_image_build_status(queued_id)
+        if queued is None:
+            raise RuntimeError("queued revision image build was not persisted")
+        return queued
+
+    async def rebuild_all_revision_images(self) -> list[dict[str, Any]]:
+        build_ids = await self._require_revision_build_store().enqueue_rebuild_all()
+        builds: list[dict[str, Any]] = []
+        for build_id in build_ids:
+            build = await self.get_revision_image_build_status(build_id)
+            if build is not None:
+                builds.append(build)
+        return builds
 
     async def list_endpoint_deployments(self, endpoint_id: str) -> list[dict[str, Any]]:
         if self.postgres_pool is None:
@@ -3752,14 +4342,15 @@ class AppServices:
         async with self.postgres_pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                select id, commit_sha, checkout_path, bundle_name, bundle_version, source_event, created_at
+                select id, commit_sha, checkout_path, bundle_name, bundle_version, source_event,
+                       source_content_digest, created_at
                 from bundle_revisions
                 where module_import_id = $1
                 order by created_at desc
                 """,
                 module_id,
             )
-        return [
+        revisions = [
             {
                 "id": row["id"],
                 "commit_sha": row["commit_sha"],
@@ -3767,10 +4358,26 @@ class AppServices:
                 "bundle_name": row["bundle_name"],
                 "bundle_version": row["bundle_version"],
                 "source_event": row["source_event"],
+                "source_content_digest": row["source_content_digest"],
                 "created_at": row["created_at"].isoformat() if row["created_at"] else None,
             }
             for row in rows
         ]
+        states = await self._revision_image_states(
+            [str(revision["id"]) for revision in revisions]
+        )
+        for revision in revisions:
+            revision["image_build"] = states.get(
+                str(revision["id"]),
+                {
+                    "status": "not_eligible",
+                    "eligible": False,
+                    "current_build": None,
+                    "ready_build": None,
+                    "history_count": 0,
+                },
+            )
+        return revisions
 
     @staticmethod
     def _upsert_toml_string_key(content: str, key: str, value: str) -> str:

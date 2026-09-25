@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 import sys
 import tarfile
 from io import BytesIO
@@ -12,6 +13,7 @@ import pytest
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_ROOT))
 
+from app import revision_image_builder as builder_mod
 from app.revision_image_builder import (
     BUNDLE_IMAGE_PATH,
     GENERATED_ENTRYPOINT_NAME,
@@ -44,6 +46,7 @@ from app.revision_image_builder import (
     RevisionImageBuildSpec,
     calculate_revision_image_build_identity,
     calculate_source_content_digest,
+    freeze_revision_source,
     require_managed_revision_image,
     write_build_context,
 )
@@ -566,3 +569,60 @@ def test_builder_log_truncation_marker_never_exceeds_small_configured_cap(
         assert encoded == marker[:max_bytes]
     else:
         assert encoded.startswith(marker)
+def test_frozen_source_is_content_addressed_immutable_and_secret_free(tmp_path):
+    source = tmp_path / "source"
+    snapshot_store = tmp_path / "snapshots"
+    _write_bundle(source)
+    (source / ".env").write_text("TOKEN=secret\n", encoding="utf-8")
+
+    first = freeze_revision_source(source, snapshot_store)
+    repeated = freeze_revision_source(source, snapshot_store)
+
+    assert repeated == first
+    assert first.path.parent == snapshot_store
+    assert first.path.name == first.content_digest.removeprefix("sha256:")
+    assert calculate_source_content_digest(first.path) == first.content_digest
+    assert not (first.path / ".env").exists()
+    assert first.path.stat().st_mode & 0o222 == 0
+    assert (first.path / "module.py").stat().st_mode & 0o222 == 0
+
+    frozen_module = (first.path / "module.py").read_bytes()
+    (source / "module.py").write_text("VALUE = 'changed'\n", encoding="utf-8")
+
+    assert (first.path / "module.py").read_bytes() == frozen_module
+    assert calculate_source_content_digest(source) != first.content_digest
+def test_concurrent_snapshot_publishers_reuse_one_complete_snapshot(tmp_path):
+    source = tmp_path / "source"
+    snapshot_store = tmp_path / "snapshots"
+    _write_bundle(source)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first_future = executor.submit(freeze_revision_source, source, snapshot_store)
+        second_future = executor.submit(freeze_revision_source, source, snapshot_store)
+        first = first_future.result()
+        second = second_future.result()
+
+    assert first == second
+    assert calculate_source_content_digest(first.path) == first.content_digest
+    assert [path for path in snapshot_store.iterdir() if not path.name.startswith(".staging-")] == [first.path]
+
+
+def test_snapshot_publication_rejects_source_mutation_during_copy(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    snapshot_store = tmp_path / "snapshots"
+    _write_bundle(source)
+    original_fsync = builder_mod.os.fsync
+    mutated = False
+
+    def mutate_between_collection_and_copy(fd):
+        nonlocal mutated
+        if not mutated:
+            mutated = True
+            (source / "module.py").write_text("VALUE = 'mutated'\n", encoding="utf-8")
+        return original_fsync(fd)
+
+    monkeypatch.setattr(builder_mod.os, "fsync", mutate_between_collection_and_copy)
+
+    with pytest.raises(builder_mod.BuildContextError, match="changed while generating context"):
+        freeze_revision_source(source, snapshot_store)
+    assert not [path for path in snapshot_store.iterdir() if not path.name.startswith(".staging-")]

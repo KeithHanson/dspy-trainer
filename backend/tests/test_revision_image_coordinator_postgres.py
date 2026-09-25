@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import pytest
 import sys
 from pathlib import Path
 
@@ -14,17 +15,22 @@ from app.revision_image_builder import (
 from app.revision_image_coordinator import (
     PostgresRevisionImageBuildStore,
     RevisionImageBuildClaim,
+    RevisionImageEnqueueError,
 )
-
 BASE_IMAGE_ID = f"sha256:{'a' * 64}"
 IMAGE_ID = f"sha256:{'b' * 64}"
 
 
 class _Transaction:
+    def __init__(self, lock):
+        self._lock = lock
+
     async def __aenter__(self):
+        await self._lock.acquire()
         return self
 
     async def __aexit__(self, exc_type, exc, traceback):
+        self._lock.release()
         return False
 
 
@@ -33,6 +39,7 @@ class _StatefulPostgresConnection:
 
     def __init__(self) -> None:
         self.now = 100.0
+        self._transaction_lock = asyncio.Lock()
         self.modules: dict[str, dict] = {}
         self.revisions: dict[str, dict] = {}
         self.runtime: dict[str, dict] = {}
@@ -44,10 +51,13 @@ class _StatefulPostgresConnection:
         return False
 
     def transaction(self):
-        return _Transaction()
+        return _Transaction(self._transaction_lock)
 
     async def execute(self, sql, *args):
         query = " ".join(sql.lower().split())
+
+        if "select pg_advisory_xact_lock($1)" in query:
+            return "SELECT 1"
 
         if "where status = 'building' and claim_expires_at <= now()" in query:
             count = 0
@@ -114,6 +124,7 @@ class _StatefulPostgresConnection:
                 local_tag,
                 base_image_id,
                 retry_of_build_id,
+                initial_log,
             ) = args
             self.builds[build_id] = {
                 "id": build_id,
@@ -130,7 +141,7 @@ class _StatefulPostgresConnection:
                 "queued_at": self.now,
                 "claim_owner": None,
                 "claim_expires_at": None,
-                "build_log": "",
+                "build_log": initial_log,
                 "failure_reason": None,
                 "retry_of_build_id": retry_of_build_id,
                 "image_id": None,
@@ -198,7 +209,18 @@ class _StatefulPostgresConnection:
             }
             if rebuild_all:
                 latest = max(related, key=lambda build: build["generation"], default=None)
+                active = max(
+                    (
+                        build
+                        for build in related
+                        if build["status"] in {"queued", "building"}
+                    ),
+                    key=lambda build: build["generation"],
+                    default=None,
+                )
                 row["retry_of_build_id"] = latest["id"] if latest else None
+                row["active_build_id"] = active["id"] if active else None
+                row["active_build_log"] = active["build_log"] if active else None
             rows.append(row)
         return rows
 
@@ -243,15 +265,29 @@ class _StatefulPostgresConnection:
 
         if "for update of b, r" in query:
             build = self.builds.get(args[0])
-            if build is None or not self._revision_eligible(build["revision_id"]):
+            if build is None:
                 return None
             revision = self.revisions[build["revision_id"]]
-            return {**build, "module_id": revision["module_id"]}
+            return {
+                **build,
+                "module_id": revision["module_id"],
+                "eligible": self._revision_eligible(build["revision_id"]),
+            }
 
         raise AssertionError(f"unhandled fetchrow query: {query}")
 
     async def fetchval(self, sql, *args):
         query = " ".join(sql.lower().split())
+
+        if "where retry_of_build_id = $1 and base_image_id = $2" in query:
+            matches = [
+                build
+                for build in self.builds.values()
+                if build["retry_of_build_id"] == args[0]
+                and build["base_image_id"] == args[1]
+            ]
+            matches.sort(key=lambda build: build["generation"], reverse=True)
+            return matches[0]["id"] if matches else None
 
         if "select coalesce(max(generation), 0) + 1" in query:
             generations = [
@@ -625,9 +661,9 @@ def test_rebuild_all_supersedes_active_work_and_advances_each_generation(tmp_pat
     )
     _add_build(
         connection,
-        build_id="queued-b",
+        build_id="failed-b",
         revision_id="revision-b",
-        status="queued",
+        status="failed",
         generation=1,
     )
     store = _store(connection)
@@ -645,11 +681,9 @@ def test_rebuild_all_supersedes_active_work_and_advances_each_generation(tmp_pat
         "revision-b",
         2,
     )
-    assert rebuild_b["retry_of_build_id"] == "queued-b"
-    assert connection.builds["queued-b"]["status"] == "failed"
-    assert connection.builds["queued-b"]["failure_reason"] == (
-        "superseded by rebuild-all"
-    )
+    assert rebuild_b["retry_of_build_id"] == "failed-b"
+    assert connection.builds["failed-b"]["status"] == "failed"
+    assert connection.builds["failed-b"]["failure_reason"] is None
 
 
 def test_completion_atomically_fences_revoked_eligibility_and_never_publishes(tmp_path):
@@ -699,3 +733,80 @@ def test_completion_atomically_fences_revoked_eligibility_and_never_publishes(tm
     assert build["failure_reason"] == (
         "revision eligibility was revoked before image publication"
     )
+def test_retry_rejects_active_ineligible_and_duplicate_generations(tmp_path):
+    connection = _StatefulPostgresConnection()
+    _add_revision(
+        connection,
+        module_id="module-a",
+        revision_id="revision-a",
+        snapshot=_snapshot(tmp_path, "revision-a"),
+        created_at=1,
+    )
+    _add_build(
+        connection,
+        build_id="active-build",
+        revision_id="revision-a",
+        status="queued",
+    )
+    store = _store(connection)
+
+    with pytest.raises(RevisionImageEnqueueError) as active_error:
+        asyncio.run(store.enqueue_retry("active-build"))
+    assert active_error.value.code == "build_conflict"
+
+    connection.builds["active-build"]["status"] = "failed"
+    connection.modules["module-a"]["sync_status"] = "syncing"
+    with pytest.raises(RevisionImageEnqueueError) as ineligible_error:
+        asyncio.run(store.enqueue_retry("active-build"))
+    assert ineligible_error.value.code == "not_eligible"
+
+    connection.modules["module-a"]["sync_status"] = "synced"
+    asyncio.run(store.enqueue_retry("active-build"))
+    with pytest.raises(RevisionImageEnqueueError) as duplicate_error:
+        asyncio.run(store.enqueue_retry("active-build"))
+    assert duplicate_error.value.code == "build_conflict"
+
+
+def test_rebuild_all_rejects_duplicate_active_request(tmp_path):
+    connection = _StatefulPostgresConnection()
+    _add_revision(
+        connection,
+        module_id="module-a",
+        revision_id="revision-a",
+        snapshot=_snapshot(tmp_path, "revision-a"),
+        created_at=1,
+    )
+    store = _store(connection)
+
+    first = asyncio.run(store.enqueue_rebuild_all())
+    assert len(first) == 1
+    with pytest.raises(RevisionImageEnqueueError) as duplicate_error:
+        asyncio.run(store.enqueue_rebuild_all())
+    assert duplicate_error.value.code == "build_conflict"
+def test_concurrent_rebuild_all_requests_create_one_generation(tmp_path):
+    connection = _StatefulPostgresConnection()
+    _add_revision(
+        connection,
+        module_id="module-a",
+        revision_id="revision-a",
+        snapshot=_snapshot(tmp_path, "revision-a"),
+        created_at=1,
+    )
+    store = _store(connection)
+
+    async def run_concurrently():
+        return await asyncio.gather(
+            store.enqueue_rebuild_all(),
+            store.enqueue_rebuild_all(),
+            return_exceptions=True,
+        )
+
+    results = asyncio.run(run_concurrently())
+    successes = [result for result in results if isinstance(result, list)]
+    conflicts = [result for result in results if isinstance(result, RevisionImageEnqueueError)]
+
+    assert len(successes) == 1
+    assert len(successes[0]) == 1
+    assert len(conflicts) == 1
+    assert conflicts[0].code == "build_conflict"
+    assert len(connection.builds) == 1

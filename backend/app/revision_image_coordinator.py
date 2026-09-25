@@ -4,7 +4,7 @@ import asyncio
 import logging
 import threading
 from collections.abc import Callable
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -21,8 +21,17 @@ from app.revision_images import MAX_FAILURE_REASON_CHARS
 
 logger = logging.getLogger(__name__)
 _BUILD_COORDINATOR_ADVISORY_LOCK = 0x44535059494D4742
+_REBUILD_ALL_ADVISORY_LOCK = 0x44535059494D4743
 _RECOVERY_LOG = "claim expired; requeued for recovery\n"
 _SHUTDOWN_LOG = "deployer stopped; requeued for recovery\n"
+_RETRY_LOG = "generation queued by operator retry\n"
+
+
+class RevisionImageEnqueueError(ValueError):
+    def __init__(self, code: str, message: str, *, build_id: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.build_id = build_id
 
 
 @dataclass(frozen=True)
@@ -98,6 +107,10 @@ class RevisionImageBuildStore(Protocol):
     ) -> bool: ...
 
     async def release_claim(self, claim: RevisionImageBuildClaim) -> bool: ...
+
+    async def enqueue_retry(self, build_id: str) -> str: ...
+
+    async def enqueue_rebuild_all(self) -> list[str]: ...
 
 
 class RevisionImageBuilderAdapter(Protocol):
@@ -337,7 +350,19 @@ class PostgresRevisionImageBuildStore:
         self._build_log_max_bytes = build_log_max_bytes
         self._leader_timeout_seconds = leader_timeout_seconds
         self._connection: Any | None = None
+        self._operation_pool: Any | None = None
         self._leader = False
+
+    def set_operation_pool(self, pool: Any) -> None:
+        self._operation_pool = pool
+
+    @asynccontextmanager
+    async def _operation_connection(self):
+        if self._operation_pool is not None:
+            async with self._operation_pool.acquire() as conn:
+                yield conn
+            return
+        yield await self._conn()
 
     async def _conn(self) -> Any:
         if self._connection is not None and self._connection.is_closed():
@@ -408,7 +433,10 @@ class PostgresRevisionImageBuildStore:
         return _affected_rows(result)
 
     async def reconcile_eligible_revisions(self) -> int:
-        conn = await self._conn()
+        async with self._operation_connection() as conn:
+            return await self._reconcile_eligible_revisions(conn)
+
+    async def _reconcile_eligible_revisions(self, conn: Any) -> int:
         inserted = 0
         async with conn.transaction():
             await conn.execute("""
@@ -772,29 +800,61 @@ class PostgresRevisionImageBuildStore:
         return _affected_rows(result) == 1
 
     async def enqueue_retry(self, build_id: str) -> str:
-        conn = await self._conn()
+        async with self._operation_connection() as conn:
+            return await self._enqueue_retry(conn, build_id)
+
+    async def _enqueue_retry(self, conn: Any, build_id: str) -> str:
         async with conn.transaction():
             row = await conn.fetchrow(
                 """
                 select b.id, b.revision_id, r.module_import_id as module_id,
-                       b.source_commit, b.source_snapshot_path, b.source_content_digest
+                       b.source_commit, b.source_snapshot_path, b.source_content_digest,
+                       b.status,
+                       (m.deleted_at is null
+                        and m.sync_status = 'synced'
+                        and m.current_revision_id = b.revision_id
+                        and rb.validation_status = 'passed'
+                        and rb.validation_revision_id = b.revision_id
+                        and r.source_snapshot_path is not null
+                        and r.source_content_digest is not null
+                        and r.source_snapshot_path = b.source_snapshot_path
+                        and r.source_content_digest = b.source_content_digest
+                        and coalesce(r.commit_sha, 'unversioned') = coalesce(b.source_commit, 'unversioned')) as eligible
                 from revision_image_builds b
                 join bundle_revisions r on r.id = b.revision_id
                 join module_imports m on m.id = r.module_import_id
-                join runtime_bundles rb on rb.module_import_id = m.id
+                left join runtime_bundles rb on rb.module_import_id = m.id
                 where b.id = $1
-                  and m.deleted_at is null
-                  and m.sync_status = 'synced'
-                  and m.current_revision_id = b.revision_id
-                  and rb.validation_status = 'passed'
-                  and rb.validation_revision_id = b.revision_id
                 for update of b, r
                 """,
                 build_id,
             )
             if row is None:
-                raise ValueError(
-                    "build is not retryable for the current eligible revision"
+                raise RevisionImageEnqueueError(
+                    "build_not_found", "revision image build was not found"
+                )
+            if row["status"] not in {"failed", "ready"}:
+                raise RevisionImageEnqueueError(
+                    "build_conflict", "only failed or ready builds can be retried"
+                )
+            if not row["eligible"]:
+                raise RevisionImageEnqueueError(
+                    "not_eligible", "build revision is not currently eligible"
+                )
+            duplicate = await conn.fetchval(
+                """
+                select id from revision_image_builds
+                where retry_of_build_id = $1 and base_image_id = $2
+                order by generation desc limit 1
+                """,
+                build_id,
+                self._base_image_id,
+            )
+            if duplicate is not None:
+                raise RevisionImageEnqueueError(
+                    "build_conflict",
+                    "a retry generation already exists for this build and base image",
+                    build_id=str(duplicate),
                 )
             await self._supersede_active_revision_build(
                 conn, row["revision_id"], "superseded by manual retry"
@@ -806,18 +866,33 @@ class PostgresRevisionImageBuildStore:
                 )
             )
             return await self._insert_build(
-                conn, row, generation=generation, retry_of_build_id=build_id
+                conn,
+                row,
+                generation=generation,
+                retry_of_build_id=build_id,
+                initial_log=_RETRY_LOG,
             )
 
     async def enqueue_rebuild_all(self) -> list[str]:
-        conn = await self._conn()
+        async with self._operation_connection() as conn:
+            return await self._enqueue_rebuild_all(conn)
+
+    async def _enqueue_rebuild_all(self, conn: Any) -> list[str]:
         build_ids: list[str] = []
         async with conn.transaction():
-            rows = await conn.fetch("""
+            await conn.execute(
+                "select pg_advisory_xact_lock($1)", _REBUILD_ALL_ADVISORY_LOCK
+            )
+            rows = await conn.fetch(
+                """
                 select r.id as revision_id, r.module_import_id as module_id, r.commit_sha as source_commit,
                        r.source_snapshot_path, r.source_content_digest,
                        (select b.id from revision_image_builds b where b.revision_id = r.id
-                        order by b.generation desc limit 1) as retry_of_build_id
+                        order by b.generation desc limit 1) as retry_of_build_id,
+                       (select b.id from revision_image_builds b where b.revision_id = r.id
+                        and b.status in ('queued', 'building')
+                        and b.base_image_id = $1
+                        order by b.generation desc limit 1) as active_build_id
                 from bundle_revisions r
                 join module_imports m on m.id = r.module_import_id
                 join runtime_bundles rb on rb.module_import_id = m.id
@@ -830,7 +905,19 @@ class PostgresRevisionImageBuildStore:
                   and r.source_content_digest is not null
                 order by r.created_at asc, r.id asc
                 for update of r
-                """)
+                """,
+                self._base_image_id,
+            )
+            duplicate = next(
+                (row["active_build_id"] for row in rows if row["active_build_id"]),
+                None,
+            )
+            if duplicate is not None:
+                raise RevisionImageEnqueueError(
+                    "build_conflict",
+                    "a rebuild-all generation is already queued for the current revisions",
+                    build_id=str(duplicate),
+                )
             for row in rows:
                 await self._supersede_active_revision_build(
                     conn, row["revision_id"], "superseded by rebuild-all"
@@ -847,6 +934,7 @@ class PostgresRevisionImageBuildStore:
                         row,
                         generation=generation,
                         retry_of_build_id=row["retry_of_build_id"],
+                        initial_log="",
                     )
                 )
         return build_ids
@@ -876,6 +964,7 @@ class PostgresRevisionImageBuildStore:
         *,
         generation: int,
         retry_of_build_id: str | None,
+        initial_log: str = "",
     ) -> str:
         build_id = f"build-{uuid4().hex}"
         spec = RevisionImageBuildSpec(
@@ -901,7 +990,7 @@ class PostgresRevisionImageBuildStore:
               queued_at, created_at, updated_at
             ) values (
               $1, $2, $3, $4, $5, $6, $7, $8, 'queued', 0,
-              now(), '', null, $9, now(), now(), now()
+              now(), $10, null, $9, now(), now(), now()
             )
             """,
             build_id,
@@ -913,9 +1002,9 @@ class PostgresRevisionImageBuildStore:
             identity.local_tag,
             spec.base_image_id,
             retry_of_build_id,
+            _bounded_utf8(initial_log, self._build_log_max_bytes),
         )
         return build_id
-
 
 def _claim_from_row(row: Any) -> RevisionImageBuildClaim:
     return RevisionImageBuildClaim(
