@@ -13,8 +13,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import Settings
-from app.services import AppServices, _classify_sync_status, _json_ready, _run_endpoint_invocation_with_mlflow
-
+from app.revision_image_builder import BuildContextError
+from app.services import AppServices, ModuleSyncError, _classify_sync_status, _json_ready, _run_endpoint_invocation_with_mlflow
 
 class _FakeAsyncProcess:
     def __init__(self, *, returncode: int = 0, stdout: str = "", stderr: str = ""):
@@ -662,3 +662,101 @@ def test_unchanged_bytes_at_new_git_commit_create_distinct_revision(tmp_path):
 
     assert revision_id != "revision-old"
     assert any("insert into bundle_revisions" in sql.lower() for sql, _ in connection.executed)
+def test_sync_snapshot_failure_rolls_back_checkout_and_refresh_stays_behind(tmp_path, monkeypatch):
+    monkeypatch.setenv("GITHUB_PAT", "ghp_test")
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    module = {
+        "id": "module-a",
+        "source": "github",
+        "github_repo_url": "https://github.com/example/bundle",
+        "github_branch": "main",
+        "github_subpath": None,
+        "checkout_path": str(checkout),
+        "current_commit_sha": "commit-old",
+        "upstream_commit_sha": "commit-new",
+        "sync_status": "behind",
+    }
+    head = "commit-old"
+    state_writes = []
+    services = AppServices(
+        SimpleNamespace(checkout_root=str(tmp_path), github_pat="ghp_test")
+    )
+
+    async def fake_get_source_record(module_id):
+        assert module_id == "module-a"
+        return dict(module)
+
+    async def fake_git(args, *, cwd=None):
+        nonlocal head
+        assert cwd == checkout
+        if args[:2] == ["git", "fetch"]:
+            return ""
+        if args[:3] == ["git", "merge", "--ff-only"]:
+            head = "commit-new"
+            return ""
+        if args[:3] == ["git", "reset", "--hard"]:
+            head = args[3]
+            return ""
+        if args == ["git", "rev-parse", "HEAD"]:
+            return head
+        if args == ["git", "rev-parse", "FETCH_HEAD"]:
+            return "commit-new"
+        if args == ["git", "merge-base", "HEAD", "FETCH_HEAD"]:
+            return "commit-old"
+        raise AssertionError(args)
+
+    async def fake_set_sync_state(module_id, **kwargs):
+        state_writes.append((module_id, kwargs))
+        return None
+
+    async def fail_snapshot(bundle_path):
+        del bundle_path
+        raise BuildContextError("source changed during snapshot")
+
+    services._get_module_source_record = fake_get_source_record
+    services._run_git_command = fake_git
+    services._set_module_sync_state = fake_set_sync_state
+    services.freeze_validated_source = fail_snapshot
+
+    with pytest.raises(ModuleSyncError, match="source changed during snapshot"):
+        asyncio.run(services.sync_module("module-a"))
+
+    assert head == "commit-old"
+    refreshed = asyncio.run(services.refresh_module_sync_status("module-a"))
+    assert refreshed["sync_status"] == "behind"
+    assert refreshed["current_commit_sha"] == "commit-old"
+    assert state_writes[-1][1]["sync_status"] == "behind"
+def test_image_state_excludes_current_revision_not_exactly_validated(tmp_path):
+    class Connection:
+        async def fetch(self, sql, revision_ids):
+            assert revision_ids == ["revision-current"]
+            assert "rb.validation_revision_id = r.id" in sql
+            return [{
+                "requested_revision_id": "revision-current",
+                "source_eligible": False,
+                "eligible": False,
+                "source_snapshot_path": str(tmp_path / "snapshot"),
+                "source_content_digest": f"sha256:{'b' * 64}",
+                "id": None,
+            }]
+
+    class Acquire:
+        async def __aenter__(self):
+            return Connection()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    class Pool:
+        def acquire(self):
+            return Acquire()
+
+    services = AppServices(SimpleNamespace(checkout_root=str(tmp_path)))
+    services.postgres_pool = Pool()
+    state = asyncio.run(services.get_revision_image_state("revision-current"))
+
+    assert state["status"] == "not_eligible"
+    assert state["eligible"] is False
+    assert state["error"] is None
+    assert state["current_build"] is None

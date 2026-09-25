@@ -2670,15 +2670,18 @@ class AppServices:
         checkout_path = Path(str(module.get("checkout_path") or "").strip()).expanduser().resolve()
         clone_url = _github_clone_url(repo_url, normalized_pat)
 
+        previous_commit_sha = str(module.get("current_commit_sha") or "").strip()
+        checkout_advanced = False
         try:
+            await self._run_git_command(["git", "fetch", clone_url, branch], cwd=checkout_path)
+            await self._run_git_command(["git", "merge", "--ff-only", "FETCH_HEAD"], cwd=checkout_path)
+            checkout_advanced = True
+            current_commit_sha = await self._run_git_command(["git", "rev-parse", "HEAD"], cwd=checkout_path)
+            bundle_root = Path(self._module_bundle_root_path(module)).expanduser().resolve()
             try:
                 frozen_source = await self.freeze_validated_source(str(bundle_root))
             except BuildContextError as exc:
                 raise RuntimeError(str(exc)) from exc
-            await self._run_git_command(["git", "merge", "--ff-only", "FETCH_HEAD"], cwd=checkout_path)
-            current_commit_sha = await self._run_git_command(["git", "rev-parse", "HEAD"], cwd=checkout_path)
-            bundle_root = Path(self._module_bundle_root_path(module)).expanduser().resolve()
-            frozen_source = await self.freeze_validated_source(str(bundle_root))
             report = validate_bundle(str(frozen_source.path))
             if not report.passed:
                 raise RuntimeError(report.summary)
@@ -2737,9 +2740,19 @@ class AppServices:
                 "current_revision_id": revision_id,
                 "image_build": image_build,
             }
-        except ModuleSyncError:
-            raise
         except Exception as exc:
+            if checkout_advanced and previous_commit_sha:
+                try:
+                    await self._run_git_command(
+                        ["git", "reset", "--hard", previous_commit_sha],
+                        cwd=checkout_path,
+                    )
+                except Exception:
+                    logger.exception(
+                        "module_sync_checkout_rollback_failed module_id=%s commit=%s",
+                        module_id,
+                        previous_commit_sha,
+                    )
             await self._set_module_sync_state(
                 module_id,
                 current_commit_sha=str(module.get("current_commit_sha") or "").strip(),
@@ -3111,11 +3124,13 @@ class AppServices:
                        (m.deleted_at is null
                         and m.sync_status = 'synced'
                         and m.current_revision_id = r.id
-                        and rb.validation_status = 'passed') as source_eligible,
+                        and rb.validation_status = 'passed'
+                        and rb.validation_revision_id = r.id) as source_eligible,
                        (m.deleted_at is null
                         and m.sync_status = 'synced'
                         and m.current_revision_id = r.id
                         and rb.validation_status = 'passed'
+                        and rb.validation_revision_id = r.id
                         and r.source_snapshot_path is not null
                         and r.source_content_digest is not null) as eligible,
                        r.source_snapshot_path, r.source_content_digest,
