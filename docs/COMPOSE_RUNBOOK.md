@@ -27,6 +27,7 @@ Internal Compose services:
 - `backend`
 - `worker`
 - `endpoint-worker`
+- `deployer` (internal only; the sole Docker socket/SDK holder)
 - `web`
 - `caddy`
 
@@ -34,6 +35,7 @@ Named volumes:
 - `postgres_data` for PostgreSQL data
 - `mlflow_artifacts` for MLflow artifacts (MLflow metadata is stored in the Postgres `mlflow` schema)
 - `bundles_data` shared between `backend` and `worker` at `/tmp/dspy-trainer/bundles` for uploaded module bundles
+- `checkouts_data` shared read-only with `deployer` so validated revision snapshots can be baked
 - `optimization_artifacts_data` shared between `backend` and `worker` at `/tmp/dspy-trainer/optimization_artifacts` so succeeded optimization artifacts can be materialized into new bundles
 
 MLflow concurrency can be tuned with `MLFLOW_WEB_WORKERS` in `.env` (default `4`). Compose builds a small project MLflow image that adds the PostgreSQL driver required by both the schema bootstrap and MLflow's backend store. MLflow serves internally at root: leave `MLFLOW_STATIC_PREFIX` empty so both its REST API and `/v1/traces` span ingestion remain reachable. Caddy strips the browser-facing `/mlflow` prefix and forwards requests to that root service. Set `MLFLOW_CORS_ALLOWED_ORIGINS` to every browser origin that serves this UI (for example `http://agents.abatix.com:8080` in a remote deployment). Also set `MLFLOW_ALLOWED_HOSTS_EXTRA` to the public host and port (for example `agents.abatix.com:8080`) so MLflow can preserve the browser Host header for same-origin UI APIs. Compose also forwards `CADDY_HTTP_PORT` into the MLflow container so its allowed-hosts list stays aligned if you move the proxy off the default `8080` port. Compose reads worker replica counts from `.env` via `DSPY_TRAINER_TOTAL_WORKERS` and `DSPY_TRAINER_TOTAL_ENDPOINT_WORKER_REPLICAS`, and it forwards `DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS` when operators need to tune endpoint-worker stale detection.
@@ -42,7 +44,7 @@ MLflow concurrency can be tuned with `MLFLOW_WEB_WORKERS` in `.env` (default `4`
 
 Before starting the stack, ensure `.env` contains `GITHUB_PAT` if you want to import, sync, or push GitHub-backed bundles. Backend and worker read that variable server-side; the web UI only reports whether GitHub access is configured. GitHub imports may target either the repo root or a configured bundle subfolder. Optimization writeback now pushes to an `optimization-<job-prefix>` branch for manual merge, so also set `GIT_COMMIT_NAME` and `GIT_COMMIT_EMAIL` (defaults are provided if omitted).
 
-The default local `.env.sample` points the web build at relative proxy URLs (`/api`, `/mlflow`), leaves `MLFLOW_STATIC_PREFIX` empty, and exposes Caddy on `CADDY_HTTP_PORT=8080`. It also defines `DSPY_TRAINER_TOTAL_WORKERS`, `DSPY_TRAINER_TOTAL_ENDPOINT_WORKER_REPLICAS`, `DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS`, and `DSPY_TRAINER_BUNDLE_INSTALL_MAX_CONCURRENCY` so Compose replica counts, endpoint-worker stale-detection timing, and the deployment-wide bundle dependency install limit can be adjusted from `.env`. Override those values before rebuilding/recreating if you need different worker counts, install concurrency, host/port, or absolute public URLs.
+The default local `.env.sample` also defines deployer leader/claim timeouts, poll interval, bounded log size, immutable backend image ID, and stable Compose project/network/deployment identities. All deployer durations and sizes must be positive; the log cap cannot exceed 262144 bytes. `DSPY_TRAINER_DEPLOYER_BACKEND_BASE_IMAGE_ID` must be the exact local `sha256:...` image ID, never a mutable tag.
 
 Secret storage note:
 - `DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY` is required if you want to store module environment entries or LM Profile provider API keys in Postgres.
@@ -62,10 +64,12 @@ Bundle runtime note:
 - Bundle system dependency commands and Python requirements installation share PostgreSQL advisory-lock slots across `backend`, `worker`, and `endpoint-worker`. `DSPY_TRAINER_BUNDLE_INSTALL_MAX_CONCURRENCY` must be positive and defaults to `8`.
 - Endpoint workers continue sending `preparing` heartbeats while waiting for a slot and while installing dependencies.
 
-Run from repository root:
+Build the backend first, record its immutable local image ID in `.env`, then start the stack. The deployer Dockerfile and every generated revision image use that exact ID as their base:
 
 ```bash
-docker compose pull --ignore-pull-failures
+docker compose build --pull backend
+docker image inspect --format '{{.Id}}' "${DSPY_TRAINER_BACKEND_IMAGE:-dspy-trainer-backend:local}"
+# Set DSPY_TRAINER_DEPLOYER_BACKEND_BASE_IMAGE_ID to the printed sha256 ID.
 docker compose build --pull
 docker compose up -d --remove-orphans
 ```
@@ -101,23 +105,26 @@ docker compose logs --timestamps --tail=200
 Follow key services:
 
 ```bash
-docker compose logs -f --timestamps backend worker
+docker compose logs -f --timestamps backend worker deployer
 ```
 
 ### Rebuild
 
-Rebuild all images and restart:
+Rebuild the backend, update `DSPY_TRAINER_DEPLOYER_BACKEND_BASE_IMAGE_ID` to its new immutable ID, then rebuild and restart all images:
 
 ```bash
+docker compose build --pull backend
+docker image inspect --format '{{.Id}}' "${DSPY_TRAINER_BACKEND_IMAGE:-dspy-trainer-backend:local}"
+# Update .env with the printed ID before continuing.
 docker compose build --pull
 docker compose up -d --remove-orphans
 ```
 
-Rebuild and recreate the Python runtime services:
+Recreate the Python runtime and deployer services only after the immutable ID is current:
 
 ```bash
-docker compose build --pull backend worker endpoint-worker
-docker compose up -d --force-recreate backend worker endpoint-worker
+docker compose build --pull backend worker endpoint-worker deployer
+docker compose up -d --force-recreate backend worker endpoint-worker deployer
 ```
 
 ## Revision Image Builder Contract
@@ -128,6 +135,22 @@ The generated context contains only `Dockerfile`, `dspy-trainer-endpoint-worker`
 
 The generated Dockerfile uses the supplied immutable backend image ID directly in `FROM`, applies the complete `io.dspy-trainer.*` label set, copies source to `/opt/dspy-bundle`, executes each `runtime.system_dependency_commands` entry in order, installs `requirements.txt` afterward when present, captures sorted `pip freeze --all` output at `/opt/dspy-trainer/python-manifest.txt`, and installs the baked endpoint-worker entrypoint. Tags are `<repository>:<normalized-revision>-<24-character-build-digest-prefix>`; build ID and generation are digest inputs, so generations cannot reuse a tag.
 
+## Durable Revision Image Coordinator
+
+The dedicated `deployer` opens one PostgreSQL session and must acquire the global advisory leader lock before queue work. Claiming uses `FOR UPDATE SKIP LOCKED`, but a second durable guard refuses a claim while any non-expired row remains `building`; therefore only one image build can run globally. Endpoint-serving module revisions sort ahead of other eligible revisions, then `available_at`, `queued_at`, and build ID provide deterministic FIFO ordering. Eligibility requires the current revision to be synced, not deleted, validated as `passed` for that exact revision, and backed by a snapshot path and digest.
+
+Claim owner plus incrementing attempt is the completion fencing token. The leader renews the existing `claim_expires_at` lease while building and stores bounded log chunks. A successor requeues expired claims. If eligibility changes, a retry/rebuild supersedes an active generation, or shutdown begins, the coordinator cancels through the builder and Docker adapter instead of waiting for the Engine stream; conditional publication rejects any late result from the old owner. A failed replacement does not mutate an earlier ready generation. Retry and rebuild-all create new generations and retain `retry_of_build_id` history.
+
+Only `deployer` installs the Docker SDK and mounts `/var/run/docker.sock`; it has no published port and receives no GitHub, LM, provider, or module runtime secrets. Backend, web, general workers, and endpoint workers receive neither the SDK nor socket. The advisory lock is visible in `pg_locks`, the deployer session is named `dspy-trainer-deployer:<instance>` in `pg_stat_activity`, and an active build's renewed claim expiry is its durable liveness lease.
+
+### Coordinator Deployment-host Acceptance (Do Not Run on Development Workstations)
+
+1. Start two deployer processes for the same deployment and confirm exactly one matching advisory lock holder in PostgreSQL and at most one `building` row.
+2. Queue equal-priority fixtures and a fixture belonging to a module with a serving endpoint; confirm the serving revision starts first and the remainder start in `available_at, queued_at, id` order.
+3. Kill the leader during a deliberately slow build. After claim expiry, confirm the successor requeues and completes that same generation, with attempt incremented and no permanently `building` row.
+4. Supersede a queued fixture and then an active slow fixture. Confirm the queued row becomes terminal, active Docker streaming is interrupted, the new generation runs, and the old result cannot publish.
+5. Stop the leader cleanly during a slow build and confirm the claim returns to `queued`; make Docker unavailable for another build and confirm only that generation becomes `failed` with bounded logs while any prior ready generation remains ready.
+6. Inspect every Compose service and image package set: only `deployer` has the socket and Docker SDK, and the deployer has no published port or runtime-secret environment variables.
 ### Deployment-host Acceptance (Do Not Run on Development Workstations)
 
 On the deployment host, use a harmless validated fixture snapshot containing one observable system command and one small Python requirement. Calculate its digest with `calculate_source_content_digest`, build it through `RevisionImageBuilder(DockerSdkImageAdapter.from_env())`, and retain the returned tag, image ID, labels, bounded log, and manifest digest. Then:

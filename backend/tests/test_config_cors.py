@@ -3,10 +3,10 @@ from pathlib import Path
 
 import pytest
 
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.config import Settings, get_cors_origins_from_env
+from app.config import DeployerSettings, Settings, get_cors_origins_from_env
+from app.revision_images import MAX_BUILD_LOG_BYTES
 
 
 def test_cors_origins_include_explicit_and_vite_public_origins_without_duplicates(monkeypatch):
@@ -57,3 +57,34 @@ def test_bundle_install_concurrency_defaults_to_eight_and_must_be_positive():
             postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer",
             bundle_install_max_concurrency=0,
         )
+def _deployer_settings(**overrides):
+    values = {
+        "postgres_dsn": "postgresql://postgres:postgres@localhost:5432/dspy_trainer",
+        "deployer_backend_base_image_id": f"sha256:{'a' * 64}",
+        "deployment_id": "deployment-a",
+        "compose_project_name": "dspy-trainer",
+        "compose_network_name": "dspy-trainer-network",
+    }
+    values.update(overrides)
+    return DeployerSettings(**values)
+
+
+def test_deployer_settings_have_bounded_positive_coordinator_defaults():
+    settings = _deployer_settings()
+
+    assert settings.deployer_leader_timeout_seconds == 15.0
+    assert settings.deployer_claim_timeout_seconds == 300.0
+    assert settings.deployer_poll_interval_seconds == 1.0
+    assert settings.deployer_build_log_max_bytes == MAX_BUILD_LOG_BYTES
+
+    with pytest.raises(ValueError, match="durations must be positive"):
+        _deployer_settings(deployer_claim_timeout_seconds=0)
+    with pytest.raises(ValueError, match="must be between"):
+        _deployer_settings(deployer_build_log_max_bytes=MAX_BUILD_LOG_BYTES + 1)
+
+
+def test_deployer_settings_require_immutable_base_and_explicit_identity():
+    with pytest.raises(ValueError, match="immutable sha256 image ID"):
+        _deployer_settings(deployer_backend_base_image_id="backend:latest")
+    with pytest.raises(ValueError, match="must not be empty"):
+        _deployer_settings(deployment_id=" ")

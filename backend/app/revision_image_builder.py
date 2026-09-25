@@ -1,20 +1,23 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
 import io
 import json
 import os
-from pathlib import Path, PurePosixPath
 import re
 import stat
 import tarfile
 import tempfile
+import threading
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import suppress
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from typing import Any, BinaryIO, Protocol
+
 import tomllib
-from typing import Any, BinaryIO, Iterable, Iterator, Mapping, Protocol
 
 from app.revision_images import MAX_BUILD_LOG_BYTES, MAX_FAILURE_REASON_CHARS
-
 
 IMAGE_SCHEMA_VERSION = "1"
 PLATFORM_OWNER = "dspy-trainer"
@@ -111,6 +114,47 @@ class ImageVerificationError(RevisionImageBuildError):
     pass
 
 
+class RevisionImageBuildCancelled(RuntimeError):
+    pass
+
+
+class BuildCancellation:
+    def __init__(self) -> None:
+        self._cancelled = threading.Event()
+        self._lock = threading.Lock()
+        self._interrupt: Callable[[], None] | None = None
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled.is_set()
+
+    @property
+    def is_cancelled(self) -> bool:
+        return self.cancelled
+
+    def raise_if_cancelled(self) -> None:
+        if self.is_cancelled:
+            raise RevisionImageBuildCancelled("revision image build was cancelled")
+
+    def bind_interrupt(self, interrupt: Callable[[], None]) -> None:
+        with self._lock:
+            self._interrupt = interrupt
+            cancelled = self.is_cancelled
+        if cancelled:
+            with suppress(Exception):
+                interrupt()
+
+    def unbind_interrupt(self) -> None:
+        with self._lock:
+            self._interrupt = None
+
+    def cancel(self) -> None:
+        self._cancelled.set()
+        with self._lock:
+            interrupt = self._interrupt
+        if interrupt is not None:
+            with suppress(Exception):
+                interrupt()
 @dataclass(frozen=True)
 class RevisionImageBuildSpec:
     owner: str
@@ -134,8 +178,11 @@ class GeneratedBuildContext:
     labels: Mapping[str, str]
     members: tuple[str, ...]
     dockerfile: str
-
-
+@dataclass(frozen=True)
+class RevisionImageBuildIdentity:
+    local_tag: str
+    build_digest: str
+    dependency_digest: str
 @dataclass(frozen=True)
 class DockerBuildEvent:
     message: str = ""
@@ -162,8 +209,7 @@ class DockerImageAdapter(Protocol):
     ) -> Iterable[DockerBuildEvent]: ...
 
     def inspect_image(self, image_id: str) -> DockerImageInspection: ...
-
-
+    def cancel_active_build(self) -> None: ...
 @dataclass(frozen=True)
 class RevisionImageBuildResult:
     status: str
@@ -243,7 +289,7 @@ class DockerSdkImageAdapter:
         self._client = client
 
     @classmethod
-    def from_env(cls) -> "DockerSdkImageAdapter":
+    def from_env(cls) -> DockerSdkImageAdapter:
         import docker
 
         return cls(docker.from_env())
@@ -306,26 +352,58 @@ class DockerSdkImageAdapter:
             repo_tags=tuple(str(value) for value in (attrs.get("RepoTags") or ())),
             repo_digests=tuple(str(value) for value in (attrs.get("RepoDigests") or ())),
         )
-
-
+    def cancel_active_build(self) -> None:
+        self._client.api.close()
 class RevisionImageBuilder:
-    def __init__(self, docker: DockerImageAdapter) -> None:
+    def __init__(
+        self,
+        docker: DockerImageAdapter,
+        *,
+        max_log_bytes: int = MAX_BUILD_LOG_BYTES,
+    ) -> None:
+        if not 1 <= max_log_bytes <= MAX_BUILD_LOG_BYTES:
+            raise ValueError(
+                f"max_log_bytes must be between 1 and {MAX_BUILD_LOG_BYTES}"
+            )
         self._docker = docker
+        self._max_log_bytes = max_log_bytes
 
-    def build(self, spec: RevisionImageBuildSpec) -> RevisionImageBuildResult:
-        log = _BoundedLog()
+    @staticmethod
+    def cancel(cancellation: BuildCancellation) -> None:
+        cancellation.cancel()
+
+    def build(
+        self,
+        spec: RevisionImageBuildSpec,
+        cancellation: BuildCancellation | None = None,
+        on_log: Callable[[str], None] | None = None,
+    ) -> RevisionImageBuildResult:
+        cancellation = cancellation or BuildCancellation()
+        cancellation.bind_interrupt(self._docker.cancel_active_build)
+        log = _BoundedLog(self._max_log_bytes)
         context_metadata: GeneratedBuildContext | None = None
+
+        def emit_log(value: object) -> None:
+            text = _sanitize_log_text(value)
+            if not text:
+                return
+            log.append(text)
+            if on_log is not None:
+                on_log(text)
+
         try:
+            cancellation.raise_if_cancelled()
             with tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024, mode="w+b") as context:
                 context_metadata = write_build_context(spec, context)
+                cancellation.raise_if_cancelled()
                 base_inspection = self._docker.inspect_image(spec.base_image_id)
                 if base_inspection.image_id != spec.base_image_id:
                     raise RevisionImageBuildError(
                         "configured backend base image did not resolve locally to its immutable ID: "
                         f"expected {spec.base_image_id}, found {base_inspection.image_id or '<empty>'}"
                     )
-                log.append(f"resolved local base image {spec.base_image_id}\n")
-                log.append(f"building {context_metadata.local_tag}\n")
+                emit_log(f"resolved local base image {spec.base_image_id}{chr(10)}")
+                emit_log(f"building {context_metadata.local_tag}{chr(10)}")
                 returned_image_id: str | None = None
                 build_error: str | None = None
                 for event in self._docker.build_image(
@@ -334,11 +412,13 @@ class RevisionImageBuilder:
                     labels=context_metadata.labels,
                     use_cache=True,
                 ):
-                    log.append(event.message)
+                    cancellation.raise_if_cancelled()
+                    emit_log(event.message)
                     if event.image_id:
                         returned_image_id = event.image_id
                     if event.error and build_error is None:
                         build_error = event.error
+                cancellation.raise_if_cancelled()
                 if build_error is not None:
                     raise RevisionImageBuildError(build_error)
                 if returned_image_id is None:
@@ -351,8 +431,9 @@ class RevisionImageBuilder:
                     expected_tag=context_metadata.local_tag,
                     expected_labels=context_metadata.labels,
                 )
+                cancellation.raise_if_cancelled()
                 image_digest = inspection.repo_digests[0] if inspection.repo_digests else None
-                log.append(f"verified image {returned_image_id}\n")
+                emit_log(f"verified image {returned_image_id}{chr(10)}")
                 return RevisionImageBuildResult(
                     status="ready",
                     local_tag=context_metadata.local_tag,
@@ -364,9 +445,12 @@ class RevisionImageBuilder:
                     build_log=log.value(),
                     failure_reason=None,
                 )
-        except Exception as exc:
+        except RevisionImageBuildCancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            cancellation.raise_if_cancelled()
             failure_reason = _bounded_failure_reason(exc)
-            log.append(f"error: {failure_reason}\n")
+            emit_log(f"error: {failure_reason}{chr(10)}")
             return RevisionImageBuildResult(
                 status="failed",
                 local_tag=context_metadata.local_tag if context_metadata is not None else None,
@@ -378,6 +462,8 @@ class RevisionImageBuilder:
                 build_log=log.value(),
                 failure_reason=failure_reason,
             )
+        finally:
+            cancellation.unbind_interrupt()
 
 
 def calculate_source_content_digest(snapshot_path: Path | str) -> str:
@@ -387,16 +473,19 @@ def calculate_source_content_digest(snapshot_path: Path | str) -> str:
     for entry in _collect_source_entries(root, settings.include_files):
         _hash_source_entry(entry, digest)
     return f"sha256:{digest.hexdigest()}"
-
-
+def calculate_revision_image_build_identity(
+    spec: RevisionImageBuildSpec,
+) -> RevisionImageBuildIdentity:
+    _validate_spec(spec)
+    root = _validated_snapshot_root(spec.source_snapshot_path)
+    settings = _load_source_settings(root)
+    return _build_identity(spec, settings)
 def write_build_context(spec: RevisionImageBuildSpec, output: BinaryIO) -> GeneratedBuildContext:
     _validate_spec(spec)
     root = _validated_snapshot_root(spec.source_snapshot_path)
     settings = _load_source_settings(root)
-    dependency_digest = _dependency_digest(settings)
-    build_digest = _build_digest(spec, dependency_digest)
-    local_tag = _local_tag(spec.image_repository, spec.revision_id, build_digest)
-    labels = _build_labels(spec, dependency_digest, build_digest)
+    identity = _build_identity(spec, settings)
+    labels = _build_labels(spec, identity.dependency_digest, identity.build_digest)
     dockerfile = _generated_dockerfile(
         base_image_id=spec.base_image_id,
         labels=labels,
@@ -439,9 +528,9 @@ def write_build_context(spec: RevisionImageBuildSpec, output: BinaryIO) -> Gener
             f"expected {spec.source_content_digest}, calculated {actual_source_digest}"
         )
     return GeneratedBuildContext(
-        local_tag=local_tag,
-        build_digest=build_digest,
-        dependency_digest=dependency_digest,
+        local_tag=identity.local_tag,
+        build_digest=identity.build_digest,
+        dependency_digest=identity.dependency_digest,
         labels=labels,
         members=tuple(members),
         dockerfile=dockerfile,
@@ -792,8 +881,17 @@ def _dependency_digest(settings: _SourceSettings) -> str:
         "system_dependency_commands": list(settings.system_dependency_commands),
     }
     return f"sha256:{hashlib.sha256(_canonical_json(payload)).hexdigest()}"
-
-
+def _build_identity(
+    spec: RevisionImageBuildSpec,
+    settings: _SourceSettings,
+) -> RevisionImageBuildIdentity:
+    dependency_digest = _dependency_digest(settings)
+    build_digest = _build_digest(spec, dependency_digest)
+    return RevisionImageBuildIdentity(
+        local_tag=_local_tag(spec.image_repository, spec.revision_id, build_digest),
+        build_digest=build_digest,
+        dependency_digest=dependency_digest,
+    )
 def _build_digest(spec: RevisionImageBuildSpec, dependency_digest: str) -> str:
     payload = {
         "base_image_id": spec.base_image_id,
@@ -886,8 +984,10 @@ def _generated_dockerfile(
                     "/bin/sh",
                     "-eu",
                     "-c",
-                    f"mkdir -p {Path(PYTHON_MANIFEST_PATH).parent.as_posix()} && "
-                    f"python -m pip freeze --all | LC_ALL=C sort > {PYTHON_MANIFEST_PATH}",
+                    (
+                        f"mkdir -p {Path(PYTHON_MANIFEST_PATH).parent.as_posix()} && "
+                        f"python -m pip freeze --all | LC_ALL=C sort > {PYTHON_MANIFEST_PATH}"
+                    ),
                 ],
                 separators=(",", ":"),
             ),
