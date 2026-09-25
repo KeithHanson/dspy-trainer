@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+import json
 from pathlib import Path
 import sys
 import tarfile
@@ -51,7 +52,13 @@ BASE_IMAGE_ID = f"sha256:{'a' * 64}"
 IMAGE_ID = f"sha256:{'b' * 64}"
 
 
-def _write_bundle(root: Path, *, include_files: tuple[str, ...] = ()) -> None:
+def _write_bundle(
+    root: Path,
+    *,
+    include_files: tuple[str, ...] = (),
+    system_dependency_commands: tuple[str, ...] = ("apt-get update", "apt-get install -y curl"),
+    requirements: str | None = "example-package==1.2.3\n",
+) -> None:
     root.mkdir(parents=True, exist_ok=True)
     include_line = ""
     if include_files:
@@ -65,7 +72,7 @@ def _write_bundle(root: Path, *, include_files: tuple[str, ...] = ()) -> None:
                 "score_pass_threshold = 0.5",
                 "",
                 "[runtime]",
-                'system_dependency_commands = ["apt-get update", "apt-get install -y curl"]',
+                f"system_dependency_commands = {json.dumps(list(system_dependency_commands))}",
             ]
         )
         + include_line,
@@ -73,7 +80,8 @@ def _write_bundle(root: Path, *, include_files: tuple[str, ...] = ()) -> None:
     )
     (root / "module.py").write_text("VALUE = 'module'\n", encoding="utf-8")
     (root / "metric.py").write_text("VALUE = 'metric'\n", encoding="utf-8")
-    (root / "requirements.txt").write_text("example-package==1.2.3\n", encoding="utf-8")
+    if requirements is not None:
+        (root / "requirements.txt").write_text(requirements, encoding="utf-8")
 
 
 def _spec(
@@ -118,11 +126,13 @@ class _FakeDocker:
         events: tuple[DockerBuildEvent, ...] | None = None,
         inspection_labels: dict[str, str] | None = None,
         resolved_base_image_id: str = BASE_IMAGE_ID,
+        inspection_repo_tags: tuple[str, ...] | None = None,
     ) -> None:
         self.image_id = image_id
         self.events = events
         self.inspection_labels = inspection_labels
         self.resolved_base_image_id = resolved_base_image_id
+        self.inspection_repo_tags = inspection_repo_tags
         self.build_calls: list[dict] = []
         self.inspect_calls: list[str] = []
 
@@ -151,7 +161,7 @@ class _FakeDocker:
         return DockerImageInspection(
             image_id=self.image_id,
             labels=labels,
-            repo_tags=(build_call["tag"],),
+            repo_tags=(build_call["tag"],) if self.inspection_repo_tags is None else self.inspection_repo_tags,
             repo_digests=(f"dspy-trainer-module@sha256:{'c' * 64}",),
         )
 
@@ -218,6 +228,68 @@ def test_context_is_deterministic_complete_and_excludes_secrets_by_default(tmp_p
     assert b"private-material" not in first.getvalue()
     assert b"host-runtime-secret" not in first.getvalue()
     assert b"declared fixture" in first.getvalue()
+
+
+def test_all_dotenv_basenames_are_excluded_except_exact_metadata_override(tmp_path):
+    root = tmp_path / "snapshot"
+    included_path = "nested/.envrc.local"
+    _write_bundle(root, include_files=(included_path,))
+    dotenv_paths = (
+        ".env",
+        ".env.production",
+        ".envrc",
+        ".envrc.local",
+        ".env_backup",
+        "nested/.env",
+        included_path,
+        "other/.env_backup",
+        "other/.ENV.production",
+    )
+    for relative in dotenv_paths:
+        candidate = root / relative
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        candidate.write_text(f"fixture for {relative}\n", encoding="utf-8")
+
+    context = BytesIO()
+    write_build_context(_spec(root), context)
+    infos, _ = _tar_members(context.getvalue())
+
+    assert f"bundle/{included_path}" in infos
+    for relative in dotenv_paths:
+        if relative != included_path:
+            assert f"bundle/{relative}" not in infos
+
+
+def test_generated_dockerfile_skips_requirement_install_when_snapshot_has_no_requirements(tmp_path):
+    root = tmp_path / "snapshot"
+    _write_bundle(root, requirements=None)
+    context = BytesIO()
+
+    write_build_context(_spec(root), context)
+    infos, contents = _tar_members(context.getvalue())
+    dockerfile = contents["Dockerfile"].decode("utf-8")
+
+    assert "bundle/requirements.txt" not in infos
+    assert "python -m pip install --no-cache-dir -r requirements.txt" not in dockerfile
+    assert "python -m pip freeze --all" in dockerfile
+
+
+def test_shell_commands_are_json_quoted_as_one_run_instruction(tmp_path):
+    root = tmp_path / "snapshot"
+    command = 'printf \"safe\"\nFROM attacker/image\nLABEL attacker=true'
+    _write_bundle(root, system_dependency_commands=(command,), requirements=None)
+    context = BytesIO()
+
+    write_build_context(_spec(root), context)
+    _, contents = _tar_members(context.getvalue())
+    dockerfile_lines = contents["Dockerfile"].decode("utf-8").splitlines()
+    run_arguments = [json.loads(line.removeprefix("RUN ")) for line in dockerfile_lines if line.startswith("RUN [")]
+
+    assert [arguments for arguments in run_arguments if arguments[-1] == command] == [
+        ["/bin/sh", "-eu", "-c", command]
+    ]
+    assert [line for line in dockerfile_lines if line.startswith("FROM ")] == [f"FROM {BASE_IMAGE_ID}"]
+    assert "LABEL attacker=true" not in dockerfile_lines
 
 
 def test_context_rejects_symlinks_that_escape_snapshot(tmp_path):
@@ -335,6 +407,21 @@ def test_configured_base_must_resolve_to_exact_local_image_id(tmp_path):
     assert result.image_id is None
     assert docker.inspect_calls == [BASE_IMAGE_ID]
     assert docker.build_calls == []
+
+
+def test_built_image_without_requested_tag_is_not_ready(tmp_path):
+    root = tmp_path / "snapshot"
+    _write_bundle(root)
+    docker = _FakeDocker(inspection_repo_tags=())
+
+    result = RevisionImageBuilder(docker).build(_spec(root))
+
+    assert result.status == "failed"
+    assert result.image_id is None
+    assert "does not carry expected local tag" in (result.failure_reason or "")
+    assert len(docker.build_calls) == 1
+    assert docker.inspect_calls == [BASE_IMAGE_ID, IMAGE_ID]
+
 
 def test_missing_or_mismatched_provenance_labels_never_produce_ready_result(tmp_path):
     root = tmp_path / "snapshot"

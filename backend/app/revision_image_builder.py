@@ -498,7 +498,7 @@ def verify_built_image(
         raise ImageVerificationError(
             f"image provenance label mismatch: {', '.join(mismatches)}"
         )
-    if inspection.repo_tags and expected_tag not in inspection.repo_tags:
+    if expected_tag not in inspection.repo_tags:
         raise ImageVerificationError(
             f"inspected image does not carry expected local tag: {expected_tag}"
         )
@@ -681,7 +681,7 @@ def _is_excluded(relative: PurePosixPath, include_files: frozenset[PurePosixPath
     name = relative.name.lower()
     return (
         name in _SECRET_FILE_NAMES
-        or name.startswith(".env.")
+        or name.startswith(".env")
         or name.endswith(_SECRET_FILE_SUFFIXES)
         or name.endswith(".pyc")
     )
