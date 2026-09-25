@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 import tarfile
+import threading
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -545,3 +546,89 @@ def test_public_build_identity_matches_generated_context(tmp_path):
     assert identity.local_tag == generated.local_tag
     assert identity.build_digest == generated.build_digest
     assert identity.dependency_digest == generated.dependency_digest
+def test_sdk_adapter_cancellation_closes_active_stream_and_invalidates_build(tmp_path):
+    class BlockingStream:
+        def __init__(self):
+            self.entered = threading.Event()
+            self.closed = threading.Event()
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            self.entered.set()
+            if not self.closed.wait(timeout=2):
+                raise AssertionError("build stream was not closed")
+            raise RuntimeError("build stream closed")
+
+        def close(self):
+            self.closed.set()
+
+    stream = BlockingStream()
+
+    class FakeApi:
+        def build(self, **_kwargs):
+            return stream
+
+        @staticmethod
+        def inspect_image(reference):
+            assert reference == BASE_IMAGE_ID
+            return {
+                "Id": BASE_IMAGE_ID,
+                "Config": {"Labels": {}},
+                "RepoTags": [],
+                "RepoDigests": [],
+            }
+
+    root = tmp_path / "snapshot"
+    _write_bundle(root)
+    adapter = DockerSdkImageAdapter(SimpleNamespace(api=FakeApi()))
+    cancellation = BuildCancellation()
+    results = []
+    errors = []
+
+    def consume():
+        try:
+            results.append(
+                RevisionImageBuilder(adapter).build(_spec(root), cancellation)
+            )
+        except RevisionImageBuildCancelled as exc:
+            errors.append(exc)
+
+    consumer = threading.Thread(target=consume)
+    consumer.start()
+    assert stream.entered.wait(timeout=1)
+
+    cancellation.cancel()
+    consumer.join(timeout=1)
+
+    assert not consumer.is_alive()
+    assert stream.closed.is_set()
+    assert [str(error) for error in errors] == ["revision image build was cancelled"]
+    assert results == []
+    assert adapter._active_stream is None
+
+
+@pytest.mark.parametrize("max_bytes", [1, 8, 32, 33, 34, 64])
+def test_builder_log_truncation_marker_never_exceeds_small_configured_cap(
+    tmp_path, max_bytes
+):
+    root = tmp_path / "snapshot"
+    _write_bundle(root)
+    docker = _FakeDocker(
+        events=(
+            DockerBuildEvent(message="x" * 512),
+            DockerBuildEvent(image_id=IMAGE_ID),
+        )
+    )
+
+    result = RevisionImageBuilder(docker, max_log_bytes=max_bytes).build(_spec(root))
+
+    encoded = result.build_log.encode("utf-8")
+    marker = b"[earlier build output truncated]\n"
+    assert result.status == "ready"
+    assert len(encoded) <= max_bytes
+    if max_bytes <= len(marker):
+        assert encoded == marker[:max_bytes]
+    else:
+        assert encoded.startswith(marker)

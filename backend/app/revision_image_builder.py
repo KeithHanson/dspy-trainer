@@ -273,8 +273,11 @@ class _BoundedLog:
         self._value.extend(text.encode("utf-8", errors="replace"))
         if len(self._value) <= self.max_bytes:
             return
-        tail_size = max(0, self.max_bytes - len(self._TRUNCATION_MARKER))
-        tail_bytes = bytes(self._value[-tail_size:]) if tail_size else b""
+        if self.max_bytes <= len(self._TRUNCATION_MARKER):
+            self._value = bytearray(self._TRUNCATION_MARKER[: self.max_bytes])
+            return
+        tail_size = self.max_bytes - len(self._TRUNCATION_MARKER)
+        tail_bytes = bytes(self._value[-tail_size:])
         valid_tail = tail_bytes.decode("utf-8", errors="ignore").encode("utf-8")
         self._value = bytearray(self._TRUNCATION_MARKER + valid_tail)
 
@@ -287,6 +290,8 @@ class DockerSdkImageAdapter:
 
     def __init__(self, client: Any) -> None:
         self._client = client
+        self._stream_lock = threading.Lock()
+        self._active_stream: Any | None = None
 
     @classmethod
     def from_env(cls) -> DockerSdkImageAdapter:
@@ -314,33 +319,46 @@ class DockerSdkImageAdapter:
             rm=True,
             forcerm=True,
         )
+        with self._stream_lock:
+            if self._active_stream is not None:
+                stream.close()
+                raise RevisionImageBuildError("a Docker image build is already active")
+            self._active_stream = stream
         return self._build_events(stream, tag=tag)
 
     def _build_events(self, stream: Iterable[object], *, tag: str) -> Iterator[DockerBuildEvent]:
         returned_image_id: str | None = None
         saw_error = False
-        for raw_event in stream:
-            if not isinstance(raw_event, Mapping):
-                yield DockerBuildEvent(message=str(raw_event))
-                continue
-            aux = raw_event.get("aux")
-            if isinstance(aux, Mapping):
-                candidate = str(aux.get("ID") or aux.get("Id") or "").strip()
-                if candidate:
-                    returned_image_id = candidate
-            error = _docker_event_error(raw_event)
-            if error:
-                saw_error = True
-            yield DockerBuildEvent(
-                message=_docker_event_message(raw_event),
-                image_id=returned_image_id if isinstance(aux, Mapping) else None,
-                error=error,
-            )
-        if returned_image_id is None and not saw_error:
-            attrs = self._client.api.inspect_image(tag)
-            returned_image_id = str(attrs.get("Id") or attrs.get("ID") or "").strip()
-        if returned_image_id:
-            yield DockerBuildEvent(image_id=returned_image_id)
+        try:
+            for raw_event in stream:
+                if not isinstance(raw_event, Mapping):
+                    yield DockerBuildEvent(message=str(raw_event))
+                    continue
+                aux = raw_event.get("aux")
+                if isinstance(aux, Mapping):
+                    candidate = str(aux.get("ID") or aux.get("Id") or "").strip()
+                    if candidate:
+                        returned_image_id = candidate
+                error = _docker_event_error(raw_event)
+                if error:
+                    saw_error = True
+                yield DockerBuildEvent(
+                    message=_docker_event_message(raw_event),
+                    image_id=returned_image_id if isinstance(aux, Mapping) else None,
+                    error=error,
+                )
+            if returned_image_id is None and not saw_error:
+                attrs = self._client.api.inspect_image(tag)
+                returned_image_id = str(attrs.get("Id") or attrs.get("ID") or "").strip()
+            if returned_image_id:
+                yield DockerBuildEvent(image_id=returned_image_id)
+        finally:
+            with self._stream_lock:
+                if self._active_stream is stream:
+                    self._active_stream = None
+            close = getattr(stream, "close", None)
+            if callable(close):
+                close()
 
     def inspect_image(self, image_id: str) -> DockerImageInspection:
         attrs = self._client.api.inspect_image(image_id)
@@ -352,8 +370,16 @@ class DockerSdkImageAdapter:
             repo_tags=tuple(str(value) for value in (attrs.get("RepoTags") or ())),
             repo_digests=tuple(str(value) for value in (attrs.get("RepoDigests") or ())),
         )
+
     def cancel_active_build(self) -> None:
-        self._client.api.close()
+        with self._stream_lock:
+            stream = self._active_stream
+        if stream is None:
+            return
+        close = getattr(stream, "close", None)
+        if not callable(close):
+            raise RevisionImageBuildError("active Docker build stream cannot be closed")
+        close()
 class RevisionImageBuilder:
     def __init__(
         self,

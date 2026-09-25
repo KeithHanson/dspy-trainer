@@ -402,7 +402,7 @@ class PostgresRevisionImageBuildStore:
                 updated_at = now()
             where status = 'building' and claim_expires_at <= now()
             """,
-            _RECOVERY_LOG,
+            _bounded_utf8(_RECOVERY_LOG, self._build_log_max_bytes),
             self._build_log_max_bytes,
         )
         return _affected_rows(result)
@@ -437,6 +437,31 @@ class PostgresRevisionImageBuildStore:
                   and br.module_import_id = e.module_import_id
                   and b.revision_id <> e.revision_id
                   and b.status = 'queued'
+                """)
+            await conn.execute("""
+                update revision_image_builds b
+                set status = 'failed',
+                    failure_reason = 'revision is no longer eligible for an image build',
+                    finished_at = now(),
+                    updated_at = now()
+                where b.status = 'queued'
+                  and not exists (
+                    select 1
+                    from bundle_revisions r
+                    join module_imports m on m.id = r.module_import_id
+                    join runtime_bundles rb on rb.module_import_id = m.id
+                    where r.id = b.revision_id
+                      and m.deleted_at is null
+                      and m.sync_status = 'synced'
+                      and m.current_revision_id = b.revision_id
+                      and rb.validation_status = 'passed'
+                      and rb.validation_revision_id = b.revision_id
+                      and r.source_snapshot_path is not null
+                      and r.source_content_digest is not null
+                      and r.source_snapshot_path = b.source_snapshot_path
+                      and r.source_content_digest = b.source_content_digest
+                      and coalesce(r.commit_sha, 'unversioned') = coalesce(b.source_commit, 'unversioned')
+                  )
                 """)
             candidates = await conn.fetch("""
                 select r.id as revision_id, r.module_import_id as module_id, r.commit_sha as source_commit,
@@ -475,8 +500,20 @@ class PostgresRevisionImageBuildStore:
                   select b.id
                   from revision_image_builds b
                   join bundle_revisions r on r.id = b.revision_id
+                  join module_imports m on m.id = r.module_import_id
+                  join runtime_bundles rb on rb.module_import_id = m.id
                   where b.status = 'queued'
                     and b.available_at <= now()
+                    and m.deleted_at is null
+                    and m.sync_status = 'synced'
+                    and m.current_revision_id = b.revision_id
+                    and rb.validation_status = 'passed'
+                    and rb.validation_revision_id = b.revision_id
+                    and r.source_snapshot_path is not null
+                    and r.source_content_digest is not null
+                    and r.source_snapshot_path = b.source_snapshot_path
+                    and r.source_content_digest = b.source_content_digest
+                    and coalesce(r.commit_sha, 'unversioned') = coalesce(b.source_commit, 'unversioned')
                     and not exists (
                       select 1 from revision_image_builds active where active.status = 'building'
                     )
@@ -615,20 +652,52 @@ class PostgresRevisionImageBuildStore:
             raise ValueError(f"builder returned unsupported status: {result.status}")
         conn = await self._conn()
         async with conn.transaction():
-            updated = await conn.fetchval(
+            final_status = await conn.fetchval(
                 """
-                update revision_image_builds
-                set status = $4,
-                    image_id = $5,
-                    image_digest = $6,
+                with completion_candidate as (
+                  select b.id,
+                         exists (
+                           select 1
+                           from bundle_revisions r
+                           join module_imports m on m.id = r.module_import_id
+                           join runtime_bundles rb on rb.module_import_id = m.id
+                           where r.id = b.revision_id
+                             and m.deleted_at is null
+                             and m.sync_status = 'synced'
+                             and m.current_revision_id = b.revision_id
+                             and rb.validation_status = 'passed'
+                             and rb.validation_revision_id = b.revision_id
+                             and r.source_snapshot_path is not null
+                             and r.source_content_digest is not null
+                             and r.source_snapshot_path = b.source_snapshot_path
+                             and r.source_content_digest = b.source_content_digest
+                             and coalesce(r.commit_sha, 'unversioned') = coalesce(b.source_commit, 'unversioned')
+                         ) as eligible
+                  from revision_image_builds b
+                  where b.id = $1 and b.status = 'building'
+                    and b.claim_owner = $2 and b.attempt = $3
+                  for update of b
+                )
+                update revision_image_builds b
+                set status = case
+                      when $4 = 'ready' and not candidate.eligible then 'failed'
+                      else $4
+                    end,
+                    image_id = case when $4 = 'ready' and candidate.eligible then $5 else null end,
+                    image_digest = case when $4 = 'ready' and candidate.eligible then $6 else null end,
                     build_log = $7,
-                    failure_reason = $8,
+                    failure_reason = case
+                      when $4 = 'ready' and not candidate.eligible
+                        then 'revision eligibility was revoked before image publication'
+                      else $8
+                    end,
                     claim_owner = null,
                     claim_expires_at = null,
                     finished_at = now(),
                     updated_at = now()
-                where id = $1 and status = 'building' and claim_owner = $2 and attempt = $3
-                returning id
+                from completion_candidate candidate
+                where b.id = candidate.id
+                returning b.status
                 """,
                 claim.build_id,
                 claim.claim_owner,
@@ -639,9 +708,9 @@ class PostgresRevisionImageBuildStore:
                 _bounded_utf8(result.build_log, self._build_log_max_bytes),
                 _bounded_reason(result.failure_reason),
             )
-            if updated is None:
+            if final_status is None:
                 return False
-            if result.status == "ready":
+            if final_status == "ready":
                 await conn.execute(
                     """
                     update revision_image_builds
@@ -651,7 +720,7 @@ class PostgresRevisionImageBuildStore:
                     claim.revision_id,
                     claim.build_id,
                 )
-        return True
+        return final_status == result.status
 
     async def fail_claim(
         self, claim: RevisionImageBuildClaim, reason: str, build_log: str = ""
@@ -697,7 +766,7 @@ class PostgresRevisionImageBuildStore:
             claim.build_id,
             claim.claim_owner,
             claim.attempt,
-            _SHUTDOWN_LOG,
+            _bounded_utf8(_SHUTDOWN_LOG, self._build_log_max_bytes),
             self._build_log_max_bytes,
         )
         return _affected_rows(result) == 1
@@ -872,12 +941,17 @@ def _affected_rows(command_status: str) -> int:
 
 
 def _bounded_utf8(value: str, max_bytes: int) -> str:
+    if max_bytes <= 0:
+        return ""
     encoded = str(value or "").encode("utf-8", errors="replace")
     if len(encoded) <= max_bytes:
         return encoded.decode("utf-8")
     marker = b"[earlier build output truncated]\n"
-    tail = encoded[-max(0, max_bytes - len(marker)) :]
-    return (marker + tail).decode("utf-8", errors="ignore")
+    if max_bytes <= len(marker):
+        return marker[:max_bytes].decode("ascii")
+    tail = encoded[-(max_bytes - len(marker)) :]
+    valid_tail = tail.decode("utf-8", errors="ignore").encode("utf-8")
+    return (marker + valid_tail).decode("utf-8")
 
 
 def _bounded_reason(value: str | None) -> str | None:
