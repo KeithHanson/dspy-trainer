@@ -1,9 +1,12 @@
-from functools import lru_cache
 import os
+import re
+from functools import lru_cache
 from urllib.parse import urlparse
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.revision_images import MAX_BUILD_LOG_BYTES
 
 
 class Settings(BaseSettings):
@@ -63,6 +66,61 @@ class Settings(BaseSettings):
         )
 
 
+class DeployerSettings(Settings):
+    deployer_leader_timeout_seconds: float = Field(default=15.0)
+    deployer_claim_timeout_seconds: float = Field(default=300.0)
+    deployer_poll_interval_seconds: float = Field(default=1.0)
+    deployer_build_log_max_bytes: int = Field(default=MAX_BUILD_LOG_BYTES)
+    deployer_backend_base_image_id: str = Field(default="")
+    deployer_image_repository: str = Field(default="dspy-trainer-revision")
+    deployer_platform_version: str = Field(default="local")
+    deployment_id: str = Field(default="")
+    compose_project_name: str = Field(default="")
+    compose_network_name: str = Field(default="")
+
+    @field_validator(
+        "deployer_leader_timeout_seconds",
+        "deployer_claim_timeout_seconds",
+        "deployer_poll_interval_seconds",
+    )
+    @classmethod
+    def validate_positive_duration(cls, value: float) -> float:
+        if float(value) <= 0:
+            raise ValueError("deployer coordinator durations must be positive")
+        return float(value)
+
+    @field_validator("deployer_build_log_max_bytes")
+    @classmethod
+    def validate_build_log_limit(cls, value: int) -> int:
+        if not 1 <= int(value) <= MAX_BUILD_LOG_BYTES:
+            raise ValueError(
+                f"DSPY_TRAINER_DEPLOYER_BUILD_LOG_MAX_BYTES must be between 1 and {MAX_BUILD_LOG_BYTES}"
+            )
+        return int(value)
+
+    @field_validator("deployer_backend_base_image_id")
+    @classmethod
+    def validate_base_image_id(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", normalized):
+            raise ValueError(
+                "DSPY_TRAINER_DEPLOYER_BACKEND_BASE_IMAGE_ID must be an immutable sha256 image ID"
+            )
+        return normalized
+
+    @field_validator(
+        "deployer_image_repository",
+        "deployer_platform_version",
+        "deployment_id",
+        "compose_project_name",
+        "compose_network_name",
+    )
+    @classmethod
+    def validate_deployer_identity(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("deployer identity values must not be empty")
+        return normalized
 def _normalize_origin(candidate: str) -> str:
     value = str(candidate or "").strip()
     if not value:
@@ -126,3 +184,6 @@ def get_cors_origins_from_env() -> list[str]:
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+@lru_cache
+def get_deployer_settings() -> DeployerSettings:
+    return DeployerSettings()

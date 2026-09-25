@@ -27,10 +27,10 @@ Building production LLM programs requires iteration—lots of it. DSPy Trainer g
 
 ```bash
 cp .env.sample .env
-# Edit .env - at minimum, add your GITHUB_PAT
-# If you plan to store module environment entries in the UI OR
-# save LM Profile provider API keys in the UI, also generate
-# DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY:
+# Edit .env: add GITHUB_PAT, stable Compose/deployment identities, and later
+# the immutable backend image ID required by the dedicated deployer.
+# If you plan to store module environment entries in the UI OR save LM
+# Profile provider API keys, also generate DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY:
 # python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
@@ -38,6 +38,9 @@ cp .env.sample .env
 
 ```bash
 docker compose pull --ignore-pull-failures
+docker compose build --pull backend
+docker image inspect --format '{{.Id}}' "${DSPY_TRAINER_BACKEND_IMAGE:-dspy-trainer-backend:local}"
+# Put that exact sha256 ID in DSPY_TRAINER_DEPLOYER_BACKEND_BASE_IMAGE_ID.
 docker compose build --pull
 docker compose up -d --remove-orphans
 ```
@@ -186,22 +189,23 @@ DSPy handles execution, optimization, and prompt engineering for you.
 │   Web UI    │  React app - create bundles, plans, view results
 └──────┬──────┘
        │
-┌──────▼──────┐
-│  Backend    │  FastAPI - validation, orchestration, APIs
-└──────┬──────┘
-       │
-┌──────▼──────┐
-│   Worker    │  Eval execution, optimization jobs (scales)
-└──────┬──────┘
-       │
-┌──────┴──────────────────────────────┐
-│  Postgres  │  Redis  │  MLflow  │
-└─────────────────────────────────────┘
+┌──────▼──────┐       ┌──────────────┐
+│  Backend    │       │   Deployer   │  advisory leader, one durable image build
+└──────┬──────┘       └──────┬───────┘
+       │                     │ Docker socket (deployer only)
+┌──────▼──────┐              │
+│   Worker    │              │
+└──────┬──────┘              │
+       │                     │
+┌──────┴─────────────────────┴────────┐
+│        Postgres  │  Redis  │  MLflow │
+└──────────────────────────────────────┘
 ```
 
 **Services:**
 - **Backend**: Control plane (FastAPI)
 - **Worker**: Execution engine (async job processing)
+- **Deployer**: Internal-only PostgreSQL advisory leader that claims one durable revision-image build globally; it alone installs the Docker SDK and mounts the Docker socket
 - **Postgres**: Primary app store
 - **Redis**: Queue + worker coordination
 - **MLflow**: Experiment tracking with metadata stored in a dedicated Postgres `mlflow` schema and artifacts on a Docker volume

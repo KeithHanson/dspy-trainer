@@ -1,23 +1,19 @@
 from __future__ import annotations
 
-from io import BytesIO
 import json
-from pathlib import Path
 import sys
 import tarfile
+from io import BytesIO
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_ROOT))
 
 from app.revision_image_builder import (
     BUNDLE_IMAGE_PATH,
-    DockerBuildEvent,
-    DockerImageInspection,
-    DockerSdkImageAdapter,
     GENERATED_ENTRYPOINT_NAME,
     LABEL_BASE_IMAGE_ID,
     LABEL_BUILD_DIGEST,
@@ -37,16 +33,21 @@ from app.revision_image_builder import (
     PLATFORM_OWNER,
     PYTHON_MANIFEST_PATH,
     REQUIRED_IMAGE_LABELS,
+    BuildCancellation,
     BuildContextError,
+    DockerBuildEvent,
+    DockerImageInspection,
+    DockerSdkImageAdapter,
     ImageVerificationError,
-    RevisionImageBuildSpec,
+    RevisionImageBuildCancelled,
     RevisionImageBuilder,
+    RevisionImageBuildSpec,
+    calculate_revision_image_build_identity,
     calculate_source_content_digest,
     require_managed_revision_image,
     write_build_context,
 )
 from app.revision_images import MAX_BUILD_LOG_BYTES
-
 
 BASE_IMAGE_ID = f"sha256:{'a' * 64}"
 IMAGE_ID = f"sha256:{'b' * 64}"
@@ -515,3 +516,53 @@ def test_sdk_adapter_uses_local_cached_host_build_without_build_args():
     assert inspection.image_id == IMAGE_ID
     assert inspection.labels == {LABEL_OWNER: "compose-project-a"}
     assert api.inspect_refs == [IMAGE_ID]
+def test_builder_cancellation_interrupts_adapter_before_docker_build(tmp_path):
+    root = tmp_path / "snapshot"
+    _write_bundle(root)
+    docker = _FakeDocker()
+    cancellation = BuildCancellation()
+    cancellation.cancel()
+
+    with pytest.raises(RevisionImageBuildCancelled):
+        RevisionImageBuilder(docker).build(_spec(root), cancellation)
+
+    assert docker.build_calls == []
+
+
+def test_public_build_identity_matches_generated_context(tmp_path):
+    root = tmp_path / "snapshot"
+    _write_bundle(root)
+    spec = _spec(root)
+
+    identity = calculate_revision_image_build_identity(spec)
+    context = BytesIO()
+    generated = write_build_context(spec, context)
+
+    assert identity.local_tag == generated.local_tag
+    assert identity.build_digest == generated.build_digest
+    assert identity.dependency_digest == generated.dependency_digest
+
+
+@pytest.mark.parametrize("max_bytes", [1, 8, 32, 33, 34, 64])
+def test_builder_log_truncation_marker_never_exceeds_small_configured_cap(
+    tmp_path, max_bytes
+):
+    root = tmp_path / "snapshot"
+    _write_bundle(root)
+    docker = _FakeDocker(
+        events=(
+            DockerBuildEvent(message="x" * 512),
+            DockerBuildEvent(image_id=IMAGE_ID),
+        )
+    )
+
+    result = RevisionImageBuilder(docker, max_log_bytes=max_bytes).build(_spec(root))
+
+    encoded = result.build_log.encode("utf-8")
+    marker = b"[earlier build output truncated]\n"
+    assert result.status == "ready"
+    assert len(encoded) <= max_bytes
+    if max_bytes <= len(marker):
+        assert encoded == marker[:max_bytes]
+    else:
+        assert encoded.startswith(marker)
