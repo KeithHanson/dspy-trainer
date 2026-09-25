@@ -249,12 +249,58 @@ async def _heartbeat_loop(
         await asyncio.sleep(5)
 
 
+async def claim_or_requeue_endpoint_job(
+    services: AppServices,
+    *,
+    queue_name: str,
+    raw_payload: str | bytes,
+    worker_id: str,
+    ready_target: dict[str, str | None],
+) -> bool:
+    payload = json.loads(raw_payload)
+    invocation_id = str(payload.get("invocation_id") or "").strip()
+    if payload.get("type") != "endpoint_invocation" or not invocation_id:
+        return True
+    endpoint_id = str(ready_target.get("endpoint_id") or "").strip()
+    expected_identity = {
+        "endpoint_id": endpoint_id or None,
+        "execution_mode": ready_target.get("execution_mode"),
+        "build_id": ready_target.get("build_id"),
+        "revision_id": ready_target.get("revision_id"),
+        "bundle_path": ready_target.get("bundle_path"),
+    }
+    payload_identity = {
+        key: str(payload.get(key) or "").strip() or None for key in expected_identity
+    }
+    if payload_identity != expected_identity:
+        return True
+    claimed = await services.claim_endpoint_worker_task(
+        worker_id=worker_id,
+        endpoint_id=endpoint_id,
+        task_id=invocation_id,
+        execution_mode=ready_target.get("execution_mode"),
+        build_id=ready_target.get("build_id"),
+        revision_id=ready_target.get("revision_id"),
+        bundle_path=ready_target.get("bundle_path"),
+    )
+    if claimed:
+        return True
+    if services.redis is None:
+        raise RuntimeError(
+            "endpoint queue unavailable while returning an unclaimed job"
+        )
+    await services.redis.execute_command("RPUSH", queue_name, raw_payload)
+    return False
+
+
 async def process_endpoint_job(
     services: AppServices,
     raw_payload: str,
     worker_id: str,
     ready_target: dict[str, str | None],
     runtime_identity: dict[str, object] | None = None,
+    *,
+    preclaimed: bool = False,
 ) -> None:
     payload = json.loads(raw_payload)
     invocation_id = str(payload.get("invocation_id") or "").strip()
@@ -293,18 +339,19 @@ async def process_endpoint_job(
         return
     heartbeat_task = None
     try:
-        await _heartbeat(
-            services,
-            worker_id,
-            "running",
-            task_id=invocation_id,
-            endpoint_id=endpoint_id,
-            desired_build_id=expected["build_id"],
-            warmed_build_id=expected["build_id"],
-            desired_revision_id=expected["revision_id"],
-            warmed_revision_id=expected["revision_id"],
-            runtime_identity=runtime_identity,
-        )
+        if not preclaimed:
+            await _heartbeat(
+                services,
+                worker_id,
+                "running",
+                task_id=invocation_id,
+                endpoint_id=endpoint_id,
+                desired_build_id=expected["build_id"],
+                warmed_build_id=expected["build_id"],
+                desired_revision_id=expected["revision_id"],
+                warmed_revision_id=expected["revision_id"],
+                runtime_identity=runtime_identity,
+            )
         heartbeat_task = asyncio.create_task(
             _heartbeat_loop(
                 services,
@@ -579,6 +626,14 @@ async def run_endpoint_worker() -> None:
             if result is None:
                 continue
             _, raw_payload = result
+            if not await claim_or_requeue_endpoint_job(
+                services,
+                queue_name=queue_name,
+                raw_payload=raw_payload,
+                worker_id=worker_id,
+                ready_target=ready_target,
+            ):
+                continue
             try:
                 await process_endpoint_job(
                     services,
@@ -586,6 +641,7 @@ async def run_endpoint_worker() -> None:
                     worker_id,
                     ready_target,
                     runtime_identity=runtime_identity,
+                    preclaimed=True,
                 )
             except Exception:
                 logger.exception("Endpoint worker job processing failed")

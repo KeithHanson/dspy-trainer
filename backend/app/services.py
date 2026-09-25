@@ -2036,8 +2036,11 @@ class AppServices:
                   last_observed_at timestamptz,
                   last_heartbeat_at timestamptz,
                   started_at timestamptz,
+                  drain_started_at timestamptz,
                   stopped_at timestamptz,
+                  drain_timed_out boolean not null default false,
                   failure_reason text check (failure_reason is null or char_length(failure_reason) <= {MAX_FAILURE_REASON_CHARS}),
+                  container_log text not null default '',
                   created_at timestamptz not null,
                   updated_at timestamptz not null,
                   foreign key (deployment_id, endpoint_id)
@@ -2046,6 +2049,15 @@ class AppServices:
                     references revision_image_builds(id, revision_id) match full on delete restrict
                 );
                 """
+            )
+            await conn.execute(
+                "alter table managed_endpoint_containers add column if not exists drain_started_at timestamptz;"
+            )
+            await conn.execute(
+                "alter table managed_endpoint_containers add column if not exists drain_timed_out boolean not null default false;"
+            )
+            await conn.execute(
+                "alter table managed_endpoint_containers add column if not exists container_log text not null default '';"
             )
             await conn.execute(
                 """
@@ -3898,8 +3910,8 @@ class AppServices:
             rows = await conn.fetch(
                 """
                 select container_id, container_name, endpoint_id, deployment_id, build_id, revision_id,
-                       slot, lifecycle, last_observed_at, last_heartbeat_at, started_at, stopped_at,
-                       failure_reason, created_at, updated_at
+                       slot, lifecycle, last_observed_at, last_heartbeat_at, started_at, drain_started_at,
+                       stopped_at, drain_timed_out, failure_reason, container_log, created_at, updated_at
                 from managed_endpoint_containers
                 where endpoint_id = $1
                 order by created_at asc, container_id asc
@@ -4291,6 +4303,66 @@ class AppServices:
             "bundle_path": _clean_optional_text(registration.get("bundle_path")),
             "is_live": bool(registration.get("is_live")),
         }
+
+    async def claim_endpoint_worker_task(
+        self,
+        *,
+        worker_id: str,
+        endpoint_id: str,
+        task_id: str,
+        execution_mode: str | None,
+        build_id: str | None,
+        revision_id: str | None,
+        bundle_path: str | None,
+    ) -> bool:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        now = datetime.now(timezone.utc)
+        runtime_metadata = {
+            "endpoint_id": endpoint_id,
+            "execution_mode": execution_mode,
+            "desired_build_id": build_id,
+            "warmed_build_id": build_id,
+            "desired_revision_id": revision_id,
+            "warmed_revision_id": revision_id,
+            "bundle_path": bundle_path,
+        }
+        async with self.postgres_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                update endpoint_worker_registrations
+                set status = 'running',
+                    task_id = $3,
+                    last_seen_at = $4,
+                    heartbeat_expires_at = $5,
+                    runtime_metadata = runtime_metadata || $10::jsonb,
+                    updated_at = $4
+                where worker_id = $1
+                  and assigned_endpoint_id = $2
+                  and status = 'listening'
+                  and task_id is null
+                  and heartbeat_expires_at > $4
+                  and runtime_metadata->>'endpoint_id' = $2
+                  and coalesce(runtime_metadata->>'execution_mode', 'legacy_static') = $6
+                  and runtime_metadata->>'desired_build_id' is not distinct from $7::text
+                  and runtime_metadata->>'warmed_build_id' is not distinct from $7::text
+                  and runtime_metadata->>'desired_revision_id' is not distinct from $8::text
+                  and runtime_metadata->>'warmed_revision_id' is not distinct from $8::text
+                  and runtime_metadata->>'bundle_path' is not distinct from $9::text
+                returning worker_id
+                """,
+                str(worker_id),
+                str(endpoint_id),
+                str(task_id),
+                now,
+                self._endpoint_worker_heartbeat_expires_at(now),
+                str(execution_mode or "legacy_static"),
+                _clean_optional_text(build_id),
+                _clean_optional_text(revision_id),
+                _clean_optional_text(bundle_path),
+                json.dumps(runtime_metadata),
+            )
+        return row is not None
 
     async def _set_endpoint_worker_assignment(
         self, worker_id: str, endpoint_id: str | None

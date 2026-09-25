@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Mapping
 
-
 REVISION_IMAGE_BUILD_STATUSES = frozenset(
     {"queued", "building", "ready", "failed", "superseded", "pruned"}
 )
@@ -11,7 +10,17 @@ ENDPOINT_DEPLOYMENT_PHASES = frozenset(
     {"legacy_static", "pending", "rolling", "ready", "draining", "rollback", "failed"}
 )
 MANAGED_CONTAINER_LIFECYCLES = frozenset(
-    {"created", "starting", "ready", "busy", "draining", "stopped", "failed", "missing", "removed"}
+    {
+        "created",
+        "starting",
+        "ready",
+        "busy",
+        "draining",
+        "stopped",
+        "failed",
+        "missing",
+        "removed",
+    }
 )
 MAX_BUILD_LOG_BYTES = 262_144
 MAX_FAILURE_REASON_CHARS = 4_096
@@ -60,20 +69,28 @@ def _validated_transition(
     if target_value not in transitions:
         raise ValueError(f"unknown {contract} state: {target_value or '<empty>'}")
     if target_value != current_value and target_value not in transitions[current_value]:
-        raise ValueError(f"invalid {contract} transition: {current_value} -> {target_value}")
+        raise ValueError(
+            f"invalid {contract} transition: {current_value} -> {target_value}"
+        )
     return target_value
 
 
 def validate_revision_image_build_transition(current: Any, target: Any) -> str:
-    return _validated_transition(current, target, _BUILD_TRANSITIONS, contract="revision image build")
+    return _validated_transition(
+        current, target, _BUILD_TRANSITIONS, contract="revision image build"
+    )
 
 
 def validate_endpoint_deployment_transition(current: Any, target: Any) -> str:
-    return _validated_transition(current, target, _DEPLOYMENT_TRANSITIONS, contract="endpoint deployment")
+    return _validated_transition(
+        current, target, _DEPLOYMENT_TRANSITIONS, contract="endpoint deployment"
+    )
 
 
 def validate_managed_container_transition(current: Any, target: Any) -> str:
-    return _validated_transition(current, target, _CONTAINER_TRANSITIONS, contract="managed container")
+    return _validated_transition(
+        current, target, _CONTAINER_TRANSITIONS, contract="managed container"
+    )
 
 
 def _value(row: Any, key: str, default: Any = None) -> Any:
@@ -120,6 +137,7 @@ def build_revision_image_payload(row: Any) -> dict[str, Any]:
         "updated_at": _timestamp(_value(row, "updated_at")),
     }
 
+
 def build_revision_image_summary_payload(row: Any) -> dict[str, Any]:
     payload = build_revision_image_payload(row)
     payload.pop("build_log", None)
@@ -162,8 +180,11 @@ def build_managed_container_payload(row: Any) -> dict[str, Any]:
         "last_observed_at": _timestamp(_value(row, "last_observed_at")),
         "last_heartbeat_at": _timestamp(_value(row, "last_heartbeat_at")),
         "started_at": _timestamp(_value(row, "started_at")),
+        "drain_started_at": _timestamp(_value(row, "drain_started_at")),
         "stopped_at": _timestamp(_value(row, "stopped_at")),
+        "drain_timed_out": bool(_value(row, "drain_timed_out", False)),
         "failure_reason": _value(row, "failure_reason"),
+        "container_log": _value(row, "container_log", ""),
         "created_at": _timestamp(_value(row, "created_at")),
         "updated_at": _timestamp(_value(row, "updated_at")),
     }

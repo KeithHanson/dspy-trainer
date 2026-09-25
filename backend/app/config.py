@@ -10,7 +10,9 @@ from app.revision_images import MAX_BUILD_LOG_BYTES
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_prefix="DSPY_TRAINER_", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_prefix="DSPY_TRAINER_", extra="ignore"
+    )
 
     environment: str = Field(default="development")
     backend_host: str = Field(default="0.0.0.0")
@@ -21,20 +23,28 @@ class Settings(BaseSettings):
     worker_registry_prefix: str = Field(default="dspy-trainer:workers")
     total_workers: int = Field(default=8)
     bundle_install_max_concurrency: int = Field(default=8)
-    endpoint_worker_registry_prefix: str = Field(default="dspy-trainer:endpoint-workers")
+    endpoint_worker_registry_prefix: str = Field(
+        default="dspy-trainer:endpoint-workers"
+    )
     endpoint_worker_heartbeat_ttl_seconds: int = Field(default=300)
     endpoint_queue_prefix: str = Field(default="dspy-trainer:endpoint-queues")
-    endpoint_invocation_channel_prefix: str = Field(default="dspy-trainer:endpoint-invocations")
+    endpoint_invocation_channel_prefix: str = Field(
+        default="dspy-trainer:endpoint-invocations"
+    )
 
     postgres_dsn: str = Field(default="")
     checkout_root: str = Field(default="/tmp/dspy-trainer/checkouts")
     github_pat: str = Field(default="", alias="GITHUB_PAT")
     git_commit_name: str = Field(default="DSPy Trainer", alias="GIT_COMMIT_NAME")
-    git_commit_email: str = Field(default="dspy-trainer@local", alias="GIT_COMMIT_EMAIL")
+    git_commit_email: str = Field(
+        default="dspy-trainer@local", alias="GIT_COMMIT_EMAIL"
+    )
     module_env_encryption_key: str = Field(default="")
 
     mlflow_tracking_uri: str = Field(default="http://localhost:5001")
-    cors_allow_origins: str = Field(default="http://localhost:8080,http://127.0.0.1:8080,http://localhost:5173,http://127.0.0.1:5173")
+    cors_allow_origins: str = Field(
+        default="http://localhost:8080,http://127.0.0.1:8080,http://localhost:5173,http://127.0.0.1:5173"
+    )
 
     @field_validator("postgres_dsn")
     @classmethod
@@ -47,15 +57,18 @@ class Settings(BaseSettings):
     @classmethod
     def validate_bundle_install_max_concurrency(cls, value: int) -> int:
         if int(value) < 1:
-            raise ValueError("DSPY_TRAINER_BUNDLE_INSTALL_MAX_CONCURRENCY must be at least 1")
+            raise ValueError(
+                "DSPY_TRAINER_BUNDLE_INSTALL_MAX_CONCURRENCY must be at least 1"
+            )
         return int(value)
-
 
     @field_validator("endpoint_worker_heartbeat_ttl_seconds")
     @classmethod
     def validate_endpoint_worker_heartbeat_ttl_seconds(cls, value: int) -> int:
         if int(value) < 1:
-            raise ValueError("DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS must be at least 1")
+            raise ValueError(
+                "DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS must be at least 1"
+            )
         return int(value)
 
     def cors_origins_list(self) -> list[str]:
@@ -70,18 +83,27 @@ class DeployerSettings(Settings):
     deployer_leader_timeout_seconds: float = Field(default=15.0)
     deployer_claim_timeout_seconds: float = Field(default=300.0)
     deployer_poll_interval_seconds: float = Field(default=1.0)
+    deployer_endpoint_readiness_timeout_seconds: float = Field(default=120.0)
+    deployer_endpoint_drain_timeout_seconds: float = Field(default=300.0)
+    deployer_endpoint_reconcile_interval_seconds: float = Field(default=2.0)
     deployer_build_log_max_bytes: int = Field(default=MAX_BUILD_LOG_BYTES)
     deployer_backend_base_image_id: str = Field(default="")
     deployer_image_repository: str = Field(default="dspy-trainer-revision")
     deployer_platform_version: str = Field(default="local")
+    deployer_image_retention_count: int = Field(default=2)
+    managed_label_namespace: str = Field(default="io.dspy-trainer")
     deployment_id: str = Field(default="")
     compose_project_name: str = Field(default="")
     compose_network_name: str = Field(default="")
+    compose_network_project_label: str = Field(default="dspy-trainer")
 
     @field_validator(
         "deployer_leader_timeout_seconds",
         "deployer_claim_timeout_seconds",
         "deployer_poll_interval_seconds",
+        "deployer_endpoint_readiness_timeout_seconds",
+        "deployer_endpoint_drain_timeout_seconds",
+        "deployer_endpoint_reconcile_interval_seconds",
     )
     @classmethod
     def validate_positive_duration(cls, value: float) -> float:
@@ -97,6 +119,25 @@ class DeployerSettings(Settings):
                 f"DSPY_TRAINER_DEPLOYER_BUILD_LOG_MAX_BYTES must be between 1 and {MAX_BUILD_LOG_BYTES}"
             )
         return int(value)
+
+    @field_validator("deployer_image_retention_count")
+    @classmethod
+    def validate_image_retention_count(cls, value: int) -> int:
+        if int(value) < 2:
+            raise ValueError(
+                "DSPY_TRAINER_DEPLOYER_IMAGE_RETENTION_COUNT must be at least 2"
+            )
+        return int(value)
+
+    @field_validator("managed_label_namespace")
+    @classmethod
+    def validate_label_namespace(cls, value: str) -> str:
+        normalized = value.strip().rstrip(".")
+        if not re.fullmatch(r"[a-z0-9]+(?:[.-][a-z0-9]+)*", normalized):
+            raise ValueError(
+                "DSPY_TRAINER_MANAGED_LABEL_NAMESPACE must be a Docker label namespace"
+            )
+        return normalized
 
     @field_validator("deployer_backend_base_image_id")
     @classmethod
@@ -114,6 +155,7 @@ class DeployerSettings(Settings):
         "deployment_id",
         "compose_project_name",
         "compose_network_name",
+        "compose_network_project_label",
     )
     @classmethod
     def validate_deployer_identity(cls, value: str) -> str:
@@ -121,6 +163,8 @@ class DeployerSettings(Settings):
         if not normalized:
             raise ValueError("deployer identity values must not be empty")
         return normalized
+
+
 def _normalize_origin(candidate: str) -> str:
     value = str(candidate or "").strip()
     if not value:
@@ -184,6 +228,8 @@ def get_cors_origins_from_env() -> list[str]:
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
 @lru_cache
 def get_deployer_settings() -> DeployerSettings:
     return DeployerSettings()
