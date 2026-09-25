@@ -30,6 +30,16 @@ import httpx
 import redis.asyncio as redis
 
 from app.config import Settings
+from app.revision_images import (
+    MAX_BUILD_LOG_BYTES,
+    MAX_FAILURE_REASON_CHARS,
+    build_endpoint_deployment_payload,
+    build_managed_container_payload,
+    build_revision_image_payload,
+    validate_endpoint_deployment_transition,
+    validate_managed_container_transition,
+    validate_revision_image_build_transition,
+)
 from app.validator import read_bundle_metadata, validate_bundle
 
 
@@ -1603,6 +1613,229 @@ class AppServices:
             await conn.execute("alter table bundle_endpoints add column if not exists lm_profile_id text references lm_profiles(id) on delete set null;")
             await conn.execute("alter table bundle_endpoints add column if not exists pinned_worker_count int not null default 1;")
             await conn.execute("create index if not exists idx_bundle_endpoints_module_import_id on bundle_endpoints(module_import_id, created_at desc);")
+            await conn.execute("alter table bundle_revisions add column if not exists source_snapshot_path text;")
+            await conn.execute("alter table bundle_revisions add column if not exists source_content_digest text;")
+            await conn.execute(
+                f"""
+                create table if not exists revision_image_builds (
+                  id text primary key,
+                  revision_id text not null references bundle_revisions(id) on delete restrict,
+                  generation bigint not null check (generation >= 1),
+                  source_commit text,
+                  source_snapshot_path text not null,
+                  source_content_digest text not null,
+                  local_tag text not null unique,
+                  image_id text,
+                  image_digest text,
+                  base_image_id text not null,
+                  status text not null check (status in ('queued', 'building', 'ready', 'failed', 'superseded', 'pruned')),
+                  attempt int not null default 0 check (attempt >= 0),
+                  available_at timestamptz not null,
+                  claim_owner text,
+                  claim_expires_at timestamptz,
+                  build_log text not null default '' check (octet_length(build_log) <= {MAX_BUILD_LOG_BYTES}),
+                  failure_reason text check (failure_reason is null or char_length(failure_reason) <= {MAX_FAILURE_REASON_CHARS}),
+                  retry_of_build_id text,
+                  queued_at timestamptz not null,
+                  started_at timestamptz,
+                  finished_at timestamptz,
+                  created_at timestamptz not null,
+                  updated_at timestamptz not null,
+                  unique (revision_id, generation),
+                  unique (id, revision_id),
+                  foreign key (retry_of_build_id, revision_id)
+                    references revision_image_builds(id, revision_id) on delete restrict,
+                  check (
+                    (status = 'building' and claim_owner is not null and claim_expires_at is not null)
+                    or (status <> 'building' and claim_owner is null and claim_expires_at is null)
+                  ),
+                  check (status <> 'ready' or (image_id is not null or image_digest is not null))
+                );
+                """
+            )
+            await conn.execute(
+                """
+                create unique index if not exists uq_revision_image_builds_active_revision
+                on revision_image_builds(revision_id)
+                where status in ('queued', 'building');
+                """
+            )
+            await conn.execute(
+                """
+                create index if not exists idx_revision_image_builds_fifo
+                on revision_image_builds(available_at asc, queued_at asc, id asc)
+                where status = 'queued';
+                """
+            )
+            await conn.execute(
+                """
+                create index if not exists idx_revision_image_builds_claim_recovery
+                on revision_image_builds(claim_expires_at asc, id asc)
+                where status = 'building';
+                """
+            )
+            await conn.execute(
+                """
+                create index if not exists idx_revision_image_builds_revision_history
+                on revision_image_builds(revision_id, generation desc);
+                """
+            )
+            await conn.execute(
+                """
+                create or replace function enforce_revision_image_build_contract()
+                returns trigger as $$
+                begin
+                  if (old.status = 'queued' and new.status not in ('queued', 'building', 'failed', 'pruned'))
+                     or (old.status = 'building' and new.status not in ('building', 'queued', 'ready', 'failed'))
+                     or (old.status = 'ready' and new.status not in ('ready', 'superseded', 'pruned'))
+                     or (old.status = 'failed' and new.status not in ('failed', 'pruned'))
+                     or (old.status = 'superseded' and new.status not in ('superseded', 'pruned'))
+                     or (old.status = 'pruned' and new.status <> 'pruned') then
+                    raise exception 'invalid revision image build transition: % -> %', old.status, new.status;
+                  end if;
+                  if new.id is distinct from old.id
+                     or new.revision_id is distinct from old.revision_id
+                     or new.generation is distinct from old.generation
+                     or new.source_commit is distinct from old.source_commit
+                     or new.source_snapshot_path is distinct from old.source_snapshot_path
+                     or new.source_content_digest is distinct from old.source_content_digest
+                     or new.local_tag is distinct from old.local_tag
+                     or new.base_image_id is distinct from old.base_image_id
+                     or new.retry_of_build_id is distinct from old.retry_of_build_id
+                     or new.queued_at is distinct from old.queued_at
+                     or new.created_at is distinct from old.created_at then
+                    raise exception 'revision image build identity is immutable';
+                  end if;
+                  if old.status in ('ready', 'superseded', 'pruned') and (
+                    new.image_id is distinct from old.image_id
+                    or new.image_digest is distinct from old.image_digest
+                  ) then
+                    raise exception 'ready revision image build result is immutable';
+                  end if;
+                  return new;
+                end;
+                $$ language plpgsql;
+                """
+            )
+            await conn.execute("drop trigger if exists trg_revision_image_build_contract on revision_image_builds;")
+            await conn.execute(
+                """
+                create trigger trg_revision_image_build_contract
+                before update on revision_image_builds
+                for each row execute function enforce_revision_image_build_contract();
+                """
+            )
+            await conn.execute(
+                f"""
+                create table if not exists endpoint_deployments (
+                  id text primary key,
+                  endpoint_id text not null references bundle_endpoints(id) on delete cascade,
+                  active_build_id text,
+                  active_revision_id text,
+                  target_build_id text,
+                  target_revision_id text,
+                  previous_build_id text,
+                  previous_revision_id text,
+                  phase text not null check (phase in ('legacy_static', 'pending', 'rolling', 'ready', 'draining', 'rollback', 'failed')),
+                  desired_replica_count int not null check (desired_replica_count >= 1),
+                  rollout_generation bigint not null check (rollout_generation >= 0),
+                  deadline_at timestamptz,
+                  failure_reason text check (failure_reason is null or char_length(failure_reason) <= {MAX_FAILURE_REASON_CHARS}),
+                  rollout_started_at timestamptz,
+                  ready_at timestamptz,
+                  created_at timestamptz not null,
+                  updated_at timestamptz not null,
+                  unique (endpoint_id, rollout_generation),
+                  unique (id, endpoint_id),
+                  foreign key (active_build_id, active_revision_id)
+                    references revision_image_builds(id, revision_id) match full on delete restrict,
+                  foreign key (target_build_id, target_revision_id)
+                    references revision_image_builds(id, revision_id) match full on delete restrict,
+                  foreign key (previous_build_id, previous_revision_id)
+                    references revision_image_builds(id, revision_id) match full on delete restrict
+                );
+                """
+            )
+            await conn.execute(
+                """
+                create unique index if not exists uq_endpoint_deployments_active_rollout
+                on endpoint_deployments(endpoint_id)
+                where phase in ('pending', 'rolling', 'draining', 'rollback');
+                """
+            )
+            await conn.execute(
+                """
+                create index if not exists idx_endpoint_deployments_history
+                on endpoint_deployments(endpoint_id, rollout_generation desc);
+                """
+            )
+            await conn.execute(
+                "create index if not exists idx_endpoint_deployments_active_build on endpoint_deployments(active_build_id);"
+            )
+            await conn.execute(
+                "create index if not exists idx_endpoint_deployments_target_build on endpoint_deployments(target_build_id);"
+            )
+            await conn.execute(
+                "create index if not exists idx_endpoint_deployments_previous_build on endpoint_deployments(previous_build_id);"
+            )
+            await conn.execute(
+                f"""
+                create table if not exists managed_endpoint_containers (
+                  container_id text primary key,
+                  container_name text not null unique,
+                  endpoint_id text not null references bundle_endpoints(id) on delete restrict,
+                  deployment_id text not null,
+                  build_id text not null,
+                  revision_id text not null,
+                  slot int not null check (slot >= 0),
+                  lifecycle text not null check (lifecycle in ('created', 'starting', 'ready', 'busy', 'draining', 'stopped', 'failed', 'missing', 'removed')),
+                  last_observed_at timestamptz,
+                  last_heartbeat_at timestamptz,
+                  started_at timestamptz,
+                  stopped_at timestamptz,
+                  failure_reason text check (failure_reason is null or char_length(failure_reason) <= {MAX_FAILURE_REASON_CHARS}),
+                  created_at timestamptz not null,
+                  updated_at timestamptz not null,
+                  foreign key (deployment_id, endpoint_id)
+                    references endpoint_deployments(id, endpoint_id) match full on delete restrict,
+                  foreign key (build_id, revision_id)
+                    references revision_image_builds(id, revision_id) match full on delete restrict
+                );
+                """
+            )
+            await conn.execute(
+                """
+                create index if not exists idx_managed_endpoint_containers_endpoint_lifecycle
+                on managed_endpoint_containers(endpoint_id, lifecycle, slot);
+                """
+            )
+            await conn.execute(
+                """
+                create index if not exists idx_managed_endpoint_containers_deployment_slot
+                on managed_endpoint_containers(deployment_id, slot);
+                """
+            )
+            await conn.execute(
+                "create index if not exists idx_managed_endpoint_containers_build on managed_endpoint_containers(build_id);"
+            )
+            await conn.execute(
+                """
+                create index if not exists idx_managed_endpoint_containers_heartbeat
+                on managed_endpoint_containers(last_heartbeat_at asc)
+                where lifecycle in ('starting', 'ready', 'busy', 'draining');
+                """
+            )
+            await conn.execute(
+                """
+                insert into endpoint_deployments (
+                  id, endpoint_id, phase, desired_replica_count, rollout_generation, created_at, updated_at
+                )
+                select 'legacy-' || e.id, e.id, 'legacy_static', greatest(1, e.pinned_worker_count), 0,
+                       e.created_at, e.updated_at
+                from bundle_endpoints e
+                on conflict (endpoint_id, rollout_generation) do nothing;
+                """
+            )
             await conn.execute(
                 """
                 create table if not exists endpoint_worker_registrations (
@@ -2799,6 +3032,135 @@ class AppServices:
             payload["lm_profile_name"] = lm_profile_name
         return payload
 
+    async def _ensure_legacy_endpoint_deployment(
+        self,
+        conn: Any,
+        *,
+        endpoint_id: str,
+        desired_replica_count: int,
+        created_at: datetime,
+        updated_at: datetime,
+    ) -> None:
+        await conn.execute(
+            """
+            insert into endpoint_deployments (
+              id, endpoint_id, phase, desired_replica_count, rollout_generation, created_at, updated_at
+            )
+            values ($1, $2, 'legacy_static', $3, 0, $4, $5)
+            on conflict (endpoint_id, rollout_generation) do nothing
+            """,
+            f"legacy-{endpoint_id}",
+            endpoint_id,
+            desired_replica_count,
+            created_at,
+            updated_at,
+        )
+
+    async def _update_legacy_endpoint_deployment_replica_count(
+        self,
+        conn: Any,
+        *,
+        endpoint_id: str,
+        desired_replica_count: int,
+        updated_at: datetime,
+    ) -> None:
+        await conn.execute(
+            """
+            update endpoint_deployments
+            set desired_replica_count = $2, updated_at = $3
+            where endpoint_id = $1 and rollout_generation = 0 and phase = 'legacy_static'
+            """,
+            endpoint_id,
+            desired_replica_count,
+            updated_at,
+        )
+
+    async def list_revision_image_builds(self, revision_id: str) -> list[dict[str, Any]]:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                select id, revision_id, generation, source_commit, source_snapshot_path, source_content_digest,
+                       local_tag, image_id, image_digest, base_image_id, status, attempt, available_at,
+                       claim_owner, claim_expires_at, build_log, failure_reason, retry_of_build_id,
+                       queued_at, started_at, finished_at, created_at, updated_at
+                from revision_image_builds
+                where revision_id = $1
+                order by generation desc
+                """,
+                revision_id,
+            )
+        return [build_revision_image_payload(row) for row in rows]
+
+    async def get_revision_image_build(self, build_id: str) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                select id, revision_id, generation, source_commit, source_snapshot_path, source_content_digest,
+                       local_tag, image_id, image_digest, base_image_id, status, attempt, available_at,
+                       claim_owner, claim_expires_at, build_log, failure_reason, retry_of_build_id,
+                       queued_at, started_at, finished_at, created_at, updated_at
+                from revision_image_builds
+                where id = $1
+                """,
+                build_id,
+            )
+        return build_revision_image_payload(row) if row is not None else None
+
+    async def list_endpoint_deployments(self, endpoint_id: str) -> list[dict[str, Any]]:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                select id, endpoint_id, active_build_id, active_revision_id, target_build_id,
+                       target_revision_id, previous_build_id, previous_revision_id, phase,
+                       desired_replica_count, rollout_generation, deadline_at, failure_reason,
+                       rollout_started_at, ready_at, created_at, updated_at
+                from endpoint_deployments
+                where endpoint_id = $1
+                order by rollout_generation desc
+                """,
+                endpoint_id,
+            )
+        return [build_endpoint_deployment_payload(row) for row in rows]
+
+    async def get_endpoint_deployment(self, endpoint_id: str) -> dict[str, Any] | None:
+        deployments = await self.list_endpoint_deployments(endpoint_id)
+        return deployments[0] if deployments else None
+
+    async def list_managed_endpoint_containers(self, endpoint_id: str) -> list[dict[str, Any]]:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                select container_id, container_name, endpoint_id, deployment_id, build_id, revision_id,
+                       slot, lifecycle, last_observed_at, last_heartbeat_at, started_at, stopped_at,
+                       failure_reason, created_at, updated_at
+                from managed_endpoint_containers
+                where endpoint_id = $1
+                order by created_at asc, container_id asc
+                """,
+                endpoint_id,
+            )
+        return [build_managed_container_payload(row) for row in rows]
+
+    @staticmethod
+    def validate_revision_image_build_transition(current: Any, target: Any) -> str:
+        return validate_revision_image_build_transition(current, target)
+
+    @staticmethod
+    def validate_endpoint_deployment_transition(current: Any, target: Any) -> str:
+        return validate_endpoint_deployment_transition(current, target)
+
+    @staticmethod
+    def validate_managed_container_transition(current: Any, target: Any) -> str:
+        return validate_managed_container_transition(current, target)
+
     async def list_all_bundle_endpoints(self) -> list[dict[str, Any]]:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
@@ -2884,22 +3246,30 @@ class AppServices:
         preview = key[-6:]
         now = datetime.now(timezone.utc)
         async with self.postgres_pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                insert into bundle_endpoints (id, module_import_id, lm_profile_id, pinned_worker_count, name, key_hash, key_preview, created_at, updated_at)
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                returning id, module_import_id, lm_profile_id, pinned_worker_count, name, key_preview, created_at, updated_at
-                """,
-                endpoint_id,
-                module_id,
-                normalized_lm_profile_id,
-                normalized_pinned_worker_count,
-                normalized_name,
-                key_hash,
-                preview,
-                now,
-                now,
-            )
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    insert into bundle_endpoints (id, module_import_id, lm_profile_id, pinned_worker_count, name, key_hash, key_preview, created_at, updated_at)
+                    values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    returning id, module_import_id, lm_profile_id, pinned_worker_count, name, key_preview, created_at, updated_at
+                    """,
+                    endpoint_id,
+                    module_id,
+                    normalized_lm_profile_id,
+                    normalized_pinned_worker_count,
+                    normalized_name,
+                    key_hash,
+                    preview,
+                    now,
+                    now,
+                )
+                await self._ensure_legacy_endpoint_deployment(
+                    conn,
+                    endpoint_id=endpoint_id,
+                    desired_replica_count=normalized_pinned_worker_count,
+                    created_at=now,
+                    updated_at=now,
+                )
         payload = await self.get_bundle_endpoint(str(row["id"]))
         if payload is None:
             return None
@@ -2942,23 +3312,31 @@ class AppServices:
                 raise ValueError("lm profile not found")
         now = datetime.now(timezone.utc)
         async with self.postgres_pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                update bundle_endpoints
-                set name = $3,
-                    lm_profile_id = $4,
-                    pinned_worker_count = $5,
-                    updated_at = $6
-                where id = $1 and module_import_id = $2
-                returning id, module_import_id, lm_profile_id, pinned_worker_count, name, key_preview, created_at, updated_at
-                """,
-                endpoint_id,
-                module_id,
-                normalized_name,
-                normalized_lm_profile_id,
-                normalized_pinned_worker_count,
-                now,
-            )
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    update bundle_endpoints
+                    set name = $3,
+                        lm_profile_id = $4,
+                        pinned_worker_count = $5,
+                        updated_at = $6
+                    where id = $1 and module_import_id = $2
+                    returning id, module_import_id, lm_profile_id, pinned_worker_count, name, key_preview, created_at, updated_at
+                    """,
+                    endpoint_id,
+                    module_id,
+                    normalized_name,
+                    normalized_lm_profile_id,
+                    normalized_pinned_worker_count,
+                    now,
+                )
+                if row is not None:
+                    await self._update_legacy_endpoint_deployment_replica_count(
+                        conn,
+                        endpoint_id=endpoint_id,
+                        desired_replica_count=normalized_pinned_worker_count,
+                        updated_at=now,
+                    )
         if row is None:
             return None
         payload = await self.get_bundle_endpoint(str(row["id"]))
@@ -2993,24 +3371,32 @@ class AppServices:
             raise ValueError("lm profile not found")
         now = datetime.now(timezone.utc)
         async with self.postgres_pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                update bundle_endpoints
-                set name = $2,
-                    module_import_id = $3,
-                    lm_profile_id = $4,
-                    pinned_worker_count = $5,
-                    updated_at = $6
-                where id = $1
-                returning id, module_import_id, lm_profile_id, pinned_worker_count, name, key_preview, created_at, updated_at
-                """,
-                endpoint_id,
-                next_name,
-                next_module_id,
-                normalized_lm_profile_id,
-                normalized_pinned_worker_count,
-                now,
-            )
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    update bundle_endpoints
+                    set name = $2,
+                        module_import_id = $3,
+                        lm_profile_id = $4,
+                        pinned_worker_count = $5,
+                        updated_at = $6
+                    where id = $1
+                    returning id, module_import_id, lm_profile_id, pinned_worker_count, name, key_preview, created_at, updated_at
+                    """,
+                    endpoint_id,
+                    next_name,
+                    next_module_id,
+                    normalized_lm_profile_id,
+                    normalized_pinned_worker_count,
+                    now,
+                )
+                if row is not None:
+                    await self._update_legacy_endpoint_deployment_replica_count(
+                        conn,
+                        endpoint_id=endpoint_id,
+                        desired_replica_count=normalized_pinned_worker_count,
+                        updated_at=now,
+                    )
         if row is None:
             return None
         payload = await self.get_bundle_endpoint(str(row["id"]))

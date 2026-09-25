@@ -12,7 +12,8 @@ This section MUST remain up to date after you complete a task.
 - `.env.sample`: Source of truth for required environment variables.
 - `docs/COMPOSE_RUNBOOK.md`: Current compose bootstrap, health checks, and day-2 operations.
 - `backend/app/config.py`: Validated runtime settings, including the deployment-wide bundle-install concurrency limit.
-- `backend/app/services.py`: Central runtime services and PostgreSQL advisory-lock admission for bundle dependency installs.
+- `backend/app/services.py`: Central runtime services, PostgreSQL schema/bootstrap, revision-image build/deployment persistence, and bundle-install advisory-lock admission.
+- `backend/app/revision_images.py`: Reusable revision-image build, endpoint-deployment, and managed-container state transitions and payload builders.
 - `backend/endpoint_worker.py`: Managed endpoint warmup, status transitions, and heartbeat lifecycle.
 - `docker-compose.yml`: Shared runtime configuration wiring for backend, worker, and endpoint-worker services.
 - `backend/sample_bundles/`: Downloadable reference bundles exposed in the UI.
