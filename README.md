@@ -782,7 +782,7 @@ See [`AGENTS.md`](AGENTS.md) for detailed contribution guidelines.
 
 ## Revision Image Builds
 
-A successful module validation freezes the validated build context into a read-only, content-addressed snapshot before recording the revision. GitHub import and fast-forward sync create or reuse that exact revision, then enqueue its image build. Source validation/sync remains successful if the build coordinator is unavailable or the image later fails; module and revision responses expose image state separately in `image_build`.
+The backend first freezes source bytes into a read-only, content-addressed snapshot, validates that immutable snapshot, and only then records a passed/synced revision and enqueues its image build. Snapshot or validation failure leaves passed/synced/current-revision state unchanged. Coordinator or image-build failure after revision finalization remains independent; module and revision responses expose it separately in `image_build`.
 
 Operator APIs:
 

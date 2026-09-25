@@ -328,7 +328,7 @@ def test_import_github_module_rejects_invalid_repo_root_and_cleans_checkout(tmp_
                 )
             )
         except ValueError as exc:
-            assert str(exc) == "Validation failed with 3 errors."
+            assert str(exc) == "revision snapshot must contain a regular bundle.toml"
         else:
             raise AssertionError("expected import_github_module to reject invalid bundle root")
     finally:
@@ -623,3 +623,42 @@ def test_lm_profile_api_key_decrypt_error_mentions_shared_encryption_scope():
     assert str(exc_info.value) == (
         "module environment entries or LM profile API keys could not be decrypted with the configured key"
     )
+def test_unchanged_bytes_at_new_git_commit_create_distinct_revision(tmp_path):
+    digest = f"sha256:{'a' * 64}"
+
+    class RevisionConnection:
+        def __init__(self):
+            self.executed = []
+
+        async def fetchrow(self, sql, *args):
+            del sql, args
+            return {
+                "id": "revision-old",
+                "commit_sha": "commit-old",
+                "source_event": "sync",
+                "source_snapshot_path": str(tmp_path / "snapshot"),
+                "source_content_digest": digest,
+            }
+
+        async def execute(self, sql, *args):
+            self.executed.append((sql, args))
+            return "INSERT 0 1"
+
+    services = AppServices(SimpleNamespace(checkout_root=str(tmp_path)))
+    connection = RevisionConnection()
+    revision_id = asyncio.run(
+        services._create_bundle_revision(
+            connection,
+            "module-a",
+            commit_sha="commit-new",
+            bundle_name="bundle",
+            bundle_version="1.0.0",
+            source_event="sync",
+            checkout_path=str(tmp_path / "checkout"),
+            source_snapshot_path=str(tmp_path / "snapshot"),
+            source_content_digest=digest,
+        )
+    )
+
+    assert revision_id != "revision-old"
+    assert any("insert into bundle_revisions" in sql.lower() for sql, _ in connection.executed)

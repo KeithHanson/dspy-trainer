@@ -13,6 +13,7 @@ from pydantic import AliasChoices, BaseModel, Field
 
 from app.config import get_cors_origins_from_env, get_settings
 from app.executor import run_bundle_eval
+from app.revision_image_builder import BuildContextError
 from app.revision_image_coordinator import RevisionImageEnqueueError
 from app.services import AppServices, EndpointUnavailableError, ModuleSyncError
 from app.validator import validate_bundle
@@ -596,8 +597,6 @@ async def retry_revision_image_build(build_id: str, request: Request):
 
 
 @app.get("/modules/{module_id}/files")
-
-@app.get("/modules/{module_id}/files")
 async def get_module_files(module_id: str, request: Request):
     services: AppServices = request.app.state.services
     result = await services.get_module_files(module_id)
@@ -868,12 +867,20 @@ async def validate_module(module_id: str, request: Request, payload: ValidateReq
     module_state = await services.resolve_module_execution_state(module_id, payload.bundle_path)
     if module_state is None:
         return JSONResponse(status_code=404, content={"error": "module not found"})
-    report = validate_bundle(module_state["bundle_path"])
+    try:
+        frozen_source = await services.freeze_validated_source(module_state["bundle_path"])
+    except BuildContextError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"error": str(exc), "code": "source_snapshot_failed"},
+        )
+    report = validate_bundle(str(frozen_source.path))
     status = "passed" if report.passed else "failed"
     found = await services.persist_module_validation(
         module_id,
         module_state=module_state,
         report=report,
+        frozen_source=frozen_source,
     )
     if not found:
         return JSONResponse(status_code=404, content={"error": "module not found"})

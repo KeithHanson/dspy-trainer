@@ -521,7 +521,9 @@ def freeze_revision_source(
         _make_snapshot_read_only(staging)
         try:
             staging.rename(destination)
-        except FileExistsError:
+        except OSError:
+            if destination.is_symlink() or not destination.is_dir():
+                raise
             existing_digest = calculate_source_content_digest(destination)
             if existing_digest != content_digest:
                 raise BuildContextError(

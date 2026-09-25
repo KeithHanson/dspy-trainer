@@ -30,7 +30,7 @@ import httpx
 import redis.asyncio as redis
 
 from app.config import Settings
-from app.revision_image_builder import FrozenRevisionSource, freeze_revision_source
+from app.revision_image_builder import BuildContextError, FrozenRevisionSource, freeze_revision_source
 from app.revision_image_coordinator import (
     PostgresRevisionImageBuildStore,
     RevisionImageBuildStore,
@@ -996,6 +996,8 @@ class AppServices:
     async def connect(self) -> None:
         self.redis = redis.Redis.from_url(self.settings.redis_url, decode_responses=True)
         self.postgres_pool = await asyncpg.create_pool(dsn=self.settings.postgres_dsn, min_size=1, max_size=3)
+        if isinstance(self._revision_build_store, PostgresRevisionImageBuildStore):
+            self._revision_build_store.set_operation_pool(self.postgres_pool)
         self.http_client = httpx.AsyncClient(timeout=5.0)
         await self.init_db()
 
@@ -2166,7 +2168,8 @@ class AppServices:
         if normalized_snapshot_path and normalized_content_digest:
             current = await conn.fetchrow(
                 """
-                select r.id, r.source_snapshot_path, r.source_content_digest
+                select r.id, r.commit_sha, r.source_event,
+                       r.source_snapshot_path, r.source_content_digest
                 from module_imports m
                 left join bundle_revisions r on r.id = m.current_revision_id
                 where m.id = $1
@@ -2175,9 +2178,18 @@ class AppServices:
                 module_id,
             )
             if current is not None and current["id"]:
-                if current["source_content_digest"] == normalized_content_digest:
+                same_source_identity = (
+                    current["source_content_digest"] == normalized_content_digest
+                    and current["commit_sha"] == commit_sha
+                    and current["source_event"] == source_event
+                )
+                if same_source_identity:
                     return str(current["id"])
-                if current["source_content_digest"] is None:
+                if (
+                    current["source_content_digest"] is None
+                    and current["commit_sha"] == commit_sha
+                    and current["source_event"] == source_event
+                ):
                     await conn.execute(
                         """
                         update bundle_revisions
@@ -2362,6 +2374,7 @@ class AppServices:
         *,
         module_state: dict[str, Any],
         report: Any,
+        frozen_source: FrozenRevisionSource,
     ) -> bool:
         bundle_name = (
             report.metadata.get("name")
@@ -2375,21 +2388,16 @@ class AppServices:
         )
         revision_id = module_state.get("bundle_revision_id")
         if report.passed:
-            try:
-                revision = await self.record_validated_revision(
-                    module_id,
-                    bundle_path=module_state["bundle_path"],
-                    commit_sha=module_state.get("bundle_commit_sha"),
-                    bundle_name=bundle_name,
-                    bundle_version=bundle_version,
-                    source_event="validation",
-                )
-                revision_id = revision["revision_id"]
-            except Exception:
-                logger.exception(
-                    "revision_source_snapshot_failed trigger=manual_validation module_id=%s",
-                    module_id,
-                )
+            revision = await self.record_validated_revision(
+                module_id,
+                bundle_path=module_state["bundle_path"],
+                commit_sha=module_state.get("bundle_commit_sha"),
+                bundle_name=bundle_name,
+                bundle_version=bundle_version,
+                source_event="validation",
+                frozen_source=frozen_source,
+            )
+            revision_id = revision["revision_id"]
         await self._update_module_bundle_metadata_record(
             module_id,
             bundle_name=bundle_name,
@@ -2510,18 +2518,13 @@ class AppServices:
             bundle_root = checkout_path / normalized_subpath if normalized_subpath else checkout_path
             if not bundle_root.exists() or not bundle_root.is_dir():
                 raise ValueError("github_subpath does not exist in the repository")
-            report = validate_bundle(str(bundle_root))
-            if not report.passed:
-                raise ValueError(report.summary)
             try:
                 frozen_source = await self.freeze_validated_source(str(bundle_root))
-            except Exception:
-                frozen_source = None
-                logger.exception(
-                    "revision_source_snapshot_failed trigger=github_import module_id=%s",
-                    module_id,
-                )
-
+            except BuildContextError as exc:
+                raise ValueError(str(exc)) from exc
+            report = validate_bundle(str(frozen_source.path))
+            if not report.passed:
+                raise ValueError(report.summary)
             created = await self.create_module_import(
                 "github",
                 str(bundle_root),
@@ -2668,21 +2671,17 @@ class AppServices:
         clone_url = _github_clone_url(repo_url, normalized_pat)
 
         try:
-            await self._run_git_command(["git", "fetch", clone_url, branch], cwd=checkout_path)
+            try:
+                frozen_source = await self.freeze_validated_source(str(bundle_root))
+            except BuildContextError as exc:
+                raise RuntimeError(str(exc)) from exc
             await self._run_git_command(["git", "merge", "--ff-only", "FETCH_HEAD"], cwd=checkout_path)
             current_commit_sha = await self._run_git_command(["git", "rev-parse", "HEAD"], cwd=checkout_path)
             bundle_root = Path(self._module_bundle_root_path(module)).expanduser().resolve()
-            report = validate_bundle(str(bundle_root))
+            frozen_source = await self.freeze_validated_source(str(bundle_root))
+            report = validate_bundle(str(frozen_source.path))
             if not report.passed:
                 raise RuntimeError(report.summary)
-            try:
-                frozen_source = await self.freeze_validated_source(str(bundle_root))
-            except Exception:
-                frozen_source = None
-                logger.exception(
-                    "revision_source_snapshot_failed trigger=sync module_id=%s",
-                    module_id,
-                )
             bundle_name = (
                 report.metadata.get("name")
                 if isinstance(report.metadata.get("name"), str)
@@ -3112,10 +3111,14 @@ class AppServices:
                        (m.deleted_at is null
                         and m.sync_status = 'synced'
                         and m.current_revision_id = r.id
+                        and rb.validation_status = 'passed') as source_eligible,
+                       (m.deleted_at is null
+                        and m.sync_status = 'synced'
+                        and m.current_revision_id = r.id
                         and rb.validation_status = 'passed'
-                        and rb.validation_revision_id = r.id
                         and r.source_snapshot_path is not null
                         and r.source_content_digest is not null) as eligible,
+                       r.source_snapshot_path, r.source_content_digest,
                        b.id, b.revision_id, b.generation, b.source_commit,
                        b.source_content_digest, b.local_tag, b.image_id, b.image_digest,
                        b.base_image_id, b.status, b.attempt, b.available_at,
@@ -3133,9 +3136,15 @@ class AppServices:
             )
         grouped: dict[str, list[Any]] = {revision_id: [] for revision_id in revision_ids}
         eligible: dict[str, bool] = {revision_id: False for revision_id in revision_ids}
+        source_eligible: dict[str, bool] = {revision_id: False for revision_id in revision_ids}
+        snapshot_present: dict[str, bool] = {revision_id: False for revision_id in revision_ids}
         for row in rows:
             revision_id = str(row["requested_revision_id"])
             eligible[revision_id] = bool(row["eligible"])
+            source_eligible[revision_id] = bool(row["source_eligible"])
+            snapshot_present[revision_id] = bool(
+                row["source_snapshot_path"] and row["source_content_digest"]
+            )
             if row["id"] is not None:
                 grouped.setdefault(revision_id, []).append(row)
         states: dict[str, dict[str, Any]] = {}
@@ -3143,8 +3152,21 @@ class AppServices:
             builds = grouped.get(revision_id, [])
             latest = builds[0] if builds else None
             ready = next((row for row in builds if row["status"] == "ready"), None)
+            if latest is not None:
+                status = latest["status"]
+                error = None
+            elif source_eligible.get(revision_id, False) and not snapshot_present.get(revision_id, False):
+                status = "snapshot_failed"
+                error = "validated revision has no immutable source snapshot"
+            elif eligible.get(revision_id, False):
+                status = "enqueue_failed"
+                error = "eligible revision has no image build generation"
+            else:
+                status = "not_eligible"
+                error = None
             states[revision_id] = {
-                "status": latest["status"] if latest is not None else "not_eligible",
+                "status": status,
+                "error": error,
                 "eligible": eligible.get(revision_id, False),
                 "current_build": (
                     build_revision_image_summary_payload(latest)

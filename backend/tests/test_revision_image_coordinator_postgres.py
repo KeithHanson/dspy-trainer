@@ -22,10 +22,15 @@ IMAGE_ID = f"sha256:{'b' * 64}"
 
 
 class _Transaction:
+    def __init__(self, lock):
+        self._lock = lock
+
     async def __aenter__(self):
+        await self._lock.acquire()
         return self
 
     async def __aexit__(self, exc_type, exc, traceback):
+        self._lock.release()
         return False
 
 
@@ -34,6 +39,7 @@ class _StatefulPostgresConnection:
 
     def __init__(self) -> None:
         self.now = 100.0
+        self._transaction_lock = asyncio.Lock()
         self.modules: dict[str, dict] = {}
         self.revisions: dict[str, dict] = {}
         self.runtime: dict[str, dict] = {}
@@ -45,10 +51,13 @@ class _StatefulPostgresConnection:
         return False
 
     def transaction(self):
-        return _Transaction()
+        return _Transaction(self._transaction_lock)
 
     async def execute(self, sql, *args):
         query = " ".join(sql.lower().split())
+
+        if "select pg_advisory_xact_lock($1)" in query:
+            return "SELECT 1"
 
         if "where status = 'building' and claim_expires_at <= now()" in query:
             count = 0
@@ -652,9 +661,9 @@ def test_rebuild_all_supersedes_active_work_and_advances_each_generation(tmp_pat
     )
     _add_build(
         connection,
-        build_id="queued-b",
+        build_id="failed-b",
         revision_id="revision-b",
-        status="queued",
+        status="failed",
         generation=1,
     )
     store = _store(connection)
@@ -672,11 +681,9 @@ def test_rebuild_all_supersedes_active_work_and_advances_each_generation(tmp_pat
         "revision-b",
         2,
     )
-    assert rebuild_b["retry_of_build_id"] == "queued-b"
-    assert connection.builds["queued-b"]["status"] == "failed"
-    assert connection.builds["queued-b"]["failure_reason"] == (
-        "superseded by rebuild-all"
-    )
+    assert rebuild_b["retry_of_build_id"] == "failed-b"
+    assert connection.builds["failed-b"]["status"] == "failed"
+    assert connection.builds["failed-b"]["failure_reason"] is None
 
 
 def test_completion_atomically_fences_revoked_eligibility_and_never_publishes(tmp_path):
@@ -776,3 +783,30 @@ def test_rebuild_all_rejects_duplicate_active_request(tmp_path):
     with pytest.raises(RevisionImageEnqueueError) as duplicate_error:
         asyncio.run(store.enqueue_rebuild_all())
     assert duplicate_error.value.code == "build_conflict"
+def test_concurrent_rebuild_all_requests_create_one_generation(tmp_path):
+    connection = _StatefulPostgresConnection()
+    _add_revision(
+        connection,
+        module_id="module-a",
+        revision_id="revision-a",
+        snapshot=_snapshot(tmp_path, "revision-a"),
+        created_at=1,
+    )
+    store = _store(connection)
+
+    async def run_concurrently():
+        return await asyncio.gather(
+            store.enqueue_rebuild_all(),
+            store.enqueue_rebuild_all(),
+            return_exceptions=True,
+        )
+
+    results = asyncio.run(run_concurrently())
+    successes = [result for result in results if isinstance(result, list)]
+    conflicts = [result for result in results if isinstance(result, RevisionImageEnqueueError)]
+
+    assert len(successes) == 1
+    assert len(successes[0]) == 1
+    assert len(conflicts) == 1
+    assert conflicts[0].code == "build_conflict"
+    assert len(connection.builds) == 1

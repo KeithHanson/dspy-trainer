@@ -173,7 +173,7 @@ async def fake_set_validation_status(self, module_id, status, diagnostics, **kwa
     return True
 
 
-async def fake_persist_module_validation(self, module_id, *, module_state, report):
+async def fake_persist_module_validation(self, module_id, *, module_state, report, frozen_source):
     status = "passed" if report.passed else "failed"
     return await fake_set_validation_status(
         self,

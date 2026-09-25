@@ -4,7 +4,7 @@ import asyncio
 import logging
 import threading
 from collections.abc import Callable
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -21,10 +21,10 @@ from app.revision_images import MAX_FAILURE_REASON_CHARS
 
 logger = logging.getLogger(__name__)
 _BUILD_COORDINATOR_ADVISORY_LOCK = 0x44535059494D4742
+_REBUILD_ALL_ADVISORY_LOCK = 0x44535059494D4743
 _RECOVERY_LOG = "claim expired; requeued for recovery\n"
 _SHUTDOWN_LOG = "deployer stopped; requeued for recovery\n"
 _RETRY_LOG = "generation queued by operator retry\n"
-_REBUILD_ALL_LOG = "generation queued by operator rebuild-all\n"
 
 
 class RevisionImageEnqueueError(ValueError):
@@ -350,7 +350,19 @@ class PostgresRevisionImageBuildStore:
         self._build_log_max_bytes = build_log_max_bytes
         self._leader_timeout_seconds = leader_timeout_seconds
         self._connection: Any | None = None
+        self._operation_pool: Any | None = None
         self._leader = False
+
+    def set_operation_pool(self, pool: Any) -> None:
+        self._operation_pool = pool
+
+    @asynccontextmanager
+    async def _operation_connection(self):
+        if self._operation_pool is not None:
+            async with self._operation_pool.acquire() as conn:
+                yield conn
+            return
+        yield await self._conn()
 
     async def _conn(self) -> Any:
         if self._connection is not None and self._connection.is_closed():
@@ -421,7 +433,10 @@ class PostgresRevisionImageBuildStore:
         return _affected_rows(result)
 
     async def reconcile_eligible_revisions(self) -> int:
-        conn = await self._conn()
+        async with self._operation_connection() as conn:
+            return await self._reconcile_eligible_revisions(conn)
+
+    async def _reconcile_eligible_revisions(self, conn: Any) -> int:
         inserted = 0
         async with conn.transaction():
             await conn.execute("""
@@ -785,7 +800,10 @@ class PostgresRevisionImageBuildStore:
         return _affected_rows(result) == 1
 
     async def enqueue_retry(self, build_id: str) -> str:
-        conn = await self._conn()
+        async with self._operation_connection() as conn:
+            return await self._enqueue_retry(conn, build_id)
+
+    async def _enqueue_retry(self, conn: Any, build_id: str) -> str:
         async with conn.transaction():
             row = await conn.fetchrow(
                 """
@@ -856,9 +874,15 @@ class PostgresRevisionImageBuildStore:
             )
 
     async def enqueue_rebuild_all(self) -> list[str]:
-        conn = await self._conn()
+        async with self._operation_connection() as conn:
+            return await self._enqueue_rebuild_all(conn)
+
+    async def _enqueue_rebuild_all(self, conn: Any) -> list[str]:
         build_ids: list[str] = []
         async with conn.transaction():
+            await conn.execute(
+                "select pg_advisory_xact_lock($1)", _REBUILD_ALL_ADVISORY_LOCK
+            )
             rows = await conn.fetch(
                 """
                 select r.id as revision_id, r.module_import_id as module_id, r.commit_sha as source_commit,
@@ -866,9 +890,9 @@ class PostgresRevisionImageBuildStore:
                        (select b.id from revision_image_builds b where b.revision_id = r.id
                         order by b.generation desc limit 1) as retry_of_build_id,
                        (select b.id from revision_image_builds b where b.revision_id = r.id
-                        and b.status in ('queued', 'building') order by b.generation desc limit 1) as active_build_id,
-                       (select b.build_log from revision_image_builds b where b.revision_id = r.id
-                        and b.status in ('queued', 'building') order by b.generation desc limit 1) as active_build_log
+                        and b.status in ('queued', 'building')
+                        and b.base_image_id = $1
+                        order by b.generation desc limit 1) as active_build_id
                 from bundle_revisions r
                 join module_imports m on m.id = r.module_import_id
                 join runtime_bundles rb on rb.module_import_id = m.id
@@ -881,14 +905,11 @@ class PostgresRevisionImageBuildStore:
                   and r.source_content_digest is not null
                 order by r.created_at asc, r.id asc
                 for update of r
-                """
+                """,
+                self._base_image_id,
             )
             duplicate = next(
-                (
-                    row["active_build_id"]
-                    for row in rows
-                    if row["active_build_log"] == _REBUILD_ALL_LOG
-                ),
+                (row["active_build_id"] for row in rows if row["active_build_id"]),
                 None,
             )
             if duplicate is not None:
@@ -913,7 +934,7 @@ class PostgresRevisionImageBuildStore:
                         row,
                         generation=generation,
                         retry_of_build_id=row["retry_of_build_id"],
-                        initial_log=_REBUILD_ALL_LOG,
+                        initial_log="",
                     )
                 )
         return build_ids
