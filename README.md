@@ -586,6 +586,12 @@ Managed bundle endpoints do not execute inside the backend container. The backen
 - `GET /endpoint-workers` exposes operator-facing readiness details for each endpoint worker from the durable endpoint-worker registry, including `deploy_state`, `state_summary`, and the desired versus warmed bundle revisions.
 - Common endpoint worker states: `idle` (unassigned), `preparing` (installing the desired revision / warming up), `listening` (ready), `running` (serving traffic), `failed` (warmup or invocation failure), and `stale` (heartbeat expired / non-live).
 
+The revision-image build layer is deliberately separate from endpoint scheduling and rollout. Given one immutable revision snapshot and its content digest, it creates a deterministic tar context, uses the configured immutable backend image ID as `FROM`, runs `runtime.system_dependency_commands` before `requirements.txt`, writes a sorted Python package manifest to `/opt/dspy-trainer/python-manifest.txt`, bakes the bundle at `/opt/dspy-bundle`, and installs the platform endpoint-worker entrypoint. Builds use the local Docker Engine cache and host architecture only; the builder has no registry login, pull, or push path.
+
+The context includes every bundle asset except platform control directories (including `.git` and Python/tool caches) and secret-like files such as `.env*`, private keys, and credential files. A bundle may explicitly include a required in-root secret-like fixture with exact paths under `[image_build]` in `bundle.toml`, for example `include_files = ["fixtures/test.key"]`. Overrides cannot escape the snapshot root, name directories, or restore platform control directories. Runtime environment entries, provider keys, GitHub credentials, and host environment values are never build inputs.
+
+Local tags use `<repository>:<revision>-<build-digest-prefix>`; the digest includes the immutable build ID and generation, so rebuilding a revision never mutates an earlier tag or record. Every image has the complete `io.dspy-trainer.*` ownership and provenance set: `platform-owner`, stack `owner`, `managed-kind`, `module-id`, `revision-id`, `build-id`, `build-generation`, `source-commit`, `source-content-digest`, `dependency-digest`, `build-digest`, `base-image-id`, `platform-version`, and `schema-version`. Image adoption or deletion must first validate the full label set and stack owner; a successful build is ready only after inspecting the returned immutable image ID and matching every label.
+
 ---
 
 ## Developer Process
