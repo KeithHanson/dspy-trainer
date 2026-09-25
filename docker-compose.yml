@@ -70,6 +70,7 @@ services:
       DSPY_TRAINER_POSTGRES_DSN: postgresql://postgres:postgres@postgres:5432/dspy_trainer
       DSPY_TRAINER_REDIS_URL: redis://redis:6379/0
       DSPY_TRAINER_QUEUE_NAME: dspy-trainer:jobs
+      DSPY_TRAINER_BUNDLE_INSTALL_MAX_CONCURRENCY: ${DSPY_TRAINER_BUNDLE_INSTALL_MAX_CONCURRENCY:-8}
       DSPY_TRAINER_MLFLOW_TRACKING_URI: http://mlflow:5000
       MLFLOW_TRACKING_URI: http://mlflow:5000
       # Optional operator override; leave unset to use the backend default heartbeat TTL.
@@ -112,6 +113,7 @@ services:
       DSPY_TRAINER_POSTGRES_DSN: postgresql://postgres:postgres@postgres:5432/dspy_trainer
       DSPY_TRAINER_REDIS_URL: redis://redis:6379/0
       DSPY_TRAINER_QUEUE_NAME: dspy-trainer:jobs
+      DSPY_TRAINER_BUNDLE_INSTALL_MAX_CONCURRENCY: ${DSPY_TRAINER_BUNDLE_INSTALL_MAX_CONCURRENCY:-8}
       DSPY_TRAINER_MLFLOW_TRACKING_URI: http://mlflow:5000
       MLFLOW_TRACKING_URI: http://mlflow:5000
       DSPY_TRAINER_GITHUB_PAT: ${GITHUB_PAT:-}
@@ -149,6 +151,7 @@ services:
       DSPY_TRAINER_POSTGRES_DSN: postgresql://postgres:postgres@postgres:5432/dspy_trainer
       DSPY_TRAINER_REDIS_URL: redis://redis:6379/0
       DSPY_TRAINER_QUEUE_NAME: dspy-trainer:jobs
+      DSPY_TRAINER_BUNDLE_INSTALL_MAX_CONCURRENCY: ${DSPY_TRAINER_BUNDLE_INSTALL_MAX_CONCURRENCY:-8}
       DSPY_TRAINER_MLFLOW_TRACKING_URI: http://mlflow:5000
       MLFLOW_TRACKING_URI: http://mlflow:5000
       # Optional operator override; leave unset to use the backend default heartbeat TTL.

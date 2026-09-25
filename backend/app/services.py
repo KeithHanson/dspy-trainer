@@ -34,6 +34,8 @@ from app.validator import read_bundle_metadata, validate_bundle
 
 
 logger = logging.getLogger(__name__)
+_BUNDLE_INSTALL_ADVISORY_LOCK_NAMESPACE = 0x44535059
+_BUNDLE_INSTALL_SLOT_POLL_SECONDS = 0.25
 
 
 class OptimizationJobCanceled(RuntimeError):
@@ -518,6 +520,54 @@ class AppServices:
                 "module environment entries or LM profile API keys could not be decrypted with the configured key"
             ) from exc
 
+    async def _acquire_bundle_install_slot(
+        self,
+        cancel_check: Callable[[], Awaitable[bool]] | None,
+    ) -> tuple[Any, int] | None:
+        pool = self.postgres_pool
+        if pool is None:
+            return None
+
+        connection = None
+        try:
+            while connection is None:
+                if cancel_check is not None and await cancel_check():
+                    raise RuntimeError("eval run canceled by operator")
+                try:
+                    connection = await pool.acquire(timeout=_BUNDLE_INSTALL_SLOT_POLL_SECONDS)
+                except asyncio.TimeoutError:
+                    continue
+
+            while True:
+                if cancel_check is not None and await cancel_check():
+                    raise RuntimeError("eval run canceled by operator")
+                for slot in range(self.settings.bundle_install_max_concurrency):
+                    acquired = await connection.fetchval(
+                        "select pg_try_advisory_lock($1, $2)",
+                        _BUNDLE_INSTALL_ADVISORY_LOCK_NAMESPACE,
+                        slot,
+                    )
+                    if acquired:
+                        return connection, slot
+                await asyncio.sleep(_BUNDLE_INSTALL_SLOT_POLL_SECONDS)
+        except BaseException:
+            if connection is not None:
+                await pool.release(connection)
+            raise
+
+    async def _release_bundle_install_slot(self, connection: Any, slot: int) -> None:
+        pool = self.postgres_pool
+        if pool is None:
+            return
+        try:
+            await connection.fetchval(
+                "select pg_advisory_unlock($1, $2)",
+                _BUNDLE_INSTALL_ADVISORY_LOCK_NAMESPACE,
+                slot,
+            )
+        finally:
+            await pool.release(connection)
+
     async def ensure_bundle_requirements_installed(
         self,
         bundle_path: str,
@@ -569,76 +619,92 @@ class AppServices:
                 )
                 return
 
-            logger.info(
-                "bundle_requirements_install_started bundle_path=%s requirements_path=%s",
-                root,
-                requirements_path,
-            )
-
-            async def run_command(argv: list[str], *, use_shell: bool = False) -> None:
-                if cancel_check is not None and await cancel_check():
-                    raise RuntimeError("eval run canceled by operator")
-                if use_shell:
-                    process = await asyncio.create_subprocess_shell(
-                        argv[0],
-                        cwd=str(root),
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                    )
-                else:
-                    process = await asyncio.create_subprocess_exec(
-                        *argv,
-                        cwd=str(root),
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                    )
-                while process.returncode is None:
-                    if cancel_check is not None and await cancel_check():
-                        process.terminate()
-                        try:
-                            await asyncio.wait_for(process.wait(), timeout=5)
-                        except asyncio.TimeoutError:
-                            process.kill()
-                            await process.wait()
-                        raise RuntimeError("eval run canceled by operator")
-                    try:
-                        await asyncio.wait_for(process.wait(), timeout=0.25)
-                    except asyncio.TimeoutError:
-                        continue
-                stdout, stderr = await process.communicate()
-                if process.returncode != 0:
-                    detail = (stderr.decode("utf-8", errors="ignore").strip() or stdout.decode("utf-8", errors="ignore").strip() or "command failed")
-                    raise RuntimeError(detail)
-
+            slot_lease = await self._acquire_bundle_install_slot(cancel_check)
             try:
-                for command in system_dependency_commands:
-                    await run_command([command], use_shell=True)
-
-                if requirements_bytes:
-                    await run_command(
-                        [
-                            sys.executable,
-                            "-m",
-                            "pip",
-                            "install",
-                            "--disable-pip-version-check",
-                            "-r",
-                            str(requirements_path),
-                        ]
-                    )
-            except Exception:
-                logger.exception(
-                    "bundle_requirements_install_failed bundle_path=%s requirements_path=%s",
+                logger.info(
+                    "bundle_requirements_install_started bundle_path=%s requirements_path=%s",
                     root,
                     requirements_path,
                 )
-                raise
-            self._installed_bundle_requirements[cache_key] = digest
-            logger.info(
-                "bundle_requirements_install_succeeded bundle_path=%s requirements_path=%s",
-                root,
-                requirements_path,
-            )
+
+                async def run_command(argv: list[str], *, use_shell: bool = False) -> None:
+                    if cancel_check is not None and await cancel_check():
+                        raise RuntimeError("eval run canceled by operator")
+                    if use_shell:
+                        process = await asyncio.create_subprocess_shell(
+                            argv[0],
+                            cwd=str(root),
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE,
+                        )
+                    else:
+                        process = await asyncio.create_subprocess_exec(
+                            *argv,
+                            cwd=str(root),
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE,
+                        )
+                    try:
+                        while process.returncode is None:
+                            if cancel_check is not None and await cancel_check():
+                                process.terminate()
+                                try:
+                                    await asyncio.wait_for(process.wait(), timeout=5)
+                                except asyncio.TimeoutError:
+                                    process.kill()
+                                    await process.wait()
+                                raise RuntimeError("eval run canceled by operator")
+                            try:
+                                await asyncio.wait_for(process.wait(), timeout=0.25)
+                            except asyncio.TimeoutError:
+                                continue
+                        stdout, stderr = await process.communicate()
+                    except BaseException:
+                        if process.returncode is None:
+                            process.terminate()
+                            try:
+                                await asyncio.wait_for(process.wait(), timeout=5)
+                            except asyncio.TimeoutError:
+                                process.kill()
+                                await process.wait()
+                        raise
+                    if process.returncode != 0:
+                        detail = (stderr.decode("utf-8", errors="ignore").strip() or stdout.decode("utf-8", errors="ignore").strip() or "command failed")
+                        raise RuntimeError(detail)
+
+                try:
+                    for command in system_dependency_commands:
+                        await run_command([command], use_shell=True)
+
+                    if requirements_bytes:
+                        await run_command(
+                            [
+                                sys.executable,
+                                "-m",
+                                "pip",
+                                "install",
+                                "--disable-pip-version-check",
+                                "-r",
+                                str(requirements_path),
+                            ]
+                        )
+                except Exception:
+                    logger.exception(
+                        "bundle_requirements_install_failed bundle_path=%s requirements_path=%s",
+                        root,
+                        requirements_path,
+                    )
+                    raise
+                self._installed_bundle_requirements[cache_key] = digest
+                logger.info(
+                    "bundle_requirements_install_succeeded bundle_path=%s requirements_path=%s",
+                    root,
+                    requirements_path,
+                )
+            finally:
+                if slot_lease is not None:
+                    connection, slot = slot_lease
+                    await self._release_bundle_install_slot(connection, slot)
 
     @staticmethod
     def _merge_process_log(existing_log: str | None, additions: list[str]) -> str:
