@@ -8,7 +8,10 @@ import socket
 from uuid import uuid4
 
 from app.config import get_deployer_settings
-from app.revision_image_builder import DockerSdkImageAdapter, RevisionImageBuilder
+from app.revision_image_build_process import (
+    MultiprocessingRevisionImageBuildChildFactory,
+    RevisionImageBuildProcessRunner,
+)
 from app.revision_image_coordinator import (
     PostgresRevisionImageBuildStore,
     RevisionImageBuildCoordinator,
@@ -30,8 +33,8 @@ async def run_deployer() -> None:
         build_log_max_bytes=settings.deployer_build_log_max_bytes,
         leader_timeout_seconds=settings.deployer_leader_timeout_seconds,
     )
-    builder = RevisionImageBuilder(
-        DockerSdkImageAdapter.from_env(),
+    builder = RevisionImageBuildProcessRunner(
+        MultiprocessingRevisionImageBuildChildFactory(),
         max_log_bytes=settings.deployer_build_log_max_bytes,
     )
     coordinator = RevisionImageBuildCoordinator(

@@ -10,7 +10,6 @@ import tarfile
 import tempfile
 import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Protocol
@@ -121,8 +120,6 @@ class RevisionImageBuildCancelled(RuntimeError):
 class BuildCancellation:
     def __init__(self) -> None:
         self._cancelled = threading.Event()
-        self._lock = threading.Lock()
-        self._interrupt: Callable[[], None] | None = None
 
     @property
     def cancelled(self) -> bool:
@@ -136,25 +133,10 @@ class BuildCancellation:
         if self.is_cancelled:
             raise RevisionImageBuildCancelled("revision image build was cancelled")
 
-    def bind_interrupt(self, interrupt: Callable[[], None]) -> None:
-        with self._lock:
-            self._interrupt = interrupt
-            cancelled = self.is_cancelled
-        if cancelled:
-            with suppress(Exception):
-                interrupt()
-
-    def unbind_interrupt(self) -> None:
-        with self._lock:
-            self._interrupt = None
-
     def cancel(self) -> None:
         self._cancelled.set()
-        with self._lock:
-            interrupt = self._interrupt
-        if interrupt is not None:
-            with suppress(Exception):
-                interrupt()
+
+
 @dataclass(frozen=True)
 class RevisionImageBuildSpec:
     owner: str
@@ -178,11 +160,15 @@ class GeneratedBuildContext:
     labels: Mapping[str, str]
     members: tuple[str, ...]
     dockerfile: str
+
+
 @dataclass(frozen=True)
 class RevisionImageBuildIdentity:
     local_tag: str
     build_digest: str
     dependency_digest: str
+
+
 @dataclass(frozen=True)
 class DockerBuildEvent:
     message: str = ""
@@ -209,7 +195,8 @@ class DockerImageAdapter(Protocol):
     ) -> Iterable[DockerBuildEvent]: ...
 
     def inspect_image(self, image_id: str) -> DockerImageInspection: ...
-    def cancel_active_build(self) -> None: ...
+
+
 @dataclass(frozen=True)
 class RevisionImageBuildResult:
     status: str
@@ -290,8 +277,6 @@ class DockerSdkImageAdapter:
 
     def __init__(self, client: Any) -> None:
         self._client = client
-        self._stream_lock = threading.Lock()
-        self._active_stream: Any | None = None
 
     @classmethod
     def from_env(cls) -> DockerSdkImageAdapter:
@@ -319,67 +304,52 @@ class DockerSdkImageAdapter:
             rm=True,
             forcerm=True,
         )
-        with self._stream_lock:
-            if self._active_stream is not None:
-                stream.close()
-                raise RevisionImageBuildError("a Docker image build is already active")
-            self._active_stream = stream
         return self._build_events(stream, tag=tag)
 
-    def _build_events(self, stream: Iterable[object], *, tag: str) -> Iterator[DockerBuildEvent]:
+    def _build_events(
+        self, stream: Iterable[object], *, tag: str
+    ) -> Iterator[DockerBuildEvent]:
         returned_image_id: str | None = None
         saw_error = False
-        try:
-            for raw_event in stream:
-                if not isinstance(raw_event, Mapping):
-                    yield DockerBuildEvent(message=str(raw_event))
-                    continue
-                aux = raw_event.get("aux")
-                if isinstance(aux, Mapping):
-                    candidate = str(aux.get("ID") or aux.get("Id") or "").strip()
-                    if candidate:
-                        returned_image_id = candidate
-                error = _docker_event_error(raw_event)
-                if error:
-                    saw_error = True
-                yield DockerBuildEvent(
-                    message=_docker_event_message(raw_event),
-                    image_id=returned_image_id if isinstance(aux, Mapping) else None,
-                    error=error,
-                )
-            if returned_image_id is None and not saw_error:
-                attrs = self._client.api.inspect_image(tag)
-                returned_image_id = str(attrs.get("Id") or attrs.get("ID") or "").strip()
-            if returned_image_id:
-                yield DockerBuildEvent(image_id=returned_image_id)
-        finally:
-            with self._stream_lock:
-                if self._active_stream is stream:
-                    self._active_stream = None
-            close = getattr(stream, "close", None)
-            if callable(close):
-                close()
+        for raw_event in stream:
+            if not isinstance(raw_event, Mapping):
+                yield DockerBuildEvent(message=str(raw_event))
+                continue
+            aux = raw_event.get("aux")
+            if isinstance(aux, Mapping):
+                candidate = str(aux.get("ID") or aux.get("Id") or "").strip()
+                if candidate:
+                    returned_image_id = candidate
+            error = _docker_event_error(raw_event)
+            if error:
+                saw_error = True
+            yield DockerBuildEvent(
+                message=_docker_event_message(raw_event),
+                image_id=returned_image_id if isinstance(aux, Mapping) else None,
+                error=error,
+            )
+        if returned_image_id is None and not saw_error:
+            attrs = self._client.api.inspect_image(tag)
+            returned_image_id = str(attrs.get("Id") or attrs.get("ID") or "").strip()
+        if returned_image_id:
+            yield DockerBuildEvent(image_id=returned_image_id)
 
     def inspect_image(self, image_id: str) -> DockerImageInspection:
         attrs = self._client.api.inspect_image(image_id)
         config = attrs.get("Config") if isinstance(attrs.get("Config"), Mapping) else {}
-        labels = config.get("Labels") if isinstance(config.get("Labels"), Mapping) else {}
+        labels = (
+            config.get("Labels") if isinstance(config.get("Labels"), Mapping) else {}
+        )
         return DockerImageInspection(
             image_id=str(attrs.get("Id") or attrs.get("ID") or "").strip(),
             labels={str(key): str(value) for key, value in labels.items()},
             repo_tags=tuple(str(value) for value in (attrs.get("RepoTags") or ())),
-            repo_digests=tuple(str(value) for value in (attrs.get("RepoDigests") or ())),
+            repo_digests=tuple(
+                str(value) for value in (attrs.get("RepoDigests") or ())
+            ),
         )
 
-    def cancel_active_build(self) -> None:
-        with self._stream_lock:
-            stream = self._active_stream
-        if stream is None:
-            return
-        close = getattr(stream, "close", None)
-        if not callable(close):
-            raise RevisionImageBuildError("active Docker build stream cannot be closed")
-        close()
+
 class RevisionImageBuilder:
     def __init__(
         self,
@@ -405,7 +375,6 @@ class RevisionImageBuilder:
         on_log: Callable[[str], None] | None = None,
     ) -> RevisionImageBuildResult:
         cancellation = cancellation or BuildCancellation()
-        cancellation.bind_interrupt(self._docker.cancel_active_build)
         log = _BoundedLog(self._max_log_bytes)
         context_metadata: GeneratedBuildContext | None = None
 
@@ -488,8 +457,6 @@ class RevisionImageBuilder:
                 build_log=log.value(),
                 failure_reason=failure_reason,
             )
-        finally:
-            cancellation.unbind_interrupt()
 
 
 def calculate_source_content_digest(snapshot_path: Path | str) -> str:

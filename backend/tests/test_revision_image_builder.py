@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import sys
 import tarfile
-import threading
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -137,7 +136,6 @@ class _FakeDocker:
         self.inspection_repo_tags = inspection_repo_tags
         self.build_calls: list[dict] = []
         self.inspect_calls: list[str] = []
-        self.cancel_calls = 0
 
     def build_image(self, context, *, tag, labels, use_cache):
         self.build_calls.append(
@@ -167,8 +165,6 @@ class _FakeDocker:
             repo_tags=(build_call["tag"],) if self.inspection_repo_tags is None else self.inspection_repo_tags,
             repo_digests=(f"dspy-trainer-module@sha256:{'c' * 64}",),
         )
-    def cancel_active_build(self):
-        self.cancel_calls += 1
 
 
 def test_context_is_deterministic_complete_and_excludes_secrets_by_default(tmp_path, monkeypatch):
@@ -530,7 +526,6 @@ def test_builder_cancellation_interrupts_adapter_before_docker_build(tmp_path):
     with pytest.raises(RevisionImageBuildCancelled):
         RevisionImageBuilder(docker).build(_spec(root), cancellation)
 
-    assert docker.cancel_calls == 1
     assert docker.build_calls == []
 
 
@@ -546,67 +541,6 @@ def test_public_build_identity_matches_generated_context(tmp_path):
     assert identity.local_tag == generated.local_tag
     assert identity.build_digest == generated.build_digest
     assert identity.dependency_digest == generated.dependency_digest
-def test_sdk_adapter_cancellation_closes_active_stream_and_invalidates_build(tmp_path):
-    class BlockingStream:
-        def __init__(self):
-            self.entered = threading.Event()
-            self.closed = threading.Event()
-
-        def __iter__(self):
-            return self
-
-        def __next__(self):
-            self.entered.set()
-            if not self.closed.wait(timeout=2):
-                raise AssertionError("build stream was not closed")
-            raise RuntimeError("build stream closed")
-
-        def close(self):
-            self.closed.set()
-
-    stream = BlockingStream()
-
-    class FakeApi:
-        def build(self, **_kwargs):
-            return stream
-
-        @staticmethod
-        def inspect_image(reference):
-            assert reference == BASE_IMAGE_ID
-            return {
-                "Id": BASE_IMAGE_ID,
-                "Config": {"Labels": {}},
-                "RepoTags": [],
-                "RepoDigests": [],
-            }
-
-    root = tmp_path / "snapshot"
-    _write_bundle(root)
-    adapter = DockerSdkImageAdapter(SimpleNamespace(api=FakeApi()))
-    cancellation = BuildCancellation()
-    results = []
-    errors = []
-
-    def consume():
-        try:
-            results.append(
-                RevisionImageBuilder(adapter).build(_spec(root), cancellation)
-            )
-        except RevisionImageBuildCancelled as exc:
-            errors.append(exc)
-
-    consumer = threading.Thread(target=consume)
-    consumer.start()
-    assert stream.entered.wait(timeout=1)
-
-    cancellation.cancel()
-    consumer.join(timeout=1)
-
-    assert not consumer.is_alive()
-    assert stream.closed.is_set()
-    assert [str(error) for error in errors] == ["revision image build was cancelled"]
-    assert results == []
-    assert adapter._active_stream is None
 
 
 @pytest.mark.parametrize("max_bytes", [1, 8, 32, 33, 34, 64])
