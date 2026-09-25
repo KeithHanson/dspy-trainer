@@ -1124,7 +1124,11 @@ class AppServices:
         endpoint_id = reported_endpoint_id or assigned_endpoint_id
         execution_mode = str(worker.get("execution_mode") or "legacy_static").strip()
         managed_image = execution_mode == "managed_image"
-        endpoint_matches = bool(reported_endpoint_id if managed_image else endpoint_id)
+        endpoint_matches = (
+            bool(reported_endpoint_id and reported_endpoint_id == assigned_endpoint_id)
+            if managed_image
+            else bool(endpoint_id)
+        )
         desired_build_id = str(worker.get("desired_build_id") or "").strip() or None
         warmed_build_id = str(worker.get("warmed_build_id") or "").strip() or None
         desired_revision_id = str(worker.get("desired_revision_id") or "").strip() or None

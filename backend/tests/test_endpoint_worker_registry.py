@@ -779,18 +779,19 @@ def test_list_endpoint_workers_registry_summary_excludes_listening_revision_mism
     asyncio.run(scenario())
 
 
-def test_managed_registry_readiness_requires_matching_build_and_revision():
+def test_managed_registry_readiness_requires_matching_identity_build_and_revision():
     async def scenario() -> None:
         services = _make_services()
         now = datetime(2099, 1, 1, tzinfo=timezone.utc)
 
-        for index in (1, 2):
+        for index in (1, 2, 3):
             await services.register_endpoint_worker(
                 worker_id=f"endpoint-worker-{index}",
                 runtime_instance_id=f"runtime-{index}",
                 status="idle",
                 now=now,
             )
+        for index in (1, 2, 3):
             await services._set_endpoint_worker_assignment(
                 f"endpoint-worker-{index}", f"endpoint-{index}"
             )
@@ -825,7 +826,21 @@ def test_managed_registry_readiness_requires_matching_build_and_revision():
             },
             now=now + timedelta(seconds=1),
         )
-
+        await services.heartbeat_endpoint_worker(
+            "endpoint-worker-3",
+            runtime_instance_id="runtime-3",
+            status="listening",
+            runtime_metadata={
+                "execution_mode": "managed_image",
+                "endpoint_id": "wrong-endpoint",
+                "desired_build_id": "build-4",
+                "warmed_build_id": "build-4",
+                "desired_revision_id": "rev-3",
+                "warmed_revision_id": "rev-3",
+                "bundle_path": "/opt/dspy-bundle",
+            },
+            now=now + timedelta(seconds=1),
+        )
         payload = await services.list_endpoint_workers(now=now + timedelta(seconds=1))
 
         assert payload["available_workers"] == 1
@@ -835,7 +850,8 @@ def test_managed_registry_readiness_requires_matching_build_and_revision():
         assert payload["items"][0]["is_revision_ready"] is False
         assert payload["items"][1]["deploy_state"] == "ready"
         assert payload["items"][1]["is_revision_ready"] is True
-
+        assert payload["items"][2]["deploy_state"] == "endpoint_mismatch"
+        assert payload["items"][2]["is_revision_ready"] is False
     asyncio.run(scenario())
 
 
