@@ -60,7 +60,10 @@ def _write_bundle(
     root: Path,
     *,
     include_files: tuple[str, ...] = (),
-    system_dependency_commands: tuple[str, ...] = ("apt-get update", "apt-get install -y curl"),
+    system_dependency_commands: tuple[str, ...] = (
+        "apt-get update",
+        "apt-get install -y curl",
+    ),
     requirements: str | None = "example-package==1.2.3\n",
 ) -> None:
     root.mkdir(parents=True, exist_ok=True)
@@ -103,7 +106,8 @@ def _spec(
         generation=generation,
         source_commit="0123456789abcdef",
         source_snapshot_path=root,
-        source_content_digest=source_content_digest or calculate_source_content_digest(root),
+        source_content_digest=source_content_digest
+        or calculate_source_content_digest(root),
         base_image_id=BASE_IMAGE_ID,
         image_repository="dspy-trainer-module",
         platform_version="2026.09",
@@ -159,18 +163,30 @@ class _FakeDocker:
     def inspect_image(self, image_id):
         self.inspect_calls.append(image_id)
         if image_id == BASE_IMAGE_ID:
-            return DockerImageInspection(image_id=self.resolved_base_image_id, labels={})
+            return DockerImageInspection(
+                image_id=self.resolved_base_image_id, labels={}
+            )
         build_call = self.build_calls[-1]
-        labels = self.inspection_labels if self.inspection_labels is not None else build_call["labels"]
+        labels = (
+            self.inspection_labels
+            if self.inspection_labels is not None
+            else build_call["labels"]
+        )
         return DockerImageInspection(
             image_id=self.image_id,
             labels=labels,
-            repo_tags=(build_call["tag"],) if self.inspection_repo_tags is None else self.inspection_repo_tags,
+            repo_tags=(
+                (build_call["tag"],)
+                if self.inspection_repo_tags is None
+                else self.inspection_repo_tags
+            ),
             repo_digests=(f"dspy-trainer-module@sha256:{'c' * 64}",),
         )
 
 
-def test_context_is_deterministic_complete_and_excludes_secrets_by_default(tmp_path, monkeypatch):
+def test_context_is_deterministic_complete_and_excludes_secrets_by_default(
+    tmp_path, monkeypatch
+):
     root = tmp_path / "snapshot"
     _write_bundle(root, include_files=("fixtures/test.key",))
     (root / "README.md").write_text("bundle documentation\n", encoding="utf-8")
@@ -212,21 +228,26 @@ def test_context_is_deterministic_complete_and_excludes_secrets_by_default(tmp_p
     assert not any(name.startswith("bundle/.git") for name in infos)
     assert infos["bundle/alias.txt"].issym()
     assert infos["bundle/alias.txt"].linkname == "data/value.txt"
-    assert all(member.mtime == 0 and member.uid == 0 and member.gid == 0 for member in infos.values())
+    assert all(
+        member.mtime == 0 and member.uid == 0 and member.gid == 0
+        for member in infos.values()
+    )
 
     dockerfile = contents["Dockerfile"].decode("utf-8")
     assert dockerfile.startswith(f"FROM {BASE_IMAGE_ID}\n")
-    assert dockerfile.index("apt-get update") < dockerfile.index("apt-get install -y curl")
+    assert dockerfile.index("apt-get update") < dockerfile.index(
+        "apt-get install -y curl"
+    )
     assert dockerfile.index("apt-get install -y curl") < dockerfile.index("pip install")
     assert dockerfile.index("pip install") < dockerfile.index("pip freeze --all")
     assert f"COPY bundle/ {BUNDLE_IMAGE_PATH}/" in dockerfile
     assert PYTHON_MANIFEST_PATH in dockerfile
-    assert f"LABEL {LABEL_OWNER}=\"compose-project-a\"" in dockerfile
-    assert f"ENTRYPOINT [\"/usr/local/bin/{GENERATED_ENTRYPOINT_NAME}\"]" in dockerfile
+    assert f'LABEL {LABEL_OWNER}="compose-project-a"' in dockerfile
+    assert f'ENTRYPOINT ["/usr/local/bin/{GENERATED_ENTRYPOINT_NAME}"]' in dockerfile
     assert "CMD []" in dockerfile
-    assert contents[GENERATED_ENTRYPOINT_NAME].decode("utf-8").endswith(
-        'exec python /app/backend/endpoint_worker.py "$@"\n'
-    )
+    entrypoint = contents[GENERATED_ENTRYPOINT_NAME].decode("utf-8")
+    assert "exec env -i" in entrypoint
+    assert entrypoint.endswith('  python /app/backend/endpoint_worker.py "$@"\n')
     assert b"bundle-secret" not in first.getvalue()
     assert b"production-secret" not in first.getvalue()
     assert b"private-material" not in first.getvalue()
@@ -264,7 +285,9 @@ def test_all_dotenv_basenames_are_excluded_except_exact_metadata_override(tmp_pa
             assert f"bundle/{relative}" not in infos
 
 
-def test_generated_dockerfile_skips_requirement_install_when_snapshot_has_no_requirements(tmp_path):
+def test_generated_dockerfile_skips_requirement_install_when_snapshot_has_no_requirements(
+    tmp_path,
+):
     root = tmp_path / "snapshot"
     _write_bundle(root, requirements=None)
     context = BytesIO()
@@ -280,19 +303,25 @@ def test_generated_dockerfile_skips_requirement_install_when_snapshot_has_no_req
 
 def test_shell_commands_are_json_quoted_as_one_run_instruction(tmp_path):
     root = tmp_path / "snapshot"
-    command = 'printf \"safe\"\nFROM attacker/image\nLABEL attacker=true'
+    command = 'printf "safe"\nFROM attacker/image\nLABEL attacker=true'
     _write_bundle(root, system_dependency_commands=(command,), requirements=None)
     context = BytesIO()
 
     write_build_context(_spec(root), context)
     _, contents = _tar_members(context.getvalue())
     dockerfile_lines = contents["Dockerfile"].decode("utf-8").splitlines()
-    run_arguments = [json.loads(line.removeprefix("RUN ")) for line in dockerfile_lines if line.startswith("RUN [")]
+    run_arguments = [
+        json.loads(line.removeprefix("RUN "))
+        for line in dockerfile_lines
+        if line.startswith("RUN [")
+    ]
 
     assert [arguments for arguments in run_arguments if arguments[-1] == command] == [
         ["/bin/sh", "-eu", "-c", command]
     ]
-    assert [line for line in dockerfile_lines if line.startswith("FROM ")] == [f"FROM {BASE_IMAGE_ID}"]
+    assert [line for line in dockerfile_lines if line.startswith("FROM ")] == [
+        f"FROM {BASE_IMAGE_ID}"
+    ]
     assert "LABEL attacker=true" not in dockerfile_lines
 
 
@@ -519,6 +548,8 @@ def test_sdk_adapter_uses_local_cached_host_build_without_build_args():
     assert inspection.image_id == IMAGE_ID
     assert inspection.labels == {LABEL_OWNER: "compose-project-a"}
     assert api.inspect_refs == [IMAGE_ID]
+
+
 def test_builder_cancellation_interrupts_adapter_before_docker_build(tmp_path):
     root = tmp_path / "snapshot"
     _write_bundle(root)
@@ -569,6 +600,8 @@ def test_builder_log_truncation_marker_never_exceeds_small_configured_cap(
         assert encoded == marker[:max_bytes]
     else:
         assert encoded.startswith(marker)
+
+
 def test_frozen_source_is_content_addressed_immutable_and_secret_free(tmp_path):
     source = tmp_path / "source"
     snapshot_store = tmp_path / "snapshots"
@@ -591,6 +624,8 @@ def test_frozen_source_is_content_addressed_immutable_and_secret_free(tmp_path):
 
     assert (first.path / "module.py").read_bytes() == frozen_module
     assert calculate_source_content_digest(source) != first.content_digest
+
+
 def test_concurrent_snapshot_publishers_reuse_one_complete_snapshot(tmp_path):
     source = tmp_path / "source"
     snapshot_store = tmp_path / "snapshots"
@@ -604,10 +639,16 @@ def test_concurrent_snapshot_publishers_reuse_one_complete_snapshot(tmp_path):
 
     assert first == second
     assert calculate_source_content_digest(first.path) == first.content_digest
-    assert [path for path in snapshot_store.iterdir() if not path.name.startswith(".staging-")] == [first.path]
+    assert [
+        path
+        for path in snapshot_store.iterdir()
+        if not path.name.startswith(".staging-")
+    ] == [first.path]
 
 
-def test_snapshot_publication_rejects_source_mutation_during_copy(tmp_path, monkeypatch):
+def test_snapshot_publication_rejects_source_mutation_during_copy(
+    tmp_path, monkeypatch
+):
     source = tmp_path / "source"
     snapshot_store = tmp_path / "snapshots"
     _write_bundle(source)
@@ -623,6 +664,12 @@ def test_snapshot_publication_rejects_source_mutation_during_copy(tmp_path, monk
 
     monkeypatch.setattr(builder_mod.os, "fsync", mutate_between_collection_and_copy)
 
-    with pytest.raises(builder_mod.BuildContextError, match="changed while generating context"):
+    with pytest.raises(
+        builder_mod.BuildContextError, match="changed while generating context"
+    ):
         freeze_revision_source(source, snapshot_store)
-    assert not [path for path in snapshot_store.iterdir() if not path.name.startswith(".staging-")]
+    assert not [
+        path
+        for path in snapshot_store.iterdir()
+        if not path.name.startswith(".staging-")
+    ]
