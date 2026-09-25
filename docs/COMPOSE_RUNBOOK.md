@@ -56,13 +56,14 @@ LM Profile setup note:
 - Each LM Profile stores the direct provider endpoint, model identifier, optional LM class override, and optional provider API key.
 
 Managed endpoint worker note:
-- Compose-backed `endpoint-worker` containers self-register with the backend's durable endpoint-worker registry.
-- Operator assignment and readiness are driven directly by that live registry, not by an env-defined logical worker roster.
+- The Compose `endpoint-worker` service is the migration-only static pool. It can serve an endpoint only while that endpoint's current deployment phase is explicitly `legacy_static`.
+- A revision-image worker starts in `managed_image` mode with `DSPY_TRAINER_ENDPOINT_ID`, immutable baked build/revision identity, and the fixed `/opt/dspy-bundle` path. Registration rejects identity that does not match both the baked image metadata and the endpoint deployment's database assignment.
+- Managed readiness requires matching desired and warmed build/revision heartbeats. Managed jobs use endpoint/build/revision-specific Redis queues and carry the same provenance into the MLflow trace.
 
 Bundle runtime note:
-- If a tracked bundle contains `requirements.txt`, backend, general workers, and endpoint workers install those dependencies automatically before executing the bundle.
-- Bundle system dependency commands and Python requirements installation share PostgreSQL advisory-lock slots across `backend`, `worker`, and `endpoint-worker`. `DSPY_TRAINER_BUNDLE_INSTALL_MAX_CONCURRENCY` must be positive and defaults to `8`.
-- Endpoint workers continue sending `preparing` heartbeats while waiting for a slot and while installing dependencies.
+- Backend, general workers, and explicit `legacy_static` endpoint workers retain checkout-based dependency installation for migration compatibility.
+- Managed revision-image workers never resolve a checkout or install dependencies at startup or invocation time; source, system packages, and Python requirements are baked during image construction.
+- The generated managed entrypoint clears the inherited environment and passes only process basics, Postgres, Redis, MLflow, endpoint/worker/build/revision identity, queue settings, and the module-environment encryption key. Git, GitHub, deployer/build, and checkout configuration are not passed.
 
 Build the backend first, record its immutable local image ID in `.env`, then start the stack. The deployer Dockerfile and every generated revision image use that exact ID as their base:
 
@@ -134,6 +135,19 @@ The revision-image builder is a library seam for the dedicated deployer; it does
 The generated context contains only `Dockerfile`, `dspy-trainer-endpoint-worker`, and the selected source under `bundle/`. Tar ordering and metadata are normalized. `.git` and tool caches are always omitted; `.env*`, key material, and credential files are omitted unless an exact in-root file is declared by `bundle.toml` under `[image_build] include_files`. Escaping or absolute symlinks, special files, directory overrides, digest mismatches, and attempts to restore control directories are rejected before Docker is called.
 
 The generated Dockerfile uses the supplied immutable backend image ID directly in `FROM`, applies the complete `io.dspy-trainer.*` label set, copies source to `/opt/dspy-bundle`, executes each `runtime.system_dependency_commands` entry in order, installs `requirements.txt` afterward when present, captures sorted `pip freeze --all` output at `/opt/dspy-trainer/python-manifest.txt`, and installs the baked endpoint-worker entrypoint. Tags are `<repository>:<normalized-revision>-<24-character-build-digest-prefix>`; build ID and generation are digest inputs, so generations cannot reuse a tag.
+
+## Managed Endpoint Image Execution
+
+Managed invocation routing chooses only live `listening` workers whose endpoint, execution mode, desired/warmed build, desired/warmed revision, and baked bundle path match an allowed deployment build. Ready deployments route to the active build; rolling, draining, and rollback deployments may route to both active and target builds so in-flight rollout revisions can coexist without sharing queues. Each queued job repeats the chosen build/revision/path, and the worker rejects a mismatch before invoking bundle code. MLflow trace attributes record `revision_image_build_id`, `bundle_revision_id`, and `execution_mode` from the worker's accepted assignment.
+
+### Managed Execution Deployment-host Acceptance (Do Not Run on Development Workstations)
+
+1. Choose an endpoint whose deployment has a ready active revision-image build. Start its managed worker with only Postgres, Redis, MLflow, endpoint/worker identity, the baked build/revision identity, and the module-environment encryption key when encrypted runtime secrets are configured.
+2. Inspect the worker container mounts and environment. Confirm no checkout or bundle volume is mounted; `/opt/dspy-bundle` comes from the image; and no GitHub, Git, Docker, deployer/build, or broad host environment is present.
+3. Capture startup logs and process activity. Confirm the worker performs no `apt`, `pip`, requirements installation, Git operation, or mutable checkout resolution before reporting matching desired/warmed build and revision readiness.
+4. Invoke the endpoint once through the synchronous API and once through SSE. Confirm both jobs use the endpoint/build/revision-specific Redis queue and their MLflow traces report the active build and revision.
+5. Sync or modify the host checkout after the image worker is ready, then invoke both paths again. Confirm responses and trace provenance remain pinned to the baked revision rather than observing the newer checkout.
+6. Start a worker with a wrong endpoint, build, revision, or bundle path and confirm registration/readiness fails and it never consumes endpoint traffic. Confirm a static worker can serve only an endpoint whose current deployment phase is `legacy_static`.
 
 ## Durable Revision Image Coordinator
 

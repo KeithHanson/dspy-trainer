@@ -5,6 +5,7 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import tarfile
@@ -573,7 +574,11 @@ def calculate_revision_image_build_identity(
     root = _validated_snapshot_root(spec.source_snapshot_path)
     settings = _load_source_settings(root)
     return _build_identity(spec, settings)
-def write_build_context(spec: RevisionImageBuildSpec, output: BinaryIO) -> GeneratedBuildContext:
+
+
+def write_build_context(
+    spec: RevisionImageBuildSpec, output: BinaryIO
+) -> GeneratedBuildContext:
     _validate_spec(spec)
     root = _validated_snapshot_root(spec.source_snapshot_path)
     settings = _load_source_settings(root)
@@ -582,10 +587,14 @@ def write_build_context(spec: RevisionImageBuildSpec, output: BinaryIO) -> Gener
     dockerfile = _generated_dockerfile(
         base_image_id=spec.base_image_id,
         labels=labels,
+        build_id=spec.build_id,
+        revision_id=spec.revision_id,
         system_dependency_commands=settings.system_dependency_commands,
         has_requirements=bool(settings.requirements_bytes),
     )
-    entrypoint = _generated_entrypoint()
+    entrypoint = _generated_entrypoint(
+        build_id=spec.build_id, revision_id=spec.revision_id
+    )
     entries = _collect_source_entries(root, settings.include_files)
 
     output.seek(0)
@@ -600,7 +609,9 @@ def write_build_context(spec: RevisionImageBuildSpec, output: BinaryIO) -> Gener
             if entry.kind == "directory":
                 archive_name = f"{archive_name}/"
                 _hash_source_entry(entry, source_digest)
-                _add_bytes(archive, archive_name, b"", mode=entry.mode, type_=tarfile.DIRTYPE)
+                _add_bytes(
+                    archive, archive_name, b"", mode=entry.mode, type_=tarfile.DIRTYPE
+                )
             elif entry.kind == "symlink":
                 _hash_source_entry(entry, source_digest)
                 _add_symlink(archive, archive_name, entry.link_target or "")
@@ -1042,6 +1053,8 @@ def _generated_dockerfile(
     *,
     base_image_id: str,
     labels: Mapping[str, str],
+    build_id: str,
+    revision_id: str,
     system_dependency_commands: tuple[str, ...],
     has_requirements: bool,
 ) -> str:
@@ -1055,7 +1068,9 @@ def _generated_dockerfile(
         ]
     )
     for command in system_dependency_commands:
-        lines.append(f"RUN {json.dumps(['/bin/sh', '-eu', '-c', command], separators=(',', ':'))}")
+        lines.append(
+            f"RUN {json.dumps(['/bin/sh', '-eu', '-c', command], separators=(',', ':'))}"
+        )
     if has_requirements:
         lines.append(
             "RUN "
@@ -1086,6 +1101,9 @@ def _generated_dockerfile(
             ),
             f"COPY {GENERATED_ENTRYPOINT_NAME} {GENERATED_ENTRYPOINT_PATH}",
             f"RUN chmod 0555 {GENERATED_ENTRYPOINT_PATH}",
+            "ENV DSPY_TRAINER_ENDPOINT_WORKER_MODE=managed_image",
+            f"ENV DSPY_TRAINER_BAKED_BUILD_ID={build_id}",
+            f"ENV DSPY_TRAINER_BAKED_REVISION_ID={revision_id}",
             f"ENV DSPY_TRAINER_BUNDLE_PATH={BUNDLE_IMAGE_PATH}",
             f"ENTRYPOINT {json.dumps([GENERATED_ENTRYPOINT_PATH], separators=(',', ':'))}",
             "CMD []",
@@ -1095,13 +1113,31 @@ def _generated_dockerfile(
     return "\n".join(lines)
 
 
-def _generated_entrypoint() -> str:
+def _generated_entrypoint(*, build_id: str, revision_id: str) -> str:
     return "\n".join(
         [
             "#!/bin/sh",
             "set -eu",
-            f"export DSPY_TRAINER_BUNDLE_PATH={BUNDLE_IMAGE_PATH}",
-            'exec python /app/backend/endpoint_worker.py "$@"',
+            ': "${DSPY_TRAINER_ENDPOINT_ID:?DSPY_TRAINER_ENDPOINT_ID is required}"',
+            ': "${DSPY_TRAINER_POSTGRES_DSN:?DSPY_TRAINER_POSTGRES_DSN is required}"',
+            "exec env -i \\",
+            '  PATH="${PATH:-/usr/local/bin:/usr/bin:/bin}" \\',
+            '  HOME="${HOME:-/tmp}" \\',
+            '  LANG="${LANG:-C.UTF-8}" \\',
+            '  DSPY_TRAINER_ENDPOINT_WORKER_MODE="managed_image" \\',
+            '  DSPY_TRAINER_ENDPOINT_ID="$DSPY_TRAINER_ENDPOINT_ID" \\',
+            '  DSPY_TRAINER_WORKER_ID="${DSPY_TRAINER_WORKER_ID:-}" \\',
+            f"  DSPY_TRAINER_BAKED_BUILD_ID={shlex.quote(build_id)} \\",
+            f"  DSPY_TRAINER_BAKED_REVISION_ID={shlex.quote(revision_id)} \\",
+            f'  DSPY_TRAINER_BUNDLE_PATH="{BUNDLE_IMAGE_PATH}" \\',
+            '  DSPY_TRAINER_POSTGRES_DSN="$DSPY_TRAINER_POSTGRES_DSN" \\',
+            '  DSPY_TRAINER_REDIS_URL="${DSPY_TRAINER_REDIS_URL:-redis://redis:6379/0}" \\',
+            '  DSPY_TRAINER_MLFLOW_TRACKING_URI="${DSPY_TRAINER_MLFLOW_TRACKING_URI:-http://mlflow:5000}" \\',
+            '  DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS="${DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS:-300}" \\',
+            '  DSPY_TRAINER_ENDPOINT_QUEUE_PREFIX="${DSPY_TRAINER_ENDPOINT_QUEUE_PREFIX:-dspy-trainer:endpoint-queues}" \\',
+            '  DSPY_TRAINER_ENDPOINT_INVOCATION_CHANNEL_PREFIX="${DSPY_TRAINER_ENDPOINT_INVOCATION_CHANNEL_PREFIX:-dspy-trainer:endpoint-invocations}" \\',
+            "  ${DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY:+DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY=$DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY} \\",
+            '  python /app/backend/endpoint_worker.py "$@"',
             "",
         ]
     )
