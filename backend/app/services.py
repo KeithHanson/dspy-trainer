@@ -2429,7 +2429,10 @@ class AppServices:
         bundle_version: str | None = None,
         checkout_path: str | None = None,
         frozen_source: FrozenRevisionSource | None = None,
+        persist: bool = True,
     ) -> str | None:
+        if not persist:
+            return None
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
         revision_id: str | None = None
@@ -2469,7 +2472,72 @@ class AppServices:
                     ),
                 )
         return revision_id
-
+    async def _finalize_synced_module(
+        self,
+        module_id: str,
+        *,
+        current_commit_sha: str,
+        bundle_name: str | None,
+        bundle_version: str | None,
+        checkout_path: str,
+        frozen_source: FrozenRevisionSource,
+        diagnostics: list[dict[str, Any]],
+    ) -> str:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            async with conn.transaction():
+                revision_id = await self._create_bundle_revision(
+                    conn,
+                    module_id,
+                    commit_sha=current_commit_sha,
+                    bundle_name=bundle_name,
+                    bundle_version=bundle_version,
+                    source_event="sync",
+                    checkout_path=checkout_path,
+                    source_snapshot_path=str(frozen_source.path),
+                    source_content_digest=frozen_source.content_digest,
+                )
+                module_result = await conn.execute(
+                    """
+                    update module_imports
+                    set current_commit_sha = $2,
+                        upstream_commit_sha = $2,
+                        sync_status = 'synced',
+                        last_sync_error = null,
+                        last_synced_at = now(),
+                        bundle_name = coalesce($3, bundle_name),
+                        bundle_version = coalesce($4, bundle_version),
+                        updated_at = now()
+                    where id = $1
+                    """,
+                    module_id,
+                    current_commit_sha,
+                    bundle_name,
+                    bundle_version,
+                )
+                if module_result == "UPDATE 0":
+                    raise RuntimeError("module not found")
+                validation_result = await conn.execute(
+                    """
+                    update runtime_bundles
+                    set validation_status = 'passed',
+                        diagnostics = $2::jsonb,
+                        validation_revision_id = $3,
+                        validation_commit_sha = $4,
+                        validation_bundle_version = $5,
+                        updated_at = now()
+                    where module_import_id = $1
+                    """,
+                    module_id,
+                    __import__("json").dumps(diagnostics),
+                    revision_id,
+                    current_commit_sha,
+                    bundle_version,
+                )
+                if validation_result == "UPDATE 0":
+                    raise RuntimeError("module runtime not found")
+        return revision_id
     async def resolve_module_execution_state(
         self,
         module_id: str,
@@ -2577,7 +2645,9 @@ class AppServices:
                 shutil.rmtree(checkout_path, ignore_errors=True)
             raise
 
-    async def refresh_module_sync_status(self, module_id: str) -> dict[str, Any]:
+    async def refresh_module_sync_status(
+        self, module_id: str, *, persist: bool = True
+    ) -> dict[str, Any]:
         module = await self._get_module_source_record(module_id)
         if module is None:
             raise ValueError("module not found")
@@ -2614,6 +2684,7 @@ class AppServices:
                 upstream_commit_sha=upstream_commit_sha,
                 sync_status=sync_status,
                 last_sync_error=None,
+                persist=persist,
             )
             return {
                 "module_id": module_id,
@@ -2634,6 +2705,7 @@ class AppServices:
                 upstream_commit_sha=upstream_commit_sha or current_commit_sha,
                 sync_status="sync_error",
                 last_sync_error=str(exc),
+                persist=persist,
             )
             raise ModuleSyncError(
                 str(exc),
@@ -2650,7 +2722,7 @@ class AppServices:
             )
 
     async def sync_module(self, module_id: str) -> dict[str, Any]:
-        sync_state = await self.refresh_module_sync_status(module_id)
+        sync_state = await self.refresh_module_sync_status(module_id, persist=False)
         module = await self._get_module_source_record(module_id)
         if module is None:
             raise ValueError("module not found")
@@ -2695,38 +2767,33 @@ class AppServices:
                 if isinstance(report.metadata.get("version"), str)
                 else None
             )
-            revision_id = await self._set_module_sync_state(
+            revision_id = await self._finalize_synced_module(
                 module_id,
                 current_commit_sha=current_commit_sha,
-                upstream_commit_sha=current_commit_sha,
-                sync_status="synced",
-                last_sync_error=None,
-                synced_now=True,
-                source_event="sync",
                 bundle_name=bundle_name,
                 bundle_version=bundle_version,
                 checkout_path=str(bundle_root),
                 frozen_source=frozen_source,
+                diagnostics=report.diagnostics,
             )
-            if revision_id is None:
-                raise RuntimeError("synced revision could not be recorded")
-            await self._update_module_bundle_metadata_record(
-                module_id,
-                bundle_name=bundle_name,
-                bundle_version=bundle_version,
-            )
-            found = await self.set_validation_status(
-                module_id,
-                "passed",
-                report.diagnostics,
-                revision_id=revision_id,
-                commit_sha=current_commit_sha,
-                bundle_version=bundle_version,
-            )
-            if not found:
-                raise RuntimeError("module not found")
-            await self._reconcile_revision_builds(trigger="sync")
-            image_build = await self.get_revision_image_state(revision_id)
+            checkout_advanced = False
+            try:
+                await self._reconcile_revision_builds(trigger="sync")
+                image_build = await self.get_revision_image_state(revision_id)
+            except Exception as exc:
+                logger.exception(
+                    "revision_image_post_finalize_failed trigger=sync module_id=%s revision_id=%s",
+                    module_id,
+                    revision_id,
+                )
+                image_build = {
+                    "status": "enqueue_failed",
+                    "eligible": True,
+                    "error": str(exc),
+                    "current_build": None,
+                    "ready_build": None,
+                    "history_count": 0,
+                }
             return {
                 "module_id": module_id,
                 "sync_status": "synced",
@@ -2753,12 +2820,10 @@ class AppServices:
                         module_id,
                         previous_commit_sha,
                     )
-            await self._set_module_sync_state(
+            logger.warning(
+                "module_sync_source_finalization_failed module_id=%s: %s",
                 module_id,
-                current_commit_sha=str(module.get("current_commit_sha") or "").strip(),
-                upstream_commit_sha=str(sync_state.get("upstream_commit_sha") or module.get("upstream_commit_sha") or "").strip(),
-                sync_status="sync_error",
-                last_sync_error=str(exc),
+                exc,
             )
             raise ModuleSyncError(
                 str(exc),
