@@ -1120,13 +1120,26 @@ class AppServices:
     def _describe_endpoint_worker_visibility(cls, worker: dict[str, Any]) -> dict[str, Any]:
         status = str(worker.get("status") or "unknown").strip().lower() or "unknown"
         assigned_endpoint_id = str(worker.get("assigned_endpoint_id") or "").strip() or None
-        endpoint_id = str(worker.get("endpoint_id") or "").strip() or assigned_endpoint_id
+        reported_endpoint_id = str(worker.get("endpoint_id") or "").strip() or None
+        endpoint_id = reported_endpoint_id or assigned_endpoint_id
+        execution_mode = str(worker.get("execution_mode") or "legacy_static").strip()
+        managed_image = execution_mode == "managed_image"
+        endpoint_matches = bool(reported_endpoint_id if managed_image else endpoint_id)
+        desired_build_id = str(worker.get("desired_build_id") or "").strip() or None
+        warmed_build_id = str(worker.get("warmed_build_id") or "").strip() or None
         desired_revision_id = str(worker.get("desired_revision_id") or "").strip() or None
         warmed_revision_id = str(worker.get("warmed_revision_id") or "").strip() or None
         task_id = str(worker.get("task_id") or "").strip() or None
-        last_seen = str(worker.get("last_seen") or "").strip() or None
-        revision_matches = bool(desired_revision_id and warmed_revision_id and desired_revision_id == warmed_revision_id)
-
+        revision_matches = bool(
+            desired_revision_id
+            and warmed_revision_id
+            and desired_revision_id == warmed_revision_id
+        )
+        build_matches = bool(
+            desired_build_id and warmed_build_id and desired_build_id == warmed_build_id
+        )
+        provenance_matches = revision_matches and (not managed_image or build_matches)
+        ready = endpoint_matches and provenance_matches
         if status == "idle":
             return {
                 "operator_state": "idle",
@@ -1136,7 +1149,9 @@ class AppServices:
                 "is_revision_ready": False,
             }
         if status == "preparing":
-            if warmed_revision_id:
+            if managed_image:
+                summary = "Waiting for the assigned baked endpoint image to become ready."
+            elif warmed_revision_id:
                 summary = (
                     f"Installing dependencies for desired revision {cls._format_revision_label(desired_revision_id)} "
                     f"(currently warmed on {cls._format_revision_label(warmed_revision_id)})."
@@ -1151,19 +1166,25 @@ class AppServices:
                 "is_revision_ready": False,
             }
         if status == "stale":
-            warmed_text = cls._format_revision_label(warmed_revision_id) if warmed_revision_id else "none"
-            if endpoint_id and desired_revision_id and desired_revision_id != warmed_revision_id:
+            if endpoint_id and not endpoint_matches:
+                deploy_state = "endpoint_mismatch"
+                summary = "Heartbeat expired after reporting an endpoint other than its control-plane assignment."
+            elif endpoint_id and desired_revision_id != warmed_revision_id:
                 deploy_state = "revision_mismatch"
                 summary = (
                     f"Heartbeat expired. Assigned endpoint expects revision {cls._format_revision_label(desired_revision_id)}; "
-                    f"worker was last warmed on {warmed_text}."
+                    f"worker was last warmed on {cls._format_revision_label(warmed_revision_id)}."
                 )
-            elif endpoint_id:
-                deploy_state = "offline"
-                summary = "Heartbeat expired for an assigned endpoint worker."
+            elif managed_image and desired_build_id != warmed_build_id:
+                deploy_state = "build_mismatch"
+                summary = "Heartbeat expired with desired and warmed image builds mismatched."
             else:
                 deploy_state = "offline"
-                summary = "Heartbeat expired while waiting for an endpoint assignment."
+                summary = (
+                    "Heartbeat expired for an assigned endpoint worker."
+                    if endpoint_id
+                    else "Heartbeat expired while waiting for an endpoint assignment."
+                )
             return {
                 "operator_state": "stale",
                 "state_label": "Stale",
@@ -1172,43 +1193,62 @@ class AppServices:
                 "is_revision_ready": False,
             }
         if status == "listening":
-            if endpoint_id and revision_matches:
+            if ready:
                 summary = f"Ready for traffic on revision {cls._format_revision_label(desired_revision_id)}."
+                if managed_image:
+                    summary = f"{summary} Image build {desired_build_id}."
                 deploy_state = "ready"
-            elif endpoint_id and desired_revision_id and warmed_revision_id:
+            elif endpoint_id and not endpoint_matches:
+                summary = "Listening worker endpoint identity does not match its control-plane assignment."
+                deploy_state = "endpoint_mismatch"
+            elif desired_revision_id and warmed_revision_id and not revision_matches:
                 summary = (
                     f"Heartbeat says listening, but desired revision {cls._format_revision_label(desired_revision_id)} "
                     f"does not match warmed revision {cls._format_revision_label(warmed_revision_id)}."
                 )
                 deploy_state = "revision_mismatch"
+            elif managed_image and desired_build_id and warmed_build_id and not build_matches:
+                summary = "Heartbeat says listening, but desired and warmed image builds do not match."
+                deploy_state = "build_mismatch"
+            elif managed_image and (not desired_build_id or not warmed_build_id):
+                summary = "Listening managed worker is missing desired or warmed image build metadata."
+                deploy_state = "build_metadata_missing"
             elif endpoint_id:
                 if desired_revision_id:
                     summary = (
-                        f"Listening for assigned endpoint traffic, but warmed revision metadata is missing for desired revision "
-                        f"{cls._format_revision_label(desired_revision_id)}."
+                        "Listening for assigned endpoint traffic, but warmed revision metadata is missing for desired "
+                        f"revision {cls._format_revision_label(desired_revision_id)}."
                     )
                 elif warmed_revision_id:
                     summary = (
-                        f"Listening for assigned endpoint traffic, but desired revision metadata is missing "
+                        "Listening for assigned endpoint traffic, but desired revision metadata is missing "
                         f"(worker last warmed on {cls._format_revision_label(warmed_revision_id)})."
                     )
                 else:
-                    summary = "Listening for assigned endpoint traffic, but revision metadata has not been reported yet."
+                    summary = (
+                        "Listening for assigned endpoint traffic, but revision metadata has not been reported yet."
+                    )
                 deploy_state = "revision_metadata_missing"
             else:
-                summary = "Ready, but no endpoint revision is currently assigned."
-                deploy_state = "ready"
+                summary = "Listening worker has no endpoint assignment."
+                deploy_state = "unassigned"
             return {
                 "operator_state": "listening",
                 "state_label": "Listening",
                 "deploy_state": deploy_state,
                 "state_summary": summary,
-                "is_revision_ready": bool(endpoint_id and revision_matches),
+                "is_revision_ready": ready,
             }
         if status == "running":
-            if revision_matches:
+            if ready:
                 summary = f"Serving an invocation on revision {cls._format_revision_label(desired_revision_id)}."
                 deploy_state = "serving"
+            elif endpoint_id and not endpoint_matches:
+                summary = "Serving while reported endpoint identity differs from the control-plane assignment."
+                deploy_state = "serving_endpoint_mismatch"
+            elif managed_image and not build_matches:
+                summary = "Serving while desired and warmed image builds differ or are missing."
+                deploy_state = "serving_stale_build"
             elif desired_revision_id or warmed_revision_id:
                 summary = (
                     f"Serving an invocation while desired revision {cls._format_revision_label(desired_revision_id)} "
@@ -1216,8 +1256,8 @@ class AppServices:
                 )
                 deploy_state = "serving_stale_revision"
             else:
-                summary = "Serving an invocation."
-                deploy_state = "serving"
+                summary = "Serving an invocation without complete revision metadata."
+                deploy_state = "serving_unpinned"
             if task_id:
                 summary = f"{summary} Task {task_id}."
             return {
@@ -1225,7 +1265,7 @@ class AppServices:
                 "state_label": "Running",
                 "deploy_state": deploy_state,
                 "state_summary": summary,
-                "is_revision_ready": revision_matches,
+                "is_revision_ready": ready,
             }
         if status == "failed":
             summary = "Warmup or invocation failed."

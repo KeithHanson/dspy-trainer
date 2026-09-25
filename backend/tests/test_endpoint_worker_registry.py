@@ -779,6 +779,66 @@ def test_list_endpoint_workers_registry_summary_excludes_listening_revision_mism
     asyncio.run(scenario())
 
 
+def test_managed_registry_readiness_requires_matching_build_and_revision():
+    async def scenario() -> None:
+        services = _make_services()
+        now = datetime(2099, 1, 1, tzinfo=timezone.utc)
+
+        for index in (1, 2):
+            await services.register_endpoint_worker(
+                worker_id=f"endpoint-worker-{index}",
+                runtime_instance_id=f"runtime-{index}",
+                status="idle",
+                now=now,
+            )
+            await services._set_endpoint_worker_assignment(
+                f"endpoint-worker-{index}", f"endpoint-{index}"
+            )
+
+        await services.heartbeat_endpoint_worker(
+            "endpoint-worker-1",
+            runtime_instance_id="runtime-1",
+            status="listening",
+            runtime_metadata={
+                "execution_mode": "managed_image",
+                "endpoint_id": "endpoint-1",
+                "desired_build_id": "build-1",
+                "warmed_build_id": "build-2",
+                "desired_revision_id": "rev-1",
+                "warmed_revision_id": "rev-1",
+                "bundle_path": "/opt/dspy-bundle",
+            },
+            now=now + timedelta(seconds=1),
+        )
+        await services.heartbeat_endpoint_worker(
+            "endpoint-worker-2",
+            runtime_instance_id="runtime-2",
+            status="listening",
+            runtime_metadata={
+                "execution_mode": "managed_image",
+                "endpoint_id": "endpoint-2",
+                "desired_build_id": "build-3",
+                "warmed_build_id": "build-3",
+                "desired_revision_id": "rev-2",
+                "warmed_revision_id": "rev-2",
+                "bundle_path": "/opt/dspy-bundle",
+            },
+            now=now + timedelta(seconds=1),
+        )
+
+        payload = await services.list_endpoint_workers(now=now + timedelta(seconds=1))
+
+        assert payload["available_workers"] == 1
+        assert payload["ready_workers"] == 1
+        assert payload["summary"]["ready_workers"] == 1
+        assert payload["items"][0]["deploy_state"] == "build_mismatch"
+        assert payload["items"][0]["is_revision_ready"] is False
+        assert payload["items"][1]["deploy_state"] == "ready"
+        assert payload["items"][1]["is_revision_ready"] is True
+
+    asyncio.run(scenario())
+
+
 def test_list_endpoint_workers_registry_marks_assigned_listening_workers_without_revision_metadata():
     async def scenario() -> None:
         services = _make_services()
