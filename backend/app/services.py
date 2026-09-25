@@ -1635,7 +1635,7 @@ class AppServices:
                   claim_expires_at timestamptz,
                   build_log text not null default '' check (octet_length(build_log) <= {MAX_BUILD_LOG_BYTES}),
                   failure_reason text check (failure_reason is null or char_length(failure_reason) <= {MAX_FAILURE_REASON_CHARS}),
-                  retry_of_build_id text references revision_image_builds(id) on delete restrict,
+                  retry_of_build_id text,
                   queued_at timestamptz not null,
                   started_at timestamptz,
                   finished_at timestamptz,
@@ -1643,8 +1643,12 @@ class AppServices:
                   updated_at timestamptz not null,
                   unique (revision_id, generation),
                   unique (id, revision_id),
-                  check ((claim_owner is null) = (claim_expires_at is null)),
-                  check (claim_owner is null or status = 'building'),
+                  foreign key (retry_of_build_id, revision_id)
+                    references revision_image_builds(id, revision_id) on delete restrict,
+                  check (
+                    (status = 'building' and claim_owner is not null and claim_expires_at is not null)
+                    or (status <> 'building' and claim_owner is null and claim_expires_at is null)
+                  ),
                   check (status <> 'ready' or (image_id is not null or image_digest is not null))
                 );
                 """
@@ -1689,19 +1693,24 @@ class AppServices:
                      or (old.status = 'pruned' and new.status <> 'pruned') then
                     raise exception 'invalid revision image build transition: % -> %', old.status, new.status;
                   end if;
+                  if new.id is distinct from old.id
+                     or new.revision_id is distinct from old.revision_id
+                     or new.generation is distinct from old.generation
+                     or new.source_commit is distinct from old.source_commit
+                     or new.source_snapshot_path is distinct from old.source_snapshot_path
+                     or new.source_content_digest is distinct from old.source_content_digest
+                     or new.local_tag is distinct from old.local_tag
+                     or new.base_image_id is distinct from old.base_image_id
+                     or new.retry_of_build_id is distinct from old.retry_of_build_id
+                     or new.queued_at is distinct from old.queued_at
+                     or new.created_at is distinct from old.created_at then
+                    raise exception 'revision image build identity is immutable';
+                  end if;
                   if old.status in ('ready', 'superseded', 'pruned') and (
-                    new.revision_id is distinct from old.revision_id
-                    or new.generation is distinct from old.generation
-                    or new.source_commit is distinct from old.source_commit
-                    or new.source_snapshot_path is distinct from old.source_snapshot_path
-                    or new.source_content_digest is distinct from old.source_content_digest
-                    or new.local_tag is distinct from old.local_tag
-                    or new.image_id is distinct from old.image_id
+                    new.image_id is distinct from old.image_id
                     or new.image_digest is distinct from old.image_digest
-                    or new.base_image_id is distinct from old.base_image_id
-                    or new.retry_of_build_id is distinct from old.retry_of_build_id
                   ) then
-                    raise exception 'ready revision image build identity is immutable';
+                    raise exception 'ready revision image build result is immutable';
                   end if;
                   return new;
                 end;
@@ -1737,6 +1746,7 @@ class AppServices:
                   created_at timestamptz not null,
                   updated_at timestamptz not null,
                   unique (endpoint_id, rollout_generation),
+                  unique (id, endpoint_id),
                   foreign key (active_build_id, active_revision_id)
                     references revision_image_builds(id, revision_id) match full on delete restrict,
                   foreign key (target_build_id, target_revision_id)
@@ -1774,7 +1784,7 @@ class AppServices:
                   container_id text primary key,
                   container_name text not null unique,
                   endpoint_id text not null references bundle_endpoints(id) on delete restrict,
-                  deployment_id text not null references endpoint_deployments(id) on delete restrict,
+                  deployment_id text not null,
                   build_id text not null,
                   revision_id text not null,
                   slot int not null check (slot >= 0),
@@ -1786,6 +1796,8 @@ class AppServices:
                   failure_reason text check (failure_reason is null or char_length(failure_reason) <= {MAX_FAILURE_REASON_CHARS}),
                   created_at timestamptz not null,
                   updated_at timestamptz not null,
+                  foreign key (deployment_id, endpoint_id)
+                    references endpoint_deployments(id, endpoint_id) match full on delete restrict,
                   foreign key (build_id, revision_id)
                     references revision_image_builds(id, revision_id) match full on delete restrict
                 );
@@ -3234,29 +3246,30 @@ class AppServices:
         preview = key[-6:]
         now = datetime.now(timezone.utc)
         async with self.postgres_pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                insert into bundle_endpoints (id, module_import_id, lm_profile_id, pinned_worker_count, name, key_hash, key_preview, created_at, updated_at)
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                returning id, module_import_id, lm_profile_id, pinned_worker_count, name, key_preview, created_at, updated_at
-                """,
-                endpoint_id,
-                module_id,
-                normalized_lm_profile_id,
-                normalized_pinned_worker_count,
-                normalized_name,
-                key_hash,
-                preview,
-                now,
-                now,
-            )
-            await self._ensure_legacy_endpoint_deployment(
-                conn,
-                endpoint_id=endpoint_id,
-                desired_replica_count=normalized_pinned_worker_count,
-                created_at=now,
-                updated_at=now,
-            )
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    insert into bundle_endpoints (id, module_import_id, lm_profile_id, pinned_worker_count, name, key_hash, key_preview, created_at, updated_at)
+                    values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    returning id, module_import_id, lm_profile_id, pinned_worker_count, name, key_preview, created_at, updated_at
+                    """,
+                    endpoint_id,
+                    module_id,
+                    normalized_lm_profile_id,
+                    normalized_pinned_worker_count,
+                    normalized_name,
+                    key_hash,
+                    preview,
+                    now,
+                    now,
+                )
+                await self._ensure_legacy_endpoint_deployment(
+                    conn,
+                    endpoint_id=endpoint_id,
+                    desired_replica_count=normalized_pinned_worker_count,
+                    created_at=now,
+                    updated_at=now,
+                )
         payload = await self.get_bundle_endpoint(str(row["id"]))
         if payload is None:
             return None
@@ -3299,30 +3312,31 @@ class AppServices:
                 raise ValueError("lm profile not found")
         now = datetime.now(timezone.utc)
         async with self.postgres_pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                update bundle_endpoints
-                set name = $3,
-                    lm_profile_id = $4,
-                    pinned_worker_count = $5,
-                    updated_at = $6
-                where id = $1 and module_import_id = $2
-                returning id, module_import_id, lm_profile_id, pinned_worker_count, name, key_preview, created_at, updated_at
-                """,
-                endpoint_id,
-                module_id,
-                normalized_name,
-                normalized_lm_profile_id,
-                normalized_pinned_worker_count,
-                now,
-            )
-            if row is not None:
-                await self._update_legacy_endpoint_deployment_replica_count(
-                    conn,
-                    endpoint_id=endpoint_id,
-                    desired_replica_count=normalized_pinned_worker_count,
-                    updated_at=now,
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    update bundle_endpoints
+                    set name = $3,
+                        lm_profile_id = $4,
+                        pinned_worker_count = $5,
+                        updated_at = $6
+                    where id = $1 and module_import_id = $2
+                    returning id, module_import_id, lm_profile_id, pinned_worker_count, name, key_preview, created_at, updated_at
+                    """,
+                    endpoint_id,
+                    module_id,
+                    normalized_name,
+                    normalized_lm_profile_id,
+                    normalized_pinned_worker_count,
+                    now,
                 )
+                if row is not None:
+                    await self._update_legacy_endpoint_deployment_replica_count(
+                        conn,
+                        endpoint_id=endpoint_id,
+                        desired_replica_count=normalized_pinned_worker_count,
+                        updated_at=now,
+                    )
         if row is None:
             return None
         payload = await self.get_bundle_endpoint(str(row["id"]))
@@ -3357,31 +3371,32 @@ class AppServices:
             raise ValueError("lm profile not found")
         now = datetime.now(timezone.utc)
         async with self.postgres_pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                update bundle_endpoints
-                set name = $2,
-                    module_import_id = $3,
-                    lm_profile_id = $4,
-                    pinned_worker_count = $5,
-                    updated_at = $6
-                where id = $1
-                returning id, module_import_id, lm_profile_id, pinned_worker_count, name, key_preview, created_at, updated_at
-                """,
-                endpoint_id,
-                next_name,
-                next_module_id,
-                normalized_lm_profile_id,
-                normalized_pinned_worker_count,
-                now,
-            )
-            if row is not None:
-                await self._update_legacy_endpoint_deployment_replica_count(
-                    conn,
-                    endpoint_id=endpoint_id,
-                    desired_replica_count=normalized_pinned_worker_count,
-                    updated_at=now,
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    update bundle_endpoints
+                    set name = $2,
+                        module_import_id = $3,
+                        lm_profile_id = $4,
+                        pinned_worker_count = $5,
+                        updated_at = $6
+                    where id = $1
+                    returning id, module_import_id, lm_profile_id, pinned_worker_count, name, key_preview, created_at, updated_at
+                    """,
+                    endpoint_id,
+                    next_name,
+                    next_module_id,
+                    normalized_lm_profile_id,
+                    normalized_pinned_worker_count,
+                    now,
                 )
+                if row is not None:
+                    await self._update_legacy_endpoint_deployment_replica_count(
+                        conn,
+                        endpoint_id=endpoint_id,
+                        desired_replica_count=normalized_pinned_worker_count,
+                        updated_at=now,
+                    )
         if row is None:
             return None
         payload = await self.get_bundle_endpoint(str(row["id"]))
