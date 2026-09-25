@@ -120,6 +120,25 @@ docker compose build --pull backend worker endpoint-worker
 docker compose up -d --force-recreate backend worker endpoint-worker
 ```
 
+## Revision Image Builder Contract
+
+The revision-image builder is a library seam for the dedicated deployer; it does not poll queues, elect a leader, start services, create endpoint containers, or run Compose. Callers supply one immutable snapshot directory, its canonical `sha256:` content digest, build/module/revision identity, stack owner (the Compose project name), platform version, image repository, and an immutable local backend image ID. The Docker SDK adapter submits one standard Engine build with cache enabled, `pull=false`, no platform override, and no build arguments, then inspects the returned image ID. Missing or mismatched provenance labels make the result failed and leave no ready image ID.
+
+The generated context contains only `Dockerfile`, `dspy-trainer-endpoint-worker`, and the selected source under `bundle/`. Tar ordering and metadata are normalized. `.git` and tool caches are always omitted; `.env*`, key material, and credential files are omitted unless an exact in-root file is declared by `bundle.toml` under `[image_build] include_files`. Escaping or absolute symlinks, special files, directory overrides, digest mismatches, and attempts to restore control directories are rejected before Docker is called.
+
+The generated Dockerfile uses the supplied immutable backend image ID directly in `FROM`, applies the complete `io.dspy-trainer.*` label set, copies source to `/opt/dspy-bundle`, executes each `runtime.system_dependency_commands` entry in order, installs `requirements.txt` afterward when present, captures sorted `pip freeze --all` output at `/opt/dspy-trainer/python-manifest.txt`, and installs the baked endpoint-worker entrypoint. Tags are `<repository>:<normalized-revision>-<24-character-build-digest-prefix>`; build ID and generation are digest inputs, so generations cannot reuse a tag.
+
+### Deployment-host Acceptance (Do Not Run on Development Workstations)
+
+On the deployment host, use a harmless validated fixture snapshot containing one observable system command and one small Python requirement. Calculate its digest with `calculate_source_content_digest`, build it through `RevisionImageBuilder(DockerSdkImageAdapter.from_env())`, and retain the returned tag, image ID, labels, bounded log, and manifest digest. Then:
+
+1. Confirm the result is `ready`, the inspected ID equals the returned immutable ID, and every required `io.dspy-trainer.*` label exactly matches the supplied build identity.
+2. Inspect `/opt/dspy-bundle` and `/opt/dspy-trainer/python-manifest.txt` in the built image to confirm all non-excluded fixture assets, the system dependency, and the Python requirement are baked.
+3. Search the context fixture, image config, labels, and `docker image history --no-trunc` output for sentinel provider-key, GitHub-token, module-environment, and host-environment values; none may occur.
+4. Repeat with the same revision and a new build ID/generation; confirm the tag and image ID are distinct and the first tag still resolves to its original ID.
+5. Run failing system-command and requirements fixtures; confirm each result is `failed`, keeps bounded useful logs, and returns no ready image ID.
+6. Confirm the daemon was not contacted for an escaping-symlink or source-digest-mismatch fixture, and confirm no registry login, pull, or push occurs.
+
 ## Health Verification
 
 ### Compose Health Status
