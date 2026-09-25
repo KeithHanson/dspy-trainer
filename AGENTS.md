@@ -12,7 +12,8 @@ This section MUST remain up to date after you complete a task.
 - `.env.sample`: Source of truth for required environment variables.
 - `docs/COMPOSE_RUNBOOK.md`: Current compose bootstrap, health checks, and day-2 operations.
 - `backend/app/config.py`: Validated runtime settings, including the deployment-wide bundle-install concurrency limit.
-- `backend/app/services.py`: Central runtime services, PostgreSQL schema/bootstrap, revision-image build/deployment persistence, and bundle-install advisory-lock admission.
+- `backend/app/main.py`: FastAPI lifecycle and HTTP contracts, including revision-image status, bounded logs, retry, and rebuild-all operator APIs.
+- `backend/app/services.py`: Central runtime services, PostgreSQL schema/bootstrap, exact validated-source revision snapshots, revision-image coordination/persistence, and bundle-install advisory-lock admission.
 - `backend/app/revision_images.py`: Reusable revision-image build, endpoint-deployment, and managed-container state transitions and payload builders.
 - `backend/app/revision_image_builder.py`: Deterministic revision snapshot context generation, Docker SDK adapter, provenance labels, and inspected local-image build results.
 - `backend/app/revision_image_coordinator.py`: PostgreSQL advisory leadership, durable claim/recovery/fencing, priority ordering, supersession, retry/rebuild, and coordinator shutdown logic.

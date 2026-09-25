@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import main as main_mod
+from app.revision_image_coordinator import RevisionImageEnqueueError
 from app.services import EndpointUnavailableError, ModuleSyncError, ReadinessStatus
 
 
@@ -168,11 +169,21 @@ async def fake_set_validation_status(self, module_id, status, diagnostics, **kwa
     STORE[module_id]["status"] = "validated" if status == "passed" else "validation_failed"
     STORE[module_id]["diagnostics"] = diagnostics
     STORE[module_id]["validation_revision_id"] = kwargs.get("revision_id")
-    STORE[module_id]["validation_commit_sha"] = kwargs.get("commit_sha")
     STORE[module_id]["validation_bundle_version"] = kwargs.get("bundle_version")
     return True
 
 
+async def fake_persist_module_validation(self, module_id, *, module_state, report):
+    status = "passed" if report.passed else "failed"
+    return await fake_set_validation_status(
+        self,
+        module_id,
+        status,
+        report.diagnostics,
+        revision_id=module_state.get("bundle_revision_id"),
+        commit_sha=module_state.get("bundle_commit_sha"),
+        bundle_version=module_state.get("bundle_version"),
+    )
 async def fake_set_smoke_status(self, module_id, status, diagnostics, **kwargs):
     if module_id not in STORE:
         return False
@@ -475,12 +486,27 @@ def _patch_services(monkeypatch):
     monkeypatch.setattr(main_mod.AppServices, "list_modules", fake_list_modules)
     monkeypatch.setattr(main_mod.AppServices, "list_module_revisions", fake_list_module_revisions)
     monkeypatch.setattr(main_mod.AppServices, "import_github_module", fake_import_github_module)
-    monkeypatch.setattr(main_mod.AppServices, "refresh_module_sync_status", fake_refresh_module_sync_status)
-    monkeypatch.setattr(main_mod.AppServices, "sync_module", fake_sync_module)
-    monkeypatch.setattr(main_mod.AppServices, "ensure_module_mutation_allowed", fake_ensure_module_mutation_allowed)
+    monkeypatch.setattr(main_mod.AppServices, "set_validation_status", fake_set_validation_status)
+    monkeypatch.setattr(
+        main_mod.AppServices,
+        "persist_module_validation",
+        fake_persist_module_validation,
+    )
+    monkeypatch.setattr(main_mod.AppServices, "set_smoke_status", fake_set_smoke_status)
     monkeypatch.setattr(main_mod.AppServices, "set_module_bundle_metadata", fake_set_module_bundle_metadata)
     monkeypatch.setattr(main_mod.AppServices, "set_module_source_ref", fake_set_module_source_ref)
     monkeypatch.setattr(main_mod.AppServices, "set_module_environment_config", fake_set_module_environment_config)
+    monkeypatch.setattr(
+        main_mod.AppServices,
+        "refresh_module_sync_status",
+        fake_refresh_module_sync_status,
+    )
+    monkeypatch.setattr(main_mod.AppServices, "sync_module", fake_sync_module)
+    monkeypatch.setattr(
+        main_mod.AppServices,
+        "ensure_module_mutation_allowed",
+        fake_ensure_module_mutation_allowed,
+    )
     monkeypatch.setattr(main_mod.AppServices, "get_module_runtime_environment", fake_get_module_runtime_environment)
     monkeypatch.setattr(main_mod.AppServices, "list_bundle_endpoints", fake_list_bundle_endpoints)
     monkeypatch.setattr(main_mod.AppServices, "list_all_bundle_endpoints", fake_list_all_bundle_endpoints)
@@ -1080,3 +1106,73 @@ def test_endpoint_workers_listing(monkeypatch):
     assert payload["live_workers"] == 2
     assert payload["assigned_workers"] == 2
     assert payload["items"][0]["worker_id"] == "endpoint-worker-1"
+def test_revision_image_build_status_log_retry_and_rebuild_apis(monkeypatch):
+    _patch_services(monkeypatch)
+    calls = {}
+    build = {"id": "build-1", "revision_id": "revision-1", "status": "queued", "generation": 2}
+
+    async def fake_list(self, **kwargs):
+        calls["list"] = kwargs
+        return {"items": [build], "total": 1, "limit": kwargs["limit"], "offset": kwargs["offset"]}
+
+    async def fake_get(self, build_id):
+        return build if build_id == "build-1" else None
+
+    async def fake_logs(self, build_id, *, offset, limit):
+        calls["logs"] = {"build_id": build_id, "offset": offset, "limit": limit}
+        return {"build_id": build_id, "log": "queued\n", "offset": offset, "next_offset": 7, "complete": True}
+
+    async def fake_retry(self, build_id):
+        calls["retry"] = build_id
+        return build
+
+    async def fake_rebuild_all(self):
+        return [build]
+
+    monkeypatch.setattr(main_mod.AppServices, "list_revision_image_build_statuses", fake_list)
+    monkeypatch.setattr(main_mod.AppServices, "get_revision_image_build_status", fake_get)
+    monkeypatch.setattr(main_mod.AppServices, "get_revision_image_build_logs", fake_logs)
+    monkeypatch.setattr(main_mod.AppServices, "retry_revision_image_build", fake_retry)
+    monkeypatch.setattr(main_mod.AppServices, "rebuild_all_revision_images", fake_rebuild_all)
+
+    with TestClient(main_mod.app) as client:
+        listed = client.get("/revision-image-builds", params={"module_id": "mod-1", "status": "queued", "limit": 20, "offset": 3})
+        fetched = client.get("/revision-image-builds/build-1")
+        logs = client.get("/revision-image-builds/build-1/logs", params={"offset": 4, "limit": 32})
+        retried = client.post("/revision-image-builds/build-1/retry")
+        rebuilt = client.post("/revision-image-builds/rebuild-all")
+        missing = client.get("/revision-image-builds/missing")
+
+    assert listed.status_code == 200
+    assert listed.json()["items"] == [build]
+    assert calls["list"] == {"module_id": "mod-1", "revision_id": None, "status": "queued", "limit": 20, "offset": 3}
+    assert fetched.json() == build
+    assert logs.json()["log"] == "queued\n"
+    assert calls["logs"] == {"build_id": "build-1", "offset": 4, "limit": 32}
+    assert retried.json() == build
+    assert calls["retry"] == "build-1"
+    assert rebuilt.json() == {"items": [build], "queued": 1}
+    assert missing.status_code == 404
+    assert missing.json()["code"] == "build_not_found"
+
+
+def test_revision_image_operator_conflicts_are_stable(monkeypatch):
+    _patch_services(monkeypatch)
+
+    async def fake_retry(self, build_id):
+        raise RevisionImageEnqueueError("build_conflict", "retry already queued", build_id="existing-build")
+
+    async def fake_rebuild_all(self):
+        raise RuntimeError("revision image build coordinator is not configured")
+
+    monkeypatch.setattr(main_mod.AppServices, "retry_revision_image_build", fake_retry)
+    monkeypatch.setattr(main_mod.AppServices, "rebuild_all_revision_images", fake_rebuild_all)
+
+    with TestClient(main_mod.app) as client:
+        retry = client.post("/revision-image-builds/build-1/retry")
+        rebuild = client.post("/revision-image-builds/rebuild-all")
+
+    assert retry.status_code == 409
+    assert retry.json() == {"error": "retry already queued", "code": "build_conflict", "build_id": "existing-build"}
+    assert rebuild.status_code == 503
+    assert rebuild.json()["code"] == "build_coordinator_unavailable"

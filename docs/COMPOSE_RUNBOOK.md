@@ -196,6 +196,27 @@ docker compose exec -T endpoint-worker python -c "import os; print(os.environ['D
 docker compose exec -T backend python -c "import os; print(os.environ.get('DSPY_TRAINER_GIT_COMMIT_NAME', '')); print(os.environ.get('DSPY_TRAINER_GIT_COMMIT_EMAIL', ''))"
 ```
 
+## Revision Image Build Operations
+
+Run these commands on the deployment host after the backend and deployer are healthy. They only use the backend HTTP API; operators do not need direct database or Docker access.
+
+```bash
+# List queued/active/failed/ready generations.
+curl -fsS 'http://localhost:8000/revision-image-builds?limit=50&offset=0'
+
+# Read status and bounded retained logs.
+curl -fsS 'http://localhost:8000/revision-image-builds/BUILD_ID'
+curl -fsS 'http://localhost:8000/revision-image-builds/BUILD_ID/logs?offset=0&limit=16384'
+
+# Queue a new generation for one eligible failed or ready build.
+curl -fsS -X POST 'http://localhost:8000/revision-image-builds/BUILD_ID/retry'
+
+# Queue one generation for every current eligible revision.
+curl -fsS -X POST 'http://localhost:8000/revision-image-builds/rebuild-all'
+```
+
+A `409` response with code `build_conflict` means an equivalent generation is already active or the requested build cannot be retried. `not_eligible` means the revision is no longer the current validated, synced source. A `503` with code `build_coordinator_unavailable` means the backend lacks the deployer identity/base-image configuration. Source validation and sync are independent of these build failures.
+
 ## Troubleshooting
 
 ### LM Profile Connection or Provider Auth Issues

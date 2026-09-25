@@ -780,6 +780,20 @@ See [`AGENTS.md`](AGENTS.md) for detailed contribution guidelines.
 
 ---
 
+## Revision Image Builds
+
+A successful module validation freezes the validated build context into a read-only, content-addressed snapshot before recording the revision. GitHub import and fast-forward sync create or reuse that exact revision, then enqueue its image build. Source validation/sync remains successful if the build coordinator is unavailable or the image later fails; module and revision responses expose image state separately in `image_build`.
+
+Operator APIs:
+
+- `GET /revision-image-builds` lists builds; filter with `module_id`, `revision_id`, or `status`, and paginate with `limit`/`offset`.
+- `GET /revision-image-builds/{build_id}` returns build status and provenance without the build log.
+- `GET /revision-image-builds/{build_id}/logs?offset=0&limit=16384` returns a bounded byte window of retained logs.
+- `POST /revision-image-builds/{build_id}/retry` queues a new generation for an eligible failed or ready build.
+- `POST /revision-image-builds/rebuild-all` queues one current-base generation for every currently eligible revision.
+
+Retry and rebuild-all requests reject duplicate active work with a stable `409` `build_conflict`. A previously ready image remains available while a newer generation is queued, building, or failed.
+
 ## Resources
 
 - **DSPy Framework**: https://dspy.ai

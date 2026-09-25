@@ -259,7 +259,7 @@ def test_import_github_module_clones_valid_bundle_and_persists_checkout(tmp_path
         }
         return {"id": kwargs["module_id"], "status": "imported", "current_revision_id": "rev-1"}
 
-    async def fake_set_validation_status(module_id, status, diagnostics):
+    async def fake_set_validation_status(module_id, status, diagnostics, **kwargs):
         captured["validation"] = {
             "module_id": module_id,
             "status": status,

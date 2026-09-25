@@ -44,6 +44,7 @@ from app.revision_image_builder import (
     RevisionImageBuildSpec,
     calculate_revision_image_build_identity,
     calculate_source_content_digest,
+    freeze_revision_source,
     require_managed_revision_image,
     write_build_context,
 )
@@ -566,3 +567,25 @@ def test_builder_log_truncation_marker_never_exceeds_small_configured_cap(
         assert encoded == marker[:max_bytes]
     else:
         assert encoded.startswith(marker)
+def test_frozen_source_is_content_addressed_immutable_and_secret_free(tmp_path):
+    source = tmp_path / "source"
+    snapshot_store = tmp_path / "snapshots"
+    _write_bundle(source)
+    (source / ".env").write_text("TOKEN=secret\n", encoding="utf-8")
+
+    first = freeze_revision_source(source, snapshot_store)
+    repeated = freeze_revision_source(source, snapshot_store)
+
+    assert repeated == first
+    assert first.path.parent == snapshot_store
+    assert first.path.name == first.content_digest.removeprefix("sha256:")
+    assert calculate_source_content_digest(first.path) == first.content_digest
+    assert not (first.path / ".env").exists()
+    assert first.path.stat().st_mode & 0o222 == 0
+    assert (first.path / "module.py").stat().st_mode & 0o222 == 0
+
+    frozen_module = (first.path / "module.py").read_bytes()
+    (source / "module.py").write_text("VALUE = 'changed'\n", encoding="utf-8")
+
+    assert (first.path / "module.py").read_bytes() == frozen_module
+    assert calculate_source_content_digest(source) != first.content_digest

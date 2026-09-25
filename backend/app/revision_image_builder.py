@@ -5,6 +5,7 @@ import io
 import json
 import os
 import re
+import shutil
 import stat
 import tarfile
 import tempfile
@@ -13,6 +14,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Protocol
+from uuid import uuid4
 
 import tomllib
 
@@ -135,6 +137,12 @@ class BuildCancellation:
 
     def cancel(self) -> None:
         self._cancelled.set()
+
+
+@dataclass(frozen=True)
+class FrozenRevisionSource:
+    path: Path
+    content_digest: str
 
 
 @dataclass(frozen=True)
@@ -466,6 +474,96 @@ def calculate_source_content_digest(snapshot_path: Path | str) -> str:
     for entry in _collect_source_entries(root, settings.include_files):
         _hash_source_entry(entry, digest)
     return f"sha256:{digest.hexdigest()}"
+def freeze_revision_source(
+    source_path: Path | str,
+    snapshot_store: Path | str,
+) -> FrozenRevisionSource:
+    """Copy one validated source tree into an immutable content-addressed directory."""
+    root = _validated_snapshot_root(source_path)
+    settings = _load_source_settings(root)
+    entries = _collect_source_entries(root, settings.include_files)
+    store = Path(snapshot_store).expanduser().resolve()
+    try:
+        store.relative_to(root)
+    except ValueError:
+        pass
+    else:
+        raise BuildContextError("revision snapshot store must be outside the source root")
+    store.mkdir(parents=True, exist_ok=True)
+    staging = store / f".staging-{uuid4().hex}"
+    staging.mkdir(mode=0o700)
+    try:
+        for entry in entries:
+            destination = staging.joinpath(*entry.relative.parts)
+            if entry.kind == "directory":
+                destination.mkdir(mode=entry.mode)
+            elif entry.kind == "symlink":
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                os.symlink(entry.link_target or "", destination)
+            else:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                _copy_unchanged_source_file(entry, destination)
+
+        content_digest = calculate_source_content_digest(staging)
+        destination = store / content_digest.removeprefix("sha256:")
+        if destination.exists():
+            if destination.is_symlink() or not destination.is_dir():
+                raise BuildContextError(
+                    f"revision snapshot destination is not a directory: {destination}"
+                )
+            existing_digest = calculate_source_content_digest(destination)
+            if existing_digest != content_digest:
+                raise BuildContextError(
+                    "content-addressed revision snapshot digest does not match its directory"
+                )
+            return FrozenRevisionSource(destination, content_digest)
+
+        _make_snapshot_read_only(staging)
+        try:
+            staging.rename(destination)
+        except FileExistsError:
+            existing_digest = calculate_source_content_digest(destination)
+            if existing_digest != content_digest:
+                raise BuildContextError(
+                    "concurrent revision snapshot digest does not match its directory"
+                )
+        return FrozenRevisionSource(destination, content_digest)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+
+
+def _copy_unchanged_source_file(entry: _SourceEntry, destination: Path) -> None:
+    with entry.path.open("rb") as source, destination.open("xb") as target:
+        before = os.fstat(source.fileno())
+        _require_unchanged_source(entry, before)
+        copied = 0
+        while chunk := source.read(1024 * 1024):
+            target.write(chunk)
+            copied += len(chunk)
+        target.flush()
+        os.fsync(target.fileno())
+        after = os.fstat(source.fileno())
+        _require_unchanged_source(entry, after)
+    if copied != entry.size:
+        raise BuildContextError(
+            f"revision source file changed while freezing snapshot: {entry.relative.as_posix()}"
+        )
+    destination.chmod(entry.mode)
+
+
+def _make_snapshot_read_only(root: Path) -> None:
+    entries = sorted(root.rglob("*"), key=lambda path: len(path.parts), reverse=True)
+    for path in entries:
+        if path.is_symlink():
+            continue
+        if path.is_dir():
+            path.chmod(0o555)
+        else:
+            path.chmod(0o555 if path.stat().st_mode & 0o111 else 0o444)
+    root.chmod(0o555)
+
+
 def calculate_revision_image_build_identity(
     spec: RevisionImageBuildSpec,
 ) -> RevisionImageBuildIdentity:

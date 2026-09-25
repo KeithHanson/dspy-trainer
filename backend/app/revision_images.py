@@ -120,6 +120,12 @@ def build_revision_image_payload(row: Any) -> dict[str, Any]:
         "updated_at": _timestamp(_value(row, "updated_at")),
     }
 
+def build_revision_image_summary_payload(row: Any) -> dict[str, Any]:
+    payload = build_revision_image_payload(row)
+    payload.pop("build_log", None)
+    payload.pop("source_snapshot_path", None)
+    return payload
+
 
 def build_endpoint_deployment_payload(row: Any) -> dict[str, Any]:
     return {
