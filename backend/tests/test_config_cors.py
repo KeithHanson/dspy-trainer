@@ -1,6 +1,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -44,3 +46,14 @@ def test_endpoint_worker_heartbeat_ttl_defaults_to_five_minutes():
     settings = Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer")
 
     assert settings.endpoint_worker_heartbeat_ttl_seconds == 300
+
+
+def test_bundle_install_concurrency_defaults_to_eight_and_must_be_positive():
+    settings = Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer")
+
+    assert settings.bundle_install_max_concurrency == 8
+    with pytest.raises(ValueError, match="DSPY_TRAINER_BUNDLE_INSTALL_MAX_CONCURRENCY must be at least 1"):
+        Settings(
+            postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer",
+            bundle_install_max_concurrency=0,
+        )

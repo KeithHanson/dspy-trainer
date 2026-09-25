@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     queue_name: str = Field(default="dspy-trainer:jobs")
     worker_registry_prefix: str = Field(default="dspy-trainer:workers")
     total_workers: int = Field(default=8)
+    bundle_install_max_concurrency: int = Field(default=8)
     endpoint_worker_registry_prefix: str = Field(default="dspy-trainer:endpoint-workers")
     endpoint_worker_heartbeat_ttl_seconds: int = Field(default=300)
     endpoint_queue_prefix: str = Field(default="dspy-trainer:endpoint-queues")
@@ -38,6 +39,14 @@ class Settings(BaseSettings):
         if not value.strip():
             raise ValueError("DSPY_TRAINER_POSTGRES_DSN is required")
         return value
+
+    @field_validator("bundle_install_max_concurrency")
+    @classmethod
+    def validate_bundle_install_max_concurrency(cls, value: int) -> int:
+        if int(value) < 1:
+            raise ValueError("DSPY_TRAINER_BUNDLE_INSTALL_MAX_CONCURRENCY must be at least 1")
+        return int(value)
+
 
     @field_validator("endpoint_worker_heartbeat_ttl_seconds")
     @classmethod

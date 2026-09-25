@@ -291,6 +291,50 @@ def test_ensure_endpoint_assignment_ready_preinstalls_dependencies_and_marks_lis
     assert services.registry_calls[-1][1]["runtime_metadata"]["warmed_revision_id"] == "rev-1"
 
 
+def test_ensure_endpoint_assignment_ready_keeps_preparing_heartbeat_alive_during_warmup():
+    async def scenario() -> None:
+        services = FakeServices()
+        services.postgres_pool = object()
+        runtime_identity = _build_runtime_identity(explicit_worker_id="endpoint-worker-1")
+        install_started = asyncio.Event()
+        release_install = asyncio.Event()
+
+        async def blocked_install(bundle_path):
+            services.bundle_requirement_installs.append(bundle_path)
+            install_started.set()
+            await release_install.wait()
+
+        services.ensure_bundle_requirements_installed = blocked_install
+        await _heartbeat(
+            cast(Any, services),
+            "endpoint-worker-1",
+            "idle",
+            runtime_identity=runtime_identity,
+            registration=True,
+        )
+        warmup_task = asyncio.create_task(
+            ensure_endpoint_assignment_ready(
+                cast(Any, services),
+                "endpoint-worker-1",
+                "endpoint-1",
+                runtime_identity=runtime_identity,
+            )
+        )
+
+        await install_started.wait()
+        for _ in range(10):
+            if [call[1]["status"] for call in services.registry_calls].count("preparing") >= 2:
+                break
+            await asyncio.sleep(0)
+        assert [call[1]["status"] for call in services.registry_calls].count("preparing") >= 2
+
+        release_install.set()
+        assert await warmup_task == "rev-1"
+        assert services.registry_calls[-1][1]["status"] == "listening"
+
+    asyncio.run(scenario())
+
+
 def test_ensure_endpoint_assignment_ready_rewarms_when_revision_changes():
     services = FakeServices()
     services.postgres_pool = object()

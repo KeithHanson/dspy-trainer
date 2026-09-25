@@ -270,7 +270,23 @@ async def ensure_endpoint_assignment_ready(
                 warmed_revision_id=warmed_revision_id,
                 runtime_identity=runtime_identity,
             )
-            await services.ensure_bundle_requirements_installed(module_state["bundle_path"])
+            preparing_heartbeat_task = asyncio.create_task(
+                _heartbeat_loop(
+                    services,
+                    worker_id,
+                    "preparing",
+                    endpoint_id=endpoint_id,
+                    desired_revision_id=desired_revision_id,
+                    warmed_revision_id=warmed_revision_id,
+                    runtime_identity=runtime_identity,
+                )
+            )
+            try:
+                await services.ensure_bundle_requirements_installed(module_state["bundle_path"])
+            finally:
+                preparing_heartbeat_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await preparing_heartbeat_task
         await _heartbeat(
             services,
             worker_id,

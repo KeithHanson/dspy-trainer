@@ -18,7 +18,10 @@
 	}
 
 	handle /mlflow/* {
-		reverse_proxy mlflow:5000
+		uri strip_prefix /mlflow
+		reverse_proxy mlflow:5000 {
+			header_up X-Forwarded-Prefix /mlflow
+		}
 	}
 
 	handle {

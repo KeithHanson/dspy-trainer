@@ -36,13 +36,13 @@ Named volumes:
 - `bundles_data` shared between `backend` and `worker` at `/tmp/dspy-trainer/bundles` for uploaded module bundles
 - `optimization_artifacts_data` shared between `backend` and `worker` at `/tmp/dspy-trainer/optimization_artifacts` so succeeded optimization artifacts can be materialized into new bundles
 
-MLflow concurrency can be tuned with `MLFLOW_WEB_WORKERS` in `.env` (default `4`). MLflow is started with `MLFLOW_STATIC_PREFIX` (default `/mlflow`) so its UI and assets load correctly behind the local reverse proxy. Compose also forwards `CADDY_HTTP_PORT` into the MLflow container so its allowed-hosts list stays aligned if you move the proxy off the default `8080` port. Compose now reads worker replica counts from `.env` via `DSPY_TRAINER_TOTAL_WORKERS` and `DSPY_TRAINER_TOTAL_ENDPOINT_WORKER_REPLICAS`, and it forwards `DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS` when operators need to tune endpoint-worker stale detection.
+MLflow concurrency can be tuned with `MLFLOW_WEB_WORKERS` in `.env` (default `4`). Compose builds a small project MLflow image that adds the PostgreSQL driver required by both the schema bootstrap and MLflow's backend store. MLflow serves internally at root: leave `MLFLOW_STATIC_PREFIX` empty so both its REST API and `/v1/traces` span ingestion remain reachable. Caddy strips the browser-facing `/mlflow` prefix and forwards requests to that root service. Set `MLFLOW_CORS_ALLOWED_ORIGINS` to every browser origin that serves this UI (for example `http://agents.abatix.com:8080` in a remote deployment). Also set `MLFLOW_ALLOWED_HOSTS_EXTRA` to the public host and port (for example `agents.abatix.com:8080`) so MLflow can preserve the browser Host header for same-origin UI APIs. Compose also forwards `CADDY_HTTP_PORT` into the MLflow container so its allowed-hosts list stays aligned if you move the proxy off the default `8080` port. Compose reads worker replica counts from `.env` via `DSPY_TRAINER_TOTAL_WORKERS` and `DSPY_TRAINER_TOTAL_ENDPOINT_WORKER_REPLICAS`, and it forwards `DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS` when operators need to tune endpoint-worker stale detection.
 
 ## Developer Bootstrap
 
 Before starting the stack, ensure `.env` contains `GITHUB_PAT` if you want to import, sync, or push GitHub-backed bundles. Backend and worker read that variable server-side; the web UI only reports whether GitHub access is configured. GitHub imports may target either the repo root or a configured bundle subfolder. Optimization writeback now pushes to an `optimization-<job-prefix>` branch for manual merge, so also set `GIT_COMMIT_NAME` and `GIT_COMMIT_EMAIL` (defaults are provided if omitted).
 
-The default local `.env.sample` now points the web build at relative proxy URLs (`/api`, `/mlflow`) and exposes Caddy on `CADDY_HTTP_PORT=8080`. It also defines `DSPY_TRAINER_TOTAL_WORKERS`, `DSPY_TRAINER_TOTAL_ENDPOINT_WORKER_REPLICAS`, and `DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS` so Compose replica counts and endpoint-worker stale-detection timing can be adjusted from `.env`. Override those values before rebuilding/recreating if you need different worker counts, host/port, or absolute public URLs.
+The default local `.env.sample` points the web build at relative proxy URLs (`/api`, `/mlflow`), leaves `MLFLOW_STATIC_PREFIX` empty, and exposes Caddy on `CADDY_HTTP_PORT=8080`. It also defines `DSPY_TRAINER_TOTAL_WORKERS`, `DSPY_TRAINER_TOTAL_ENDPOINT_WORKER_REPLICAS`, `DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS`, and `DSPY_TRAINER_BUNDLE_INSTALL_MAX_CONCURRENCY` so Compose replica counts, endpoint-worker stale-detection timing, and the deployment-wide bundle dependency install limit can be adjusted from `.env`. Override those values before rebuilding/recreating if you need different worker counts, install concurrency, host/port, or absolute public URLs.
 
 Secret storage note:
 - `DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY` is required if you want to store module environment entries or LM Profile provider API keys in Postgres.
@@ -58,7 +58,9 @@ Managed endpoint worker note:
 - Operator assignment and readiness are driven directly by that live registry, not by an env-defined logical worker roster.
 
 Bundle runtime note:
-- If a tracked bundle contains `requirements.txt`, backend and worker install those dependencies automatically before executing the bundle.
+- If a tracked bundle contains `requirements.txt`, backend, general workers, and endpoint workers install those dependencies automatically before executing the bundle.
+- Bundle system dependency commands and Python requirements installation share PostgreSQL advisory-lock slots across `backend`, `worker`, and `endpoint-worker`. `DSPY_TRAINER_BUNDLE_INSTALL_MAX_CONCURRENCY` must be positive and defaults to `8`.
+- Endpoint workers continue sending `preparing` heartbeats while waiting for a slot and while installing dependencies.
 
 Run from repository root:
 
@@ -111,11 +113,11 @@ docker compose build --pull
 docker compose up -d --remove-orphans
 ```
 
-Rebuild only backend and worker:
+Rebuild and recreate the Python runtime services:
 
 ```bash
-docker compose build --pull backend worker
-docker compose up -d --remove-orphans backend worker
+docker compose build --pull backend worker endpoint-worker
+docker compose up -d --force-recreate backend worker endpoint-worker
 ```
 
 ## Health Verification
@@ -146,6 +148,9 @@ curl -fsS "http://localhost:${CADDY_HTTP_PORT:-8080}/mlflow/"
 docker compose exec -T backend python -c "import os, redis; redis.Redis.from_url(os.environ['DSPY_TRAINER_REDIS_URL']).ping(); print('redis ok')"
 docker compose exec -T backend python -c "import os, urllib.request; urllib.request.urlopen(os.environ['DSPY_TRAINER_MLFLOW_TRACKING_URI'], timeout=5); print('mlflow ok')"
 docker compose exec -T backend python -c "import os; print('github ok' if (os.environ.get('DSPY_TRAINER_GITHUB_PAT') or os.environ.get('GITHUB_PAT')) else 'github missing')"
+docker compose exec -T backend python -c "import os; print(os.environ['DSPY_TRAINER_BUNDLE_INSTALL_MAX_CONCURRENCY'])"
+docker compose exec -T worker python -c "import os; print(os.environ['DSPY_TRAINER_BUNDLE_INSTALL_MAX_CONCURRENCY'])"
+docker compose exec -T endpoint-worker python -c "import os; print(os.environ['DSPY_TRAINER_BUNDLE_INSTALL_MAX_CONCURRENCY'])"
 docker compose exec -T backend python -c "import os; print(os.environ.get('DSPY_TRAINER_GIT_COMMIT_NAME', '')); print(os.environ.get('DSPY_TRAINER_GIT_COMMIT_EMAIL', ''))"
 ```
 
