@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.config import DeployerSettings
 from app.deployer_preflight import (
     check_liveness,
+    publish_leader_heartbeat,
     run_deployer_preflight,
     sanitize_diagnostic,
     write_liveness,
@@ -23,7 +24,8 @@ REQUIRED_TABLES = {
     "revision_image_builds",
     "endpoint_deployments",
     "managed_endpoint_containers",
-    "deployer_runtime_state",
+    "deployer_base_image_state",
+    "deployer_coordinator_heartbeats",
 }
 
 
@@ -70,19 +72,63 @@ class FakeDocker:
         return True
 
 
+class FakeTransaction:
+    async def start(self):
+        return None
+
+    async def commit(self):
+        return None
+
+    async def rollback(self):
+        return None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return None
+
+
 class FakeConnection:
     def __init__(self, *, state=None, active_builds: int = 0) -> None:
         self.state = state
         self.active_builds = active_builds
         self.executions: list[tuple[str, tuple[object, ...]]] = []
+        self.heartbeats: dict[tuple[str, str], dict[str, object]] = {}
+        self.now = datetime.now(timezone.utc)
         self.closed = False
 
-    async def fetch(self, query: str, *_args):
-        assert "information_schema.tables" in query
-        return [{"table_name": name} for name in REQUIRED_TABLES]
+    def transaction(self, **_kwargs):
+        return FakeTransaction()
+
+    async def fetch(self, query: str, *args):
+        if "information_schema.tables" in query:
+            return [{"table_name": name} for name in REQUIRED_TABLES]
+        assert "deployer_coordinator_heartbeats" in query
+        cutoff = args[1]
+        rows = []
+        for coordinator in ("build", "endpoint"):
+            records = [
+                value
+                for (_instance_id, role), value in self.heartbeats.items()
+                if role == coordinator and value["is_leader"]
+            ]
+            if records:
+                rows.append(
+                    {
+                        "coordinator": coordinator,
+                        "fresh_leaders": sum(
+                            value["heartbeat_at"] >= cutoff for value in records
+                        ),
+                        "stale_leaders": sum(
+                            value["heartbeat_at"] < cutoff for value in records
+                        ),
+                    }
+                )
+        return rows
 
     async def fetchrow(self, query: str, *_args):
-        assert "deployer_runtime_state" in query
+        assert "deployer_base_image_state" in query
         return self.state
 
     async def fetchval(self, query: str, *_args):
@@ -91,7 +137,26 @@ class FakeConnection:
 
     async def execute(self, query: str, *args):
         self.executions.append((query, args))
-        return "INSERT 0 1"
+        if "insert into deployer_base_image_state" in query:
+            self.state = {
+                "base_image_name": args[1],
+                "base_image_id": args[2],
+            }
+            return "INSERT 0 1"
+        if "insert into deployer_coordinator_heartbeats" in query:
+            for coordinator, is_leader in (
+                ("build", args[3]),
+                ("endpoint", args[4]),
+            ):
+                key = (str(args[2]), coordinator)
+                started_at = self.heartbeats.get(key, {}).get("started_at", self.now)
+                self.heartbeats[key] = {
+                    "started_at": started_at,
+                    "heartbeat_at": self.now,
+                    "is_leader": bool(is_leader),
+                }
+            return "INSERT 0 2"
+        return "SELECT 1"
 
     async def close(self) -> None:
         self.closed = True
@@ -102,6 +167,35 @@ def connector(connection: FakeConnection):
         return connection
 
     return connect
+
+
+async def publish(
+    connection: FakeConnection,
+    instance_id: str,
+    *,
+    at: datetime,
+    build_leader: bool,
+    endpoint_leader: bool,
+) -> None:
+    connection.now = at
+    await publish_leader_heartbeat(
+        settings(),
+        instance_id=instance_id,
+        base_image_id=IMAGE_ID,
+        build_leader=build_leader,
+        endpoint_leader=endpoint_leader,
+        connect=connector(connection),
+    )
+
+
+async def readiness(connection: FakeConnection, *, now: datetime):
+    return await run_deployer_preflight(
+        settings(),
+        docker_client=FakeDocker(),
+        connect=connector(connection),
+        require_leader_heartbeat=True,
+        now=now,
+    )
 
 
 @pytest.mark.asyncio
@@ -119,8 +213,12 @@ async def test_preflight_resolves_named_image_once_and_registers_immutable_id():
     assert report.ok
     assert report.base_image_id == IMAGE_ID
     assert docker.images.requested == ["dspy-trainer-backend:local"]
-    assert len(connection.executions) == 1
-    assert connection.executions[0][1] == (
+    registration = next(
+        args
+        for query, args in connection.executions
+        if "insert into deployer_base_image_state" in query
+    )
+    assert registration == (
         "deployment-a",
         "dspy-trainer-backend:local",
         IMAGE_ID,
@@ -133,10 +231,6 @@ async def test_preflight_rejects_tag_drift_and_blocks_acceptance_during_active_b
     state = {
         "base_image_name": "dspy-trainer-backend:local",
         "base_image_id": OTHER_IMAGE_ID,
-        "leader_instance_id": None,
-        "leader_heartbeat_at": None,
-        "build_leader": False,
-        "endpoint_leader": False,
     }
 
     rejected = await run_deployer_preflight(
@@ -166,30 +260,132 @@ async def test_preflight_rejects_tag_drift_and_blocks_acceptance_during_active_b
 
 
 @pytest.mark.asyncio
-async def test_readiness_requires_fresh_complete_leader_heartbeat():
+async def test_split_leaders_and_follower_heartbeats_are_ready():
     now = datetime(2026, 9, 25, tzinfo=timezone.utc)
-    state = {
-        "base_image_name": "dspy-trainer-backend:local",
-        "base_image_id": IMAGE_ID,
-        "leader_instance_id": "controller-a",
-        "leader_heartbeat_at": now - timedelta(seconds=2),
-        "build_leader": True,
-        "endpoint_leader": True,
-    }
-
-    report = await run_deployer_preflight(
-        settings(),
-        docker_client=FakeDocker(),
-        connect=connector(FakeConnection(state=state)),
-        require_leader_heartbeat=True,
-        now=now,
+    connection = FakeConnection(
+        state={
+            "base_image_name": "dspy-trainer-backend:local",
+            "base_image_id": IMAGE_ID,
+        }
     )
 
+    await publish(
+        connection,
+        "replica-a:first",
+        at=now,
+        build_leader=True,
+        endpoint_leader=False,
+    )
+    await publish(
+        connection,
+        "replica-b:first",
+        at=now,
+        build_leader=False,
+        endpoint_leader=True,
+    )
+    await publish(
+        connection,
+        "replica-c:follower",
+        at=now,
+        build_leader=False,
+        endpoint_leader=False,
+    )
+    report = await readiness(connection, now=now)
+
     assert report.ok
+    assert connection.heartbeats[("replica-a:first", "build")]["is_leader"]
+    assert connection.heartbeats[("replica-b:first", "endpoint")]["is_leader"]
+    assert not connection.heartbeats[("replica-c:follower", "build")]["is_leader"]
     heartbeat = next(
         check for check in report.checks if check.name == "leader_heartbeat"
     )
-    assert heartbeat.ok
+    assert heartbeat.detail == (
+        "exactly one fresh leader is present for each coordinator; "
+        "fresh build=1, endpoint=1; stale build=0, endpoint=0"
+    )
+
+
+@pytest.mark.asyncio
+async def test_stale_leader_transitions_to_one_successor_after_replica_restart():
+    now = datetime(2026, 9, 25, tzinfo=timezone.utc)
+    connection = FakeConnection(
+        state={
+            "base_image_name": "dspy-trainer-backend:local",
+            "base_image_id": IMAGE_ID,
+        }
+    )
+    stale = now - timedelta(seconds=16)
+    await publish(
+        connection,
+        "replica-a:old-start",
+        at=stale,
+        build_leader=True,
+        endpoint_leader=True,
+    )
+    stale_report = await readiness(connection, now=now)
+    assert not stale_report.ok
+
+    await publish(
+        connection,
+        "replica-a:new-start",
+        at=now,
+        build_leader=True,
+        endpoint_leader=True,
+    )
+    ready_report = await readiness(connection, now=now)
+
+    assert ready_report.ok
+    assert ("replica-a:old-start", "build") in connection.heartbeats
+    assert ("replica-a:new-start", "build") in connection.heartbeats
+    assert (
+        connection.heartbeats[("replica-a:old-start", "build")]["heartbeat_at"] == stale
+    )
+
+
+@pytest.mark.asyncio
+async def test_duplicate_fresh_leader_fails_closed_without_flapping_on_followers():
+    now = datetime(2026, 9, 25, tzinfo=timezone.utc)
+    connection = FakeConnection(
+        state={
+            "base_image_name": "dspy-trainer-backend:local",
+            "base_image_id": IMAGE_ID,
+        }
+    )
+    await publish(
+        connection,
+        "replica-a",
+        at=now,
+        build_leader=True,
+        endpoint_leader=True,
+    )
+    await publish(
+        connection,
+        "replica-b",
+        at=now,
+        build_leader=True,
+        endpoint_leader=False,
+    )
+    duplicate = await readiness(connection, now=now)
+    assert not duplicate.ok
+    check = next(item for item in duplicate.checks if item.name == "leader_heartbeat")
+    assert "build=2, endpoint=1" in check.detail
+
+    await publish(
+        connection,
+        "replica-b",
+        at=now + timedelta(seconds=1),
+        build_leader=False,
+        endpoint_leader=False,
+    )
+    await publish(
+        connection,
+        "replica-c",
+        at=now + timedelta(seconds=1),
+        build_leader=False,
+        endpoint_leader=False,
+    )
+    stable = await readiness(connection, now=now + timedelta(seconds=1))
+    assert stable.ok
 
 
 def test_diagnostics_and_process_health_never_expose_credentials(tmp_path: Path):
@@ -218,10 +414,6 @@ async def test_explicit_drift_acceptance_records_new_id_only_after_drain():
     state = {
         "base_image_name": "dspy-trainer-backend:local",
         "base_image_id": OTHER_IMAGE_ID,
-        "leader_instance_id": "old-controller",
-        "leader_heartbeat_at": datetime.now(timezone.utc),
-        "build_leader": True,
-        "endpoint_leader": True,
     }
     connection = FakeConnection(state=state)
 
@@ -234,7 +426,10 @@ async def test_explicit_drift_acceptance_records_new_id_only_after_drain():
     )
 
     assert report.ok
-    assert connection.executions[0][1][-1] == IMAGE_ID
+    assert connection.state == {
+        "base_image_name": "dspy-trainer-backend:local",
+        "base_image_id": IMAGE_ID,
+    }
 
 
 @pytest.mark.asyncio

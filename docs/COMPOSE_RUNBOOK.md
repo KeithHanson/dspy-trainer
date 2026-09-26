@@ -70,8 +70,11 @@ Build the named backend image before the deployer image. On first startup the de
 ~~~bash
 docker compose build --pull backend
 docker compose build --pull
-docker compose up -d --remove-orphans
-docker compose exec -T deployer python backend/deployer.py --readiness
+docker compose up -d --scale deployer=2 --remove-orphans
+for id in $(docker compose ps -q deployer); do
+  docker exec "$id" python backend/deployer.py --liveness
+  docker exec "$id" python backend/deployer.py --readiness
+done
 ~~~
 
 ## Non-Interactive Operations
@@ -79,7 +82,7 @@ docker compose exec -T deployer python backend/deployer.py --readiness
 ### Startup
 
 ```bash
-docker compose up -d --remove-orphans
+docker compose up -d --scale deployer=2 --remove-orphans
 ```
 
 ### Teardown
@@ -118,8 +121,11 @@ docker compose stop deployer
 docker compose build --pull backend deployer
 docker compose run --rm deployer python backend/deployer.py --preflight --accept-base-image
 docker compose build --pull worker endpoint-worker
-docker compose up -d --force-recreate backend worker endpoint-worker deployer
-docker compose exec -T deployer python backend/deployer.py --readiness
+docker compose up -d --scale deployer=2 --force-recreate backend worker endpoint-worker deployer
+for id in $(docker compose ps -q deployer); do
+  docker exec "$id" python backend/deployer.py --liveness
+  docker exec "$id" python backend/deployer.py --readiness
+done
 ~~~
 
 Never accept base-image drift while a build is active. Existing build rows retain their original immutable base ID; only generations queued after acceptance use the new ID. To roll back, stop the deployer, restore the prior backend image under the configured local name, rebuild the deployer image, repeat the explicit acceptance command, recreate services, and use rebuild-all only after readiness is healthy.
@@ -147,24 +153,26 @@ Managed invocation routing chooses only live `listening` workers whose endpoint,
 
 ## Durable Revision Image Coordinator
 
-The dedicated `deployer` opens one PostgreSQL session and must acquire the global advisory leader lock before queue work. Claiming uses `FOR UPDATE SKIP LOCKED`, but a second durable guard refuses a claim while any non-expired row remains `building`; therefore only one image build can run globally. Endpoint-serving module revisions sort ahead of other eligible revisions, then `available_at`, `queued_at`, and build ID provide deterministic FIFO ordering. Eligibility requires the current revision to be synced, not deleted, validated as `passed` for that exact revision, and backed by a snapshot path and digest.
+Each deployer replica opens independent PostgreSQL sessions. The revision-image build coordinator and endpoint reconciler acquire different global advisory locks, so their role holders may be different replicas. Build claiming uses FOR UPDATE SKIP LOCKED, but a second durable guard refuses a claim while any non-expired row remains building; therefore only one image build can run globally. Endpoint-serving module revisions sort ahead of other eligible revisions, then available_at, queued_at, and build ID provide deterministic FIFO ordering. Eligibility requires the current revision to be synchronized and validated.
 
 Claim owner plus incrementing attempt is the completion fencing token. The leader renews the existing claim expiry while building and stores bounded log chunks. A successor requeues expired claims. PostgreSQL rechecks the complete eligibility predicate in both the atomic claim and completion statements; a ready result whose revision was revoked is committed as failed without an image reference, even if it finishes before the monitor's next poll. Every synchronous Docker SDK build runs in a dedicated deployer-owned child process. If eligibility changes, a retry/rebuild supersedes an active generation, or shutdown begins, the coordinator terminates that child; operating-system process teardown closes its Docker HTTP socket without cross-thread generator access. Ownership and eligibility fencing reject late publication. A failed replacement does not mutate an earlier ready generation. Retry and rebuild-all create new generations and retain retry history.
 
-Only `deployer` installs the Docker SDK and mounts `/var/run/docker.sock`; it has no published port and receives no GitHub, LM, provider, or module runtime secrets. Backend, web, general workers, and endpoint workers receive neither the SDK nor socket. The advisory lock is visible in `pg_locks`, the deployer session is named `dspy-trainer-deployer:<instance>` in `pg_stat_activity`, and an active build's renewed claim expiry is its durable liveness lease.
+Only deployer installs the Docker SDK and mounts /var/run/docker.sock; it has no published port and receives no GitHub, LM, provider, or module runtime secrets. Backend, web, general workers, and endpoint workers receive neither the SDK nor socket. Advisory locks are visible in pg_locks, and deployer sessions are named dspy-trainer-deployer:<instance> in pg_stat_activity. Each process start has a unique instance identity and publishes separate durable build and endpoint coordinator heartbeat rows. Followers update only their own rows, stale rows remain visible for failover diagnosis, and an active build's renewed claim expiry is its durable liveness lease.
 
 ### Coordinator Deployment-host Acceptance (Do Not Run on Development Workstations)
 
-1. Start two deployer processes for the same deployment and confirm exactly one matching advisory lock holder in PostgreSQL and at most one `building` row.
-2. Queue equal-priority fixtures and a fixture belonging to a module with a serving endpoint; confirm the serving revision starts first and the remainder start in `available_at, queued_at, id` order.
-3. Kill the leader during a deliberately slow build. After claim expiry, confirm the successor requeues and completes that same generation, with attempt incremented and no permanently `building` row.
-4. Supersede a queued fixture and then an active slow fixture. Confirm the queued row becomes terminal, the deployer terminates the active build child, Docker daemon-side work stops rather than continuing after client disconnect, the new generation runs, and the old result cannot publish.
-5. Stop the leader cleanly during a slow build and confirm the claim returns to `queued`; make Docker unavailable for another build and confirm only that generation becomes `failed` with bounded logs while any prior ready generation remains ready.
-6. Inspect every Compose service and image package set: only `deployer` has the socket and Docker SDK, and the deployer has no published port or runtime-secret environment variables.
+1. Start the stack with docker compose up -d --scale deployer=2; do not assign fixed container names. Inspect pg_locks and sanitized deployer_coordinator_heartbeats rows. Confirm exactly one fresh leader for each coordinator, allowing build and endpoint roles to reside on different replicas, and at most one building row.
+2. Poll liveness and readiness from both replica container IDs. Confirm follower heartbeats do not erase either leader and readiness remains stable while exactly one fresh leader exists for each role.
+3. Kill the replica holding the build role during a deliberately slow build. Observe the old row become stale, exactly one successor acquire the build role, readiness recover without ever reporting multiple fresh build leaders, and the expired claim requeue and complete with its attempt incremented.
+4. Kill the replica holding the endpoint role. Observe the same zero-to-one failover, retained stale row, and restored readiness without a duplicate fresh endpoint leader.
+5. Queue equal-priority fixtures and a fixture belonging to a module with a serving endpoint; confirm the serving revision starts first and the remainder start in available_at, queued_at, id order.
+6. Supersede a queued fixture and then an active slow fixture. Confirm the queued row becomes terminal, the deployer terminates the active build child, Docker daemon-side work stops rather than continuing after client disconnect, the new generation runs, and the old result cannot publish.
+7. Stop a build role holder cleanly during a slow build and confirm the claim returns to queued; make Docker unavailable for another build and confirm only that generation becomes failed with bounded logs while any prior ready generation remains ready.
+8. Inspect every Compose service and image package set: only deployer has the socket and Docker SDK, and deployer replicas have no published port or runtime-secret environment variables.
 
 ## Managed Endpoint Container Reconciliation
 
-The same advisory leader reconciles durable endpoint deployment intent against Docker one action at a time. It discovers the configured network by exact name and Compose project label, starts deterministic slots with restart policy `unless-stopped`, and always uses the inspected immutable image ID. Adoption and deletion require the complete `io.dspy-trainer.*` container identity: platform owner, stack owner, managed kind, endpoint, deployment, slot, build, revision, rollout generation, worker, and image ID. A similar name, incomplete labels, wrong owner, or image mismatch is foreign and remains untouched. Before Docker reconciliation, the scheduler automatically creates or advances a target for every validated current revision with a ready local image, covering both initial legacy migration and every later module revision without an endpoint edit.
+The independently elected endpoint coordinator reconciles durable endpoint deployment intent against Docker one action at a time. It discovers the configured network by exact name and Compose project label, starts deterministic slots with restart policy unless-stopped, and always uses the inspected immutable image ID. Adoption and deletion require the complete io.dspy-trainer.* container identity: platform owner, stack owner, managed kind, endpoint, deployment, slot, build, revision, rollout generation, worker, and image ID.
 
 Rolling replacement is slot-by-slot. A target container must register live in `managed_image` mode with the exact endpoint, deployment, slot, rollout generation, worker, desired/warmed build, and desired/warmed revision before its old slot can drain. The active revision or legacy fallback remains routable until every target slot is ready; promotion and legacy-fallback removal occur in one database update. Draining atomically clears assignment before the worker may claim another job. A job already claimed may finish; after the drain timeout the reconciler force-removes the container and records the timeout, reason, and bounded final log. Startup or readiness failure enters durable rollback and restores any missing old-revision slots before target containers are removed.
 
@@ -196,14 +204,18 @@ On the deployment host, use a harmless validated fixture snapshot containing one
 
 ## Deployer Preflight, Migration, and Evidence
 
-The deployer is local-only: it publishes no port, is the only Compose service with the Docker SDK and socket mount, and receives neither GitHub/provider credentials nor general module secrets. Its readiness command verifies Docker access, the named base image and persisted immutable ID, the exact Compose network/project label, database migrations, label namespace, and fresh build plus endpoint leadership. Its separate liveness command checks only the process heartbeat.
+The deployer is local-only: it publishes no port, is the only Compose service with the Docker SDK and socket mount, and receives neither GitHub/provider credentials nor general module secrets. Its readiness command verifies Docker access, the named base image and persisted immutable ID, the exact Compose network/project label, database migrations, label namespace, and a single repeatable-read snapshot containing exactly one fresh leader for each independent coordinator. Zero or multiple fresh leaders for either role fail closed; diagnostics report fresh and stale counts separately. Its liveness command checks only that replica's process heartbeat.
+
+The migration copies immutable base-image identity from the legacy singleton state into deployer_base_image_state before removing the old table. Leadership is not migrated as fresh state. Every process start writes separate rows keyed by deployment, unique instance identity, and coordinator role in deployer_coordinator_heartbeats; stale rows are retained so restart and failover history cannot overwrite a current role holder.
 
 ~~~bash
-docker compose exec -T deployer python backend/deployer.py --liveness
-docker compose exec -T deployer python backend/deployer.py --readiness
+for id in $(docker compose ps -q deployer); do
+  docker exec "$id" python backend/deployer.py --liveness
+  docker exec "$id" python backend/deployer.py --readiness
+done
 ~~~
 
-For coexistence backfill, keep the static endpoint-worker pool running. Use only the existing status/operator APIs: call rebuild-all once, poll revision-image-builds until every required current revision is ready, then inspect each endpoint deployment. The static pool remains eligible only where legacy_fallback is true; managed endpoint/build/revision queues are isolated from the general and static queues. A safe cutover is reported as migration_state managed, phase ready, no target rollout, and every desired slot ready. Warming or failed targets leave legacy/active traffic in place. Do not disable the static pool until every intended endpoint reports managed readiness.
+For coexistence backfill, keep the static endpoint-worker pool running. Use only the existing status/operator APIs: call rebuild-all once, poll revision-image-builds until every required current revision is ready, then inspect each endpoint deployment. The static pool remains eligible only where legacy_fallback is true; managed endpoint/build/revision queues are isolated from the general and static queues. A safe cutover is reported as migration state managed, phase ready, no target rollout, and every desired managed slot ready.
 
 Rollback is durable and automatic for startup/readiness/drain failures: inspect the deployment rollback reason and bounded build logs, fix or rebuild the target, and let reconciliation restore the previous managed revision or retained legacy fallback. Image retention keeps at least the configured newest ready images per module and never prunes active, target, previous, or container-referenced images.
 
@@ -212,7 +224,11 @@ Capture only sanitized, bounded evidence. The preflight JSON intentionally omits
 ~~~bash
 umask 077
 mkdir -p deployment-evidence
-docker compose exec -T deployer python backend/deployer.py --readiness > deployment-evidence/deployer-readiness.json
+: > deployment-evidence/deployer-health.jsonl
+for id in $(docker compose ps -q deployer); do
+  docker exec "$id" python backend/deployer.py --liveness >> deployment-evidence/deployer-health.jsonl
+  docker exec "$id" python backend/deployer.py --readiness >> deployment-evidence/deployer-health.jsonl
+done
 curl -fsS 'http://localhost:8000/revision-image-builds?limit=100&offset=0' > deployment-evidence/revision-image-builds.json
 curl -fsS 'http://localhost:8000/bundle-endpoints/ENDPOINT_ID/deployment' > deployment-evidence/endpoint-deployment.json
 docker compose ps > deployment-evidence/compose-ps.txt

@@ -285,7 +285,7 @@ class _StatefulPostgresConnection:
     async def fetchval(self, sql, *args):
         query = " ".join(sql.lower().split())
 
-        if "select base_image_id from deployer_runtime_state" in query:
+        if "select base_image_id from deployer_base_image_state" in query:
             return self.deployer_base_image_id
         if "where retry_of_build_id = $1 and base_image_id = $2" in query:
             matches = [

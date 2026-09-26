@@ -11,6 +11,7 @@ def test_compose_isolates_docker_access_and_runtime_secrets_to_the_internal_depl
     deployer = services["deployer"]
 
     assert "ports" not in deployer
+    assert "container_name" not in deployer
     assert "/var/run/docker.sock:/var/run/docker.sock" in deployer["volumes"]
     assert "checkouts_data:/tmp/dspy-trainer/checkouts:ro" in deployer["volumes"]
     assert deployer["build"]["dockerfile"] == "backend/Deployer.Dockerfile"

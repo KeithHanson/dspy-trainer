@@ -2002,16 +2002,45 @@ class AppServices:
             await conn.execute("alter table bundle_revisions add column if not exists source_content_digest text;")
             await conn.execute(
                 """
-                create table if not exists deployer_runtime_state (
+                create table if not exists deployer_base_image_state (
                   deployment_id text primary key,
                   base_image_name text not null,
                   base_image_id text not null,
-                  leader_instance_id text,
-                  leader_heartbeat_at timestamptz,
-                  build_leader boolean not null default false,
-                  endpoint_leader boolean not null default false,
                   updated_at timestamptz not null
                 );
+                """
+            )
+            await conn.execute(
+                """
+                do $$
+                begin
+                  if to_regclass('deployer_runtime_state') is not null then
+                    insert into deployer_base_image_state (
+                      deployment_id, base_image_name, base_image_id, updated_at
+                    )
+                    select deployment_id, base_image_name, base_image_id, updated_at
+                    from deployer_runtime_state
+                    on conflict (deployment_id) do nothing;
+                  end if;
+                end
+                $$;
+                drop table if exists deployer_runtime_state;
+                """
+            )
+            await conn.execute(
+                """
+                create table if not exists deployer_coordinator_heartbeats (
+                  deployment_id text not null references deployer_base_image_state(deployment_id) on delete cascade,
+                  instance_id text not null,
+                  coordinator text not null check (coordinator in ('build', 'endpoint')),
+                  started_at timestamptz not null,
+                  heartbeat_at timestamptz not null,
+                  is_leader boolean not null,
+                  primary key (deployment_id, instance_id, coordinator)
+                );
+                create index if not exists idx_deployer_coordinator_leaders
+                  on deployer_coordinator_heartbeats (deployment_id, coordinator, heartbeat_at desc)
+                  where is_leader;
                 """
             )
             await conn.execute(

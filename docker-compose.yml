@@ -191,7 +191,6 @@ services:
       context: .
       dockerfile: backend/Deployer.Dockerfile
     image: ${DSPY_TRAINER_DEPLOYER_IMAGE:-dspy-trainer-deployer:local}
-    container_name: ${COMPOSE_PROJECT_NAME:-dspy-trainer}-deployer
     command: ["python", "backend/deployer.py"]
     restart: unless-stopped
     environment:

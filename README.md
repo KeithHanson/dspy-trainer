@@ -40,8 +40,11 @@ cp .env.sample .env
 docker compose pull --ignore-pull-failures
 docker compose build --pull backend
 docker compose build --pull
-docker compose up -d --remove-orphans
-docker compose exec -T deployer python backend/deployer.py --readiness
+docker compose up -d --scale deployer=2 --remove-orphans
+for id in $(docker compose ps -q deployer); do
+  docker exec "$id" python backend/deployer.py --liveness
+  docker exec "$id" python backend/deployer.py --readiness
+done
 ```
 
 If MLflow trace or run requests time out under load, increase `MLFLOW_WEB_WORKERS` in `.env` before restarting the stack.

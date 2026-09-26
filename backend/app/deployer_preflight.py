@@ -5,7 +5,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -15,7 +15,8 @@ _REQUIRED_TABLES = (
     "revision_image_builds",
     "endpoint_deployments",
     "managed_endpoint_containers",
-    "deployer_runtime_state",
+    "deployer_base_image_state",
+    "deployer_coordinator_heartbeats",
 )
 _IMAGE_ID_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
 _SECRET_PATTERN = re.compile(
@@ -214,9 +215,15 @@ async def run_deployer_preflight(
             )
         )
     conn = None
+    db_transaction = None
     connector = connect or _postgres_connect
     try:
         conn = await connector(settings.postgres_dsn)
+        db_transaction = conn.transaction(
+            isolation="repeatable_read",
+            readonly=not register_base_image,
+        )
+        await db_transaction.start()
         rows = await conn.fetch(
             """
             select table_name
@@ -247,9 +254,8 @@ async def run_deployer_preflight(
 
             state = await conn.fetchrow(
                 """
-                select base_image_name, base_image_id, leader_instance_id,
-                       leader_heartbeat_at, build_leader, endpoint_leader
-                from deployer_runtime_state
+                select base_image_name, base_image_id
+                from deployer_base_image_state
                 where deployment_id = $1
                 """,
                 settings.deployment_id,
@@ -283,13 +289,66 @@ async def run_deployer_preflight(
                         )
                     )
                 else:
-                    active_builds = int(
-                        await conn.fetchval(
-                            "select count(*) from revision_image_builds where status in ('queued', 'building')"
+                    active_builds = 0
+                    registered = False
+                    async with conn.transaction():
+                        await conn.execute(
+                            "select pg_advisory_xact_lock(hashtextextended('dspy-trainer-base-image:' || $1, 0))",
+                            settings.deployment_id,
                         )
-                        or 0
-                    )
-                    if active_builds:
+                        await conn.execute(
+                            "lock table revision_image_builds in share mode"
+                        )
+                        locked_state = await conn.fetchrow(
+                            """
+                            select base_image_name, base_image_id
+                            from deployer_base_image_state
+                            where deployment_id = $1
+                            """,
+                            settings.deployment_id,
+                        )
+                        locked_drifted = bool(
+                            locked_state
+                            and (
+                                str(locked_state["base_image_name"])
+                                != settings.deployer_backend_base_image
+                                or str(locked_state["base_image_id"]) != base_image_id
+                            )
+                        )
+                        if locked_drifted and not accept_base_image_change:
+                            pass
+                        else:
+                            active_builds = int(
+                                await conn.fetchval(
+                                    "select count(*) from revision_image_builds where status in ('queued', 'building')"
+                                )
+                                or 0
+                            )
+                            if not active_builds:
+                                await conn.execute(
+                                    """
+                                    insert into deployer_base_image_state (
+                                      deployment_id, base_image_name, base_image_id, updated_at
+                                    ) values ($1, $2, $3, now())
+                                    on conflict (deployment_id) do update
+                                    set base_image_name = excluded.base_image_name,
+                                        base_image_id = excluded.base_image_id,
+                                        updated_at = now()
+                                    """,
+                                    settings.deployment_id,
+                                    settings.deployer_backend_base_image,
+                                    base_image_id,
+                                )
+                                registered = True
+                    if registered:
+                        checks.append(
+                            PreflightCheck(
+                                "base_image_registration",
+                                True,
+                                "the inspected immutable base image ID is registered for new build generations",
+                            )
+                        )
+                    elif active_builds:
                         checks.append(
                             PreflightCheck(
                                 "base_image_registration",
@@ -299,30 +358,12 @@ async def run_deployer_preflight(
                             )
                         )
                     else:
-                        await conn.execute(
-                            """
-                            insert into deployer_runtime_state (
-                              deployment_id, base_image_name, base_image_id,
-                              build_leader, endpoint_leader, updated_at
-                            ) values ($1, $2, $3, false, false, now())
-                            on conflict (deployment_id) do update
-                            set base_image_name = excluded.base_image_name,
-                                base_image_id = excluded.base_image_id,
-                                leader_instance_id = null,
-                                leader_heartbeat_at = null,
-                                build_leader = false,
-                                endpoint_leader = false,
-                                updated_at = now()
-                            """,
-                            settings.deployment_id,
-                            settings.deployer_backend_base_image,
-                            base_image_id,
-                        )
                         checks.append(
                             PreflightCheck(
                                 "base_image_registration",
-                                True,
-                                "the inspected immutable base image ID is registered for new build generations",
+                                False,
+                                "the registered immutable base image changed during preflight",
+                                "Rerun preflight and explicitly accept the inspected image only if the new registration is intended.",
                             )
                         )
             elif state and not drifted:
@@ -345,38 +386,69 @@ async def run_deployer_preflight(
 
             if require_leader_heartbeat:
                 current_time = now or datetime.now(timezone.utc)
-                heartbeat = state["leader_heartbeat_at"] if state else None
-                if heartbeat is not None and heartbeat.tzinfo is None:
-                    heartbeat = heartbeat.replace(tzinfo=timezone.utc)
-                age = (
-                    (current_time - heartbeat).total_seconds()
-                    if heartbeat is not None
-                    else float("inf")
+                cutoff = current_time - timedelta(
+                    seconds=settings.deployer_leader_timeout_seconds
                 )
-                leaders_ready = bool(
-                    state
-                    and state["leader_instance_id"]
-                    and state["build_leader"]
-                    and state["endpoint_leader"]
-                    and age <= settings.deployer_leader_timeout_seconds
+                leader_rows = await conn.fetch(
+                    """
+                    select coordinator,
+                           count(*) filter (
+                             where is_leader and heartbeat_at >= $2
+                           )::int as fresh_leaders,
+                           count(*) filter (
+                             where is_leader and heartbeat_at < $2
+                           )::int as stale_leaders
+                    from deployer_coordinator_heartbeats
+                    where deployment_id = $1
+                      and coordinator = any($3::text[])
+                    group by coordinator
+                    """,
+                    settings.deployment_id,
+                    cutoff,
+                    ["build", "endpoint"],
+                )
+                leadership = {
+                    str(row["coordinator"]): (
+                        int(row["fresh_leaders"]),
+                        int(row["stale_leaders"]),
+                    )
+                    for row in leader_rows
+                }
+                counts = {
+                    coordinator: leadership.get(coordinator, (0, 0))[0]
+                    for coordinator in ("build", "endpoint")
+                }
+                stale_counts = {
+                    coordinator: leadership.get(coordinator, (0, 0))[1]
+                    for coordinator in ("build", "endpoint")
+                }
+                leaders_ready = all(count == 1 for count in counts.values())
+                state_detail = (
+                    f"fresh build={counts['build']}, endpoint={counts['endpoint']}; "
+                    f"stale build={stale_counts['build']}, endpoint={stale_counts['endpoint']}"
+                )
+                detail = (
+                    f"exactly one fresh leader is present for each coordinator; {state_detail}"
+                    if leaders_ready
+                    else f"{state_detail}; each coordinator requires exactly one fresh leader"
                 )
                 checks.append(
                     PreflightCheck(
                         "leader_heartbeat",
                         leaders_ready,
-                        (
-                            "build and endpoint reconcilers hold leadership with a fresh heartbeat"
-                            if leaders_ready
-                            else "deployer leadership heartbeat is absent, stale, or incomplete"
-                        ),
+                        detail,
                         (
                             None
                             if leaders_ready
-                            else "Inspect deployer logs for advisory-lock or database failures; do not migrate endpoints until leadership is healthy."
+                            else "Inspect per-instance coordinator heartbeats and advisory-lock holders; do not migrate endpoints until each coordinator has exactly one fresh leader."
                         ),
                     )
                 )
+        await db_transaction.commit()
+        db_transaction = None
     except Exception:
+        if db_transaction is not None:
+            await db_transaction.rollback()
         checks.append(
             PreflightCheck(
                 "database_preflight",
@@ -410,13 +482,23 @@ async def publish_leader_heartbeat(
     try:
         result = await conn.execute(
             """
-            update deployer_runtime_state
-            set leader_instance_id = $3,
-                leader_heartbeat_at = now(),
-                build_leader = $4,
-                endpoint_leader = $5,
-                updated_at = now()
-            where deployment_id = $1 and base_image_name = $2 and base_image_id = $6
+            insert into deployer_coordinator_heartbeats (
+              deployment_id, instance_id, coordinator,
+              started_at, heartbeat_at, is_leader
+            )
+            select $1, $3, roles.coordinator, now(), now(), roles.is_leader
+            from (values ('build', $4::boolean), ('endpoint', $5::boolean))
+                 as roles(coordinator, is_leader)
+            where exists (
+              select 1
+              from deployer_base_image_state
+              where deployment_id = $1
+                and base_image_name = $2
+                and base_image_id = $6
+            )
+            on conflict (deployment_id, instance_id, coordinator) do update
+            set heartbeat_at = now(),
+                is_leader = excluded.is_leader
             """,
             settings.deployment_id,
             settings.deployer_backend_base_image,
@@ -425,7 +507,7 @@ async def publish_leader_heartbeat(
             endpoint_leader,
             base_image_id,
         )
-        if not str(result).endswith(" 1"):
+        if not str(result).endswith(" 2"):
             raise RuntimeError(
                 "registered immutable base image changed before heartbeat"
             )

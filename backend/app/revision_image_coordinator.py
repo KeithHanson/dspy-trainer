@@ -360,7 +360,7 @@ class PostgresRevisionImageBuildStore:
         if self._base_image_id is not None:
             return self._base_image_id
         base_image_id = await conn.fetchval(
-            "select base_image_id from deployer_runtime_state where deployment_id = $1",
+            "select base_image_id from deployer_base_image_state where deployment_id = $1",
             self._deployment_id,
         )
         if not base_image_id:
