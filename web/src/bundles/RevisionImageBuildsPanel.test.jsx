@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RevisionImageBuildsPanel } from "./RevisionImageBuildsPanel";
@@ -20,6 +20,16 @@ const FAILED_BUILD = {
 
 function buildList(items) {
   return { ok: true, status: 200, json: vi.fn().mockResolvedValue({ items, total: items.length }) };
+}
+
+function deferredResponse() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
 }
 
 afterEach(() => {
@@ -119,6 +129,77 @@ describe("RevisionImageBuildsPanel", () => {
     expect(fetchMock.mock.calls.filter(([url, init]) => String(url).endsWith("/rebuild-all") && init?.method === "POST")).toHaveLength(1);
   });
 
+  it("clears build A immediately when build B is selected and B fails", async () => {
+    const buildA = { ...FAILED_BUILD, id: "build-a", generation: 2, failure_reason: null };
+    const buildB = { ...FAILED_BUILD, id: "build-b", generation: 1, failure_reason: null };
+    const buildBLog = deferredResponse();
+    const fetchMock = vi.fn((url) => {
+      if (String(url).includes("module_id=module-1")) return Promise.resolve(buildList([buildA, buildB]));
+      if (String(url).includes("/build-a/logs?")) return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: vi.fn().mockResolvedValue({ text: "visible log from build A", total_bytes: 24, next_offset: null }),
+      });
+      if (String(url).includes("/build-b/logs?")) return buildBLog.promise;
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<RevisionImageBuildsPanel active moduleId="module-1" />);
+
+    const buildCards = await screen.findAllByText(/Build build-/);
+    const cardA = buildCards.find((node) => node.textContent === "Build build-a").closest("article");
+    const cardB = buildCards.find((node) => node.textContent === "Build build-b").closest("article");
+    await userEvent.click(within(cardA).getByRole("button", { name: "View bounded log" }));
+    expect(await screen.findByText("visible log from build A")).toBeInTheDocument();
+
+    await userEvent.click(within(cardB).getByRole("button", { name: "View bounded log" }));
+    expect(screen.queryByText("visible log from build A")).not.toBeInTheDocument();
+
+    await act(async () => {
+      buildBLog.resolve({ ok: false, status: 500, json: vi.fn().mockResolvedValue({ error: "build B log unavailable" }) });
+    });
+    expect(await screen.findByText(/build B log unavailable/)).toBeInTheDocument();
+    expect(screen.queryByText("visible log from build A")).not.toBeInTheDocument();
+  });
+
+  it.each(["success", "error"])("ignores late build A log %s after selecting build B", async (lateOutcome) => {
+    const buildA = { ...FAILED_BUILD, id: "build-a", generation: 2, failure_reason: null };
+    const buildB = { ...FAILED_BUILD, id: "build-b", generation: 1, failure_reason: null };
+    const buildALog = deferredResponse();
+    const buildBLog = deferredResponse();
+    const fetchMock = vi.fn((url) => {
+      if (String(url).includes("module_id=module-1")) return Promise.resolve(buildList([buildA, buildB]));
+      if (String(url).includes("/build-a/logs?")) return buildALog.promise;
+      if (String(url).includes("/build-b/logs?")) return buildBLog.promise;
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<RevisionImageBuildsPanel active moduleId="module-1" />);
+
+    const buildCards = await screen.findAllByText(/Build build-/);
+    const cardA = buildCards.find((node) => node.textContent === "Build build-a").closest("article");
+    const cardB = buildCards.find((node) => node.textContent === "Build build-b").closest("article");
+    await userEvent.click(within(cardA).getByRole("button", { name: "View bounded log" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/build-a/logs?"))).toBe(true));
+    await userEvent.click(within(cardB).getByRole("button", { name: "View bounded log" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/build-b/logs?"))).toBe(true));
+
+    await act(async () => {
+      if (lateOutcome === "success") {
+        buildALog.resolve({ ok: true, status: 200, json: vi.fn().mockResolvedValue({ text: "late build A output", total_bytes: 19, next_offset: null }) });
+      } else {
+        buildALog.reject(new Error("late build A error"));
+      }
+    });
+    expect(screen.queryByText(/late build A/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Build log unavailable")).not.toBeInTheDocument();
+
+    await act(async () => {
+      buildBLog.resolve({ ok: true, status: 200, json: vi.fn().mockResolvedValue({ text: "current build B output", total_bytes: 22, next_offset: null }) });
+    });
+    expect(await screen.findByText("current build B output")).toBeInTheDocument();
+    expect(screen.queryByText(/late build A/)).not.toBeInTheDocument();
+  });
   it("polls nonterminal builds, stops after terminal state, and cancels on unmount", async () => {
     vi.useFakeTimers();
     let listCount = 0;

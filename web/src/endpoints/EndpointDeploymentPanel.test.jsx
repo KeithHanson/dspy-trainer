@@ -49,6 +49,7 @@ describe("EndpointDeploymentPanel", () => {
           {
             slot: 0,
             lifecycle: "ready",
+            ready: true,
             revision_id: "rev-old",
             build_id: "build-old",
             worker_id: "worker-old",
@@ -56,6 +57,7 @@ describe("EndpointDeploymentPanel", () => {
           {
             slot: 1,
             lifecycle: "draining",
+            draining: true,
             revision_id: "rev-new",
             build_id: "build-new",
             worker_id: "worker-new",
@@ -80,6 +82,32 @@ describe("EndpointDeploymentPanel", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
+  it("does not report terminal historical slots as mixed serving versions", async () => {
+    fetch.mockReturnValue(jsonResponse({
+      phase: "ready",
+      migration_state: "managed",
+      legacy_fallback: false,
+      desired_replica_count: 1,
+      rollout_generation: 4,
+      active: { revision_id: "rev-current", build_id: "build-current", build_status: "ready" },
+      target: null,
+      previous: { revision_id: "rev-old", build_id: "build-old", build_status: "ready" },
+      failed_target: null,
+      slots: [
+        { container_id: "container-current", slot: 0, lifecycle: "ready", ready: true, draining: false, revision_id: "rev-current", build_id: "build-current", worker_id: "worker-current" },
+        { container_id: "container-removed", slot: 0, lifecycle: "removed", ready: false, draining: false, revision_id: "rev-old", build_id: "build-old", worker_id: "worker-removed" },
+        { container_id: "container-stopped", slot: 1, lifecycle: "stopped", ready: false, draining: false, revision_id: "rev-old", build_id: "build-old", worker_id: "worker-stopped" },
+        { container_id: "container-failed", slot: 2, lifecycle: "failed", ready: false, draining: false, revision_id: "rev-broken", build_id: "build-broken", worker_id: "worker-failed" },
+      ],
+    }));
+
+    render(<EndpointDeploymentPanel endpointId="endpoint-1" />);
+
+    expect(await screen.findByText("Image rollout")).toBeInTheDocument();
+    expect(screen.queryByText(/Mixed revisions or image builds/)).not.toBeInTheDocument();
+    expect(screen.getByText(/1 of 1 desired slots ready/)).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
   it("polls nonterminal rollouts until ready and cancels on unmount", async () => {
     vi.useFakeTimers();
     fetch

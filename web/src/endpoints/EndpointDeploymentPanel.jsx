@@ -124,8 +124,9 @@ export function EndpointDeploymentPanel({ apiBase, endpointId, refreshKey = 0 })
   const slots = Array.isArray(deployment.slots) ? deployment.slots : [];
   const targetBuildId = deployment.target?.build_id || null;
   const readyTargetSlots = slots.filter((slot) => slot.ready && (!targetBuildId || slot.build_id === targetBuildId)).length;
-  const revisions = new Set(slots.map((slot) => slot.revision_id).filter(Boolean));
-  const mixedRevisions = revisions.size > 1;
+  const servingSlots = slots.filter((slot) => slot.ready === true || slot.draining === true || String(slot.lifecycle || "").toLowerCase() === "draining");
+  const servingVersionCount = new Set(servingSlots.map((slot) => [slot.revision_id, slot.build_id].filter(Boolean).join("@"))).size;
+  const mixedServingVersions = servingVersionCount > 1;
   const reason = deployment.rollback_reason || deployment.rollout_reason || deployment.failure_reason || "";
 
   return (
@@ -147,7 +148,7 @@ export function EndpointDeploymentPanel({ apiBase, endpointId, refreshKey = 0 })
           <span>{safeOperatorText(reason)}</span>
         </div>
       ) : null}
-      {mixedRevisions ? <div className="endpoint-mixed-banner" role="status">Mixed revisions are serving during this rolling transition.</div> : null}
+      {mixedServingVersions ? <div className="endpoint-mixed-banner" role="status">Mixed revisions or image builds are serving during this rolling transition.</div> : null}
       {deployment.failed_target ? <div className="endpoint-failed-banner" role="status">The replacement failed. Active capacity remains on the old build while rollback or recovery proceeds.</div> : null}
       <div className="endpoint-deployment-refs">
         <DeploymentReference label="Active" reference={deployment.active} legacyFallback={deployment.legacy_fallback} />

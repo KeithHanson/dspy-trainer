@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { buildApiUrl } from "../api/base";
 import { Button } from "../components/primitives/Button";
 import { ErrorState } from "../components/states/ErrorState";
@@ -51,6 +51,7 @@ export function RevisionImageBuildsPanel({ active, moduleId }) {
   const [selectedBuildId, setSelectedBuildId] = useState("");
   const [buildLog, setBuildLog] = useState(null);
   const [logError, setLogError] = useState("");
+  const logRequestGeneration = useRef(0);
 
   const requestBuilds = async (signal) => {
     const response = await fetch(`${buildsUrl}?module_id=${encodeURIComponent(moduleId)}&limit=100&offset=0`, {
@@ -117,16 +118,19 @@ export function RevisionImageBuildsPanel({ active, moduleId }) {
 
   const selectedBuild = builds.find((build) => build.id === selectedBuildId) || null;
   useEffect(() => {
+    const requestGeneration = ++logRequestGeneration.current;
+    setBuildLog(null);
+    setLogError("");
     if (!selectedBuildId) {
-      setBuildLog(null);
-      setLogError("");
-      return undefined;
+      return () => {
+        if (logRequestGeneration.current === requestGeneration) logRequestGeneration.current += 1;
+      };
     }
+    const requestedBuildId = selectedBuildId;
     const controller = new AbortController();
     const loadLog = async () => {
-      setLogError("");
       try {
-        const response = await fetch(`${buildsUrl}/${encodeURIComponent(selectedBuildId)}/logs?offset=0&limit=16384`, {
+        const response = await fetch(`${buildsUrl}/${encodeURIComponent(requestedBuildId)}/logs?offset=0&limit=16384`, {
           method: "GET",
           signal: controller.signal,
         });
@@ -134,20 +138,29 @@ export function RevisionImageBuildsPanel({ active, moduleId }) {
           throw new Error(await parseError(response, `Could not load build log (${response.status})`));
         }
         const payload = await response.json();
+        if (controller.signal.aborted || logRequestGeneration.current !== requestGeneration) return;
         setBuildLog({
           text: sanitizeBuildOutput(payload?.text),
           totalBytes: Number(payload?.total_bytes || 0),
           truncated: payload?.next_offset !== null && payload?.next_offset !== undefined,
         });
       } catch (loadError) {
-        if (loadError?.name !== "AbortError") {
-          setLogError(loadError instanceof Error ? loadError.message : "Could not load build log");
-        }
+        if (controller.signal.aborted || logRequestGeneration.current !== requestGeneration) return;
+        setLogError(loadError instanceof Error ? loadError.message : "Could not load build log");
       }
     };
     loadLog();
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      if (logRequestGeneration.current === requestGeneration) logRequestGeneration.current += 1;
+    };
   }, [selectedBuildId, selectedBuild?.updated_at, buildsUrl]);
+  const toggleBuildLog = (buildId) => {
+    logRequestGeneration.current += 1;
+    setBuildLog(null);
+    setLogError("");
+    setSelectedBuildId(selectedBuildId === buildId ? "" : buildId);
+  };
 
   const retryBuild = async (build) => {
     if (!window.confirm(`Retry failed image build ${build.id}?`)) return;
@@ -224,7 +237,7 @@ export function RevisionImageBuildsPanel({ active, moduleId }) {
               </div>
             ) : null}
             <div className="row gap-2 image-build-actions">
-              <Button size="sm" onClick={() => setSelectedBuildId((current) => current === build.id ? "" : build.id)}>
+              <Button size="sm" onClick={() => toggleBuildLog(build.id)}>
                 {selectedBuildId === build.id ? "Hide log" : "View bounded log"}
               </Button>
               {build.status === "failed" ? (
