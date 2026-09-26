@@ -253,25 +253,29 @@ def test_backend_startup_clears_endpoint_worker_registrations_before_runtime_rer
     asyncio.run(scenario())
 
 
-def test_connect_backend_clears_stale_endpoint_worker_registrations_on_backend_startup(
+def test_connect_backend_preserves_registry_and_expires_stale_runtime_identity(
     monkeypatch,
 ):
     async def scenario() -> None:
         seeded_pool = _RegistryPool()
-        seeded_pool.state["workers"]["stale-worker"] = {
-            "worker_id": "stale-worker",
-            "runtime_instance_id": "runtime-stale",
-            "status": "stale",
+        for worker_id, status, expires_at in (
+            ("healthy-worker", "idle", datetime(2200, 1, 1, tzinfo=timezone.utc)),
+            ("stale-worker", "running", datetime(2000, 1, 1, tzinfo=timezone.utc)),
+        ):
+            seeded_pool.state["workers"][worker_id] = {
+                "worker_id": worker_id,
+                "runtime_instance_id": f"runtime-{worker_id}",
+                "status": status,
             "assigned_endpoint_id": None,
             "task_id": None,
-            "last_seen_at": datetime(2099, 1, 1, tzinfo=timezone.utc),
-            "heartbeat_expires_at": datetime(2099, 1, 1, tzinfo=timezone.utc),
-            "hostname": "host-stale",
+                "last_seen_at": datetime(2000, 1, 1, tzinfo=timezone.utc),
+                "heartbeat_expires_at": expires_at,
+                "hostname": f"host-{worker_id}",
             "pid": 1,
             "runtime_metadata": {"boot": "old"},
             "last_error": None,
-            "created_at": datetime(2099, 1, 1, tzinfo=timezone.utc),
-            "updated_at": datetime(2099, 1, 1, tzinfo=timezone.utc),
+                "created_at": datetime(2000, 1, 1, tzinfo=timezone.utc),
+                "updated_at": datetime(2000, 1, 1, tzinfo=timezone.utc),
         }
 
         async def fake_create_pool(*args, **kwargs):
@@ -299,11 +303,21 @@ def test_connect_backend_clears_stale_endpoint_worker_registrations_on_backend_s
         await services.connect_backend()
 
         workers = await services.list_endpoint_worker_registrations(
-            now=datetime(2099, 1, 1, tzinfo=timezone.utc)
+            now=datetime.now(timezone.utc)
         )
-        assert workers == []
-        assert any(
+        by_id = {worker["worker_id"]: worker for worker in workers}
+        assert set(by_id) == {"healthy-worker", "stale-worker"}
+        assert by_id["healthy-worker"]["status"] == "idle"
+        assert by_id["healthy-worker"]["is_live"] is True
+        assert by_id["stale-worker"]["status"] == "stale"
+        assert by_id["stale-worker"]["is_live"] is False
+        assert not any(
             "delete from endpoint_worker_registrations" in query.lower()
+            for query in seeded_pool.conn.queries
+        )
+        assert any(
+            "update endpoint_worker_registrations set status = 'stale'"
+            in " ".join(query.lower().split())
             for query in seeded_pool.conn.queries
         )
 
@@ -779,80 +793,7 @@ def test_list_endpoint_workers_registry_summary_excludes_listening_revision_mism
     asyncio.run(scenario())
 
 
-def test_managed_registry_readiness_requires_matching_identity_build_and_revision():
-    async def scenario() -> None:
-        services = _make_services()
-        now = datetime(2099, 1, 1, tzinfo=timezone.utc)
 
-        for index in (1, 2, 3):
-            await services.register_endpoint_worker(
-                worker_id=f"endpoint-worker-{index}",
-                runtime_instance_id=f"runtime-{index}",
-                status="idle",
-                now=now,
-            )
-        for index in (1, 2, 3):
-            await services._set_endpoint_worker_assignment(
-                f"endpoint-worker-{index}", f"endpoint-{index}"
-            )
-
-        await services.heartbeat_endpoint_worker(
-            "endpoint-worker-1",
-            runtime_instance_id="runtime-1",
-            status="listening",
-            runtime_metadata={
-                "execution_mode": "managed_image",
-                "endpoint_id": "endpoint-1",
-                "desired_build_id": "build-1",
-                "warmed_build_id": "build-2",
-                "desired_revision_id": "rev-1",
-                "warmed_revision_id": "rev-1",
-                "bundle_path": "/opt/dspy-bundle",
-            },
-            now=now + timedelta(seconds=1),
-        )
-        await services.heartbeat_endpoint_worker(
-            "endpoint-worker-2",
-            runtime_instance_id="runtime-2",
-            status="listening",
-            runtime_metadata={
-                "execution_mode": "managed_image",
-                "endpoint_id": "endpoint-2",
-                "desired_build_id": "build-3",
-                "warmed_build_id": "build-3",
-                "desired_revision_id": "rev-2",
-                "warmed_revision_id": "rev-2",
-                "bundle_path": "/opt/dspy-bundle",
-            },
-            now=now + timedelta(seconds=1),
-        )
-        await services.heartbeat_endpoint_worker(
-            "endpoint-worker-3",
-            runtime_instance_id="runtime-3",
-            status="listening",
-            runtime_metadata={
-                "execution_mode": "managed_image",
-                "endpoint_id": "wrong-endpoint",
-                "desired_build_id": "build-4",
-                "warmed_build_id": "build-4",
-                "desired_revision_id": "rev-3",
-                "warmed_revision_id": "rev-3",
-                "bundle_path": "/opt/dspy-bundle",
-            },
-            now=now + timedelta(seconds=1),
-        )
-        payload = await services.list_endpoint_workers(now=now + timedelta(seconds=1))
-
-        assert payload["available_workers"] == 1
-        assert payload["ready_workers"] == 1
-        assert payload["summary"]["ready_workers"] == 1
-        assert payload["items"][0]["deploy_state"] == "build_mismatch"
-        assert payload["items"][0]["is_revision_ready"] is False
-        assert payload["items"][1]["deploy_state"] == "ready"
-        assert payload["items"][1]["is_revision_ready"] is True
-        assert payload["items"][2]["deploy_state"] == "endpoint_mismatch"
-        assert payload["items"][2]["is_revision_ready"] is False
-    asyncio.run(scenario())
 
 
 def test_list_endpoint_workers_registry_marks_assigned_listening_workers_without_revision_metadata():

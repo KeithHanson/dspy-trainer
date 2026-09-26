@@ -56,9 +56,9 @@ LM Profile setup note:
 - Each LM Profile stores the direct provider endpoint, model identifier, optional LM class override, and optional provider API key.
 
 Managed endpoint worker note:
-- The Compose `endpoint-worker` service is the migration-only static pool. It can serve an endpoint only while that endpoint's current deployment phase is explicitly `legacy_static`.
-- A revision-image worker starts in `managed_image` mode with `DSPY_TRAINER_ENDPOINT_ID`, immutable baked build/revision identity, and the fixed `/opt/dspy-bundle` path. Registration rejects identity that does not match both the baked image metadata and the endpoint deployment's database assignment.
-- Managed readiness requires matching desired and warmed build/revision heartbeats. Managed jobs use endpoint/build/revision-specific Redis queues and carry the same provenance into the MLflow trace.
+- The Compose `endpoint-worker` service is the migration-only static pool. It can serve only deployments whose durable `legacy_fallback` flag remains true. Existing legacy endpoints retain that fallback throughout managed-image warming and failed replacement attempts; new endpoints never receive it.
+- A revision-image worker starts in `managed_image` mode with immutable endpoint, worker, deployment, slot, rollout-generation, build, revision, and `/opt/dspy-bundle` identity. Registration also requires an exact non-removed managed-container row for that slot; stale or mismatched identities are rejected.
+- Managed readiness requires the exact worker/deployment/slot/generation plus matching desired and warmed build/revision heartbeats. Managed jobs use endpoint/build/revision-specific Redis queues and carry the same provenance into the MLflow trace.
 
 Bundle runtime note:
 - Backend, general workers, and explicit `legacy_static` endpoint workers retain checkout-based dependency installation for migration compatibility.
@@ -138,16 +138,16 @@ The generated Dockerfile uses the supplied immutable backend image ID directly i
 
 ## Managed Endpoint Image Execution
 
-Managed invocation routing chooses only live `listening` workers whose endpoint, execution mode, desired/warmed build, desired/warmed revision, and baked bundle path match an allowed deployment build. Ready deployments route to the active build; rolling, draining, and rollback deployments may route to both active and target builds so in-flight rollout revisions can coexist without sharing queues. Each queued job repeats the chosen build/revision/path, and the worker rejects a mismatch before invoking bundle code. MLflow trace attributes record `revision_image_build_id`, `bundle_revision_id`, and `execution_mode` from the worker's accepted assignment.
+Managed invocation routing chooses only live `listening` workers whose endpoint, execution mode, desired/warmed build, desired/warmed revision, baked bundle path, deployment ID, slot, and rollout generation match the current deployment. During warming, invocations continue on the active managed revision, or on the legacy pool while `legacy_fallback` is true. Target workers receive no traffic until every exact desired slot is ready and the reconciler atomically promotes target to active. Each queued job repeats the accepted build/revision/path, and the worker rejects a mismatch before invoking bundle code. MLflow trace attributes record `revision_image_build_id`, `bundle_revision_id`, and `execution_mode` from the worker's accepted assignment.
 
 ### Managed Execution Deployment-host Acceptance (Do Not Run on Development Workstations)
 
-1. Choose an endpoint whose deployment has a ready active revision-image build. Start its managed worker with only Postgres, Redis, MLflow, endpoint/worker identity, the baked build/revision identity, and the module-environment encryption key when encrypted runtime secrets are configured.
+1. Choose an endpoint whose deployment has a ready active revision-image build. Start its managed worker with only Postgres, Redis, MLflow, exact endpoint/worker/deployment/slot/rollout-generation identity, the baked build/revision identity, and the module-environment encryption key when encrypted runtime secrets are configured.
 2. Inspect the worker container mounts and environment. Confirm no checkout or bundle volume is mounted; `/opt/dspy-bundle` comes from the image; and no GitHub, Git, Docker, deployer/build, or broad host environment is present.
 3. Capture startup logs and process activity. Confirm the worker performs no `apt`, `pip`, requirements installation, Git operation, or mutable checkout resolution before reporting matching desired/warmed build and revision readiness.
 4. Invoke the endpoint once through the synchronous API and once through SSE. Confirm both jobs use the endpoint/build/revision-specific Redis queue and their MLflow traces report the active build and revision.
 5. Sync or modify the host checkout after the image worker is ready, then invoke both paths again. Confirm responses and trace provenance remain pinned to the baked revision rather than observing the newer checkout.
-6. Start a worker with a wrong endpoint, build, revision, or bundle path and confirm registration/readiness fails and it never consumes endpoint traffic. Confirm a static worker can serve only an endpoint whose current deployment phase is `legacy_static`.
+6. Start a worker with a wrong endpoint, worker, deployment, slot, rollout generation, build, revision, or bundle path and confirm registration/readiness fails and it never consumes endpoint traffic. Confirm a static worker can serve only an endpoint whose current deployment retains `legacy_fallback: true`.
 
 ## Durable Revision Image Coordinator
 
@@ -168,11 +168,11 @@ Only `deployer` installs the Docker SDK and mounts `/var/run/docker.sock`; it ha
 
 ## Managed Endpoint Container Reconciliation
 
-The same advisory leader reconciles durable endpoint deployment intent against Docker one action at a time. It discovers the configured network by exact name and Compose project label, starts deterministic slots with restart policy `unless-stopped`, and always uses the inspected immutable image ID. Adoption and deletion require the complete `io.dspy-trainer.*` container identity: platform owner, stack owner, managed kind, endpoint, deployment, slot, build, revision, rollout generation, worker, and image ID. A similar name, incomplete labels, wrong owner, or image mismatch is foreign and remains untouched.
+The same advisory leader reconciles durable endpoint deployment intent against Docker one action at a time. It discovers the configured network by exact name and Compose project label, starts deterministic slots with restart policy `unless-stopped`, and always uses the inspected immutable image ID. Adoption and deletion require the complete `io.dspy-trainer.*` container identity: platform owner, stack owner, managed kind, endpoint, deployment, slot, build, revision, rollout generation, worker, and image ID. A similar name, incomplete labels, wrong owner, or image mismatch is foreign and remains untouched. Before Docker reconciliation, the scheduler automatically creates or advances a target for every validated current revision with a ready local image, covering both initial legacy migration and every later module revision without an endpoint edit.
 
-Rolling replacement is slot-by-slot. A target container must register live in `managed_image` mode with matching endpoint plus matching desired/warmed build and revision before its old slot can drain. Draining atomically clears assignment before the worker may claim another job. A job already claimed may finish; after the drain timeout the reconciler force-removes the container and records the timeout, reason, and bounded final log. Startup or readiness failure enters durable rollback and restores any missing old-revision slots before target containers are removed.
+Rolling replacement is slot-by-slot. A target container must register live in `managed_image` mode with the exact endpoint, deployment, slot, rollout generation, worker, desired/warmed build, and desired/warmed revision before its old slot can drain. The active revision or legacy fallback remains routable until every target slot is ready; promotion and legacy-fallback removal occur in one database update. Draining atomically clears assignment before the worker may claim another job. A job already claimed may finish; after the drain timeout the reconciler force-removes the container and records the timeout, reason, and bounded final log. Startup or readiness failure enters durable rollback and restores any missing old-revision slots before target containers are removed.
 
-Restarting the deployer re-observes only containers whose deployment ID and rollout generation match the current intent, then resumes the durable phase without duplicating slots. Pinned worker-count changes update the latest managed deployment and scale from that durable intent. Scale-down retires the highest surplus slots deterministically. Endpoint deletion first tombstones the API row and blocks worker claims; the reconciler drains and removes exact owned containers before deleting their RESTRICT-protected container/deployment rows and finalizing the endpoint. Cleanup runs only after all deployment intents converge. It retains at least the newest two ready images per module and never prunes an image referenced as active, target, previous, or by a non-removed managed container; a successful prune marks the build `pruned` durably.
+Restarting the deployer re-observes only containers whose deployment ID and rollout generation match the current intent, then resumes the durable phase without duplicating slots. Pinned worker-count changes update the latest managed deployment and scale from that durable intent. Scale-down retires the highest surplus slots deterministically. Endpoint deletion first tombstones the API row and blocks worker claims; the reconciler drains and removes exact owned containers before deleting their RESTRICT-protected container/deployment rows and finalizing the endpoint. Cleanup runs only after all deployment intents converge. It retains at least the newest two ready images per module and never prunes an image referenced as active, target, previous, or by a non-removed managed container; a successful prune marks the build `pruned` durably. Restarting the backend preserves registry rows for diagnostics and continuity, marks only expired heartbeat/runtime identities stale, and accepts fresh exact registrations from surviving managed containers.
 
 Container absence is durable evidence only after a complete, successful Docker listing in which every returned container was inspectable. If an exact owned container recorded in PostgreSQL is absent from that complete observation, the reconciler finalizes its container row as removed; this lets a tombstoned endpoint finish deletion and releases the row's image reference for retention pruning. A partial, failed, or uninspectable Docker observation preserves container rows, endpoint tombstones, and image references for the next cycle. Similarly named or incompletely labeled foreign resources are never adopted, stopped, or removed.
 
@@ -252,6 +252,18 @@ curl -fsS -X POST 'http://localhost:8000/revision-image-builds/rebuild-all'
 ```
 
 A `409` response with code `build_conflict` means an equivalent generation is already active or the requested build cannot be retried. `not_eligible` means the revision is no longer the current validated, synced source. A `503` with code `build_coordinator_unavailable` means the backend lacks the deployer identity/base-image configuration. Source validation and sync are independent of these build failures.
+
+## Managed Endpoint Deployment Operations
+
+Create returns `409` before any endpoint or deployment row is written unless the requested module's exact current revision is validated and has a ready local image. Inspect the stable `code` and `build_status` fields: `endpoint_revision_not_ready`/`revision_not_ready` means validation is absent or belongs to another revision; `endpoint_image_not_ready` distinguishes `missing`, `queued`, `building`, `failed`, `pruned`, and `missing_local_image`.
+
+```bash
+# Inspect active, target, and previous build/revision; migration state; per-slot readiness/draining;
+# rollback or rollout reason; and retained build-log links.
+curl -fsS 'http://localhost:8000/bundle-endpoints/ENDPOINT_ID/deployment'
+```
+
+`legacy_fallback: true` with `migration_state: warming_managed` means the static pool intentionally remains live while target slots warm. `migration_failed` or a rollback reason means traffic remains on the legacy/active revision; inspect the target's `logs_url` and slot failure reason. `migration_state: managed`, `phase: ready`, and every desired slot reporting `ready: true` confirms atomic cutover. A target must never receive invocation traffic before that cutover.
 
 ## Troubleshooting
 

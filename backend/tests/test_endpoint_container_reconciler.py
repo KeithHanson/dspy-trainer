@@ -63,6 +63,9 @@ class _Store:
     async def disconnect(self):
         return None
 
+    async def reconcile_deployment_targets(self):
+        return 0
+
     async def list_deployment_intents(self):
         return list(self.intents)
 
@@ -338,6 +341,9 @@ def _ready(container):
         execution_mode="managed_image",
         build_id=labels[f"{prefix}.build-id"],
         revision_id=labels[f"{prefix}.revision-id"],
+        deployment_id=labels[f"{prefix}.deployment-id"],
+        slot=int(labels[f"{prefix}.slot"]),
+        rollout_generation=int(labels[f"{prefix}.rollout-generation"]),
         task_id=None,
         is_live=True,
         last_seen_at=NOW,
@@ -386,8 +392,12 @@ def test_rollout_waits_for_exact_registry_readiness_before_stopping_old_slot():
 
         assert await reconciler.run_cycle() is False
         assert old in docker.containers
-
         store.registry[_ready(replacement).worker_id] = _ready(replacement)
+        assert await reconciler.run_cycle() is True
+        assert old in docker.containers
+        assert ("completed", "deployment-1", False) in store.events
+        assert ("blocked", _ready(old).worker_id) not in store.events
+
         assert await reconciler.run_cycle() is True
         assert old in docker.containers
         assert ("blocked", _ready(old).worker_id) in store.events
@@ -419,7 +429,9 @@ def test_active_drain_waits_then_records_force_stop_timeout():
         old_snapshot = replace(_ready(old), status="running", task_id="task-1")
         store.registry[old_snapshot.worker_id] = old_snapshot
         reconciler = _reconciler(store, docker, clock, drain=10)
-
+        assert await reconciler.run_cycle() is True
+        assert old in docker.containers
+        assert ("completed", "deployment-1", False) in store.events
         assert await reconciler.run_cycle() is True
         assert old in docker.containers
         clock.advance(9)
@@ -470,9 +482,11 @@ def test_partial_rollout_readiness_failure_restores_missing_old_slots():
         store.registry[_ready(restored_slot_0).worker_id] = _ready(restored_slot_0)
         assert await reconciler.run_cycle() is True
         assert failed_new in docker.containers
+        assert store.intents[0].phase == "ready"
+        assert await reconciler.run_cycle() is True
+        assert failed_new in docker.containers
         assert await reconciler.run_cycle() is True
         assert failed_new not in docker.containers
-        assert await reconciler.run_cycle() is True
         assert store.intents[0].phase == "ready"
         assert store.intents[0].active_build_id == "build-old"
         assert any(
@@ -865,6 +879,9 @@ class _EndpointApiConnection:
                         "warmed_build_id": snapshot.build_id,
                         "desired_revision_id": snapshot.revision_id,
                         "warmed_revision_id": snapshot.revision_id,
+                        "endpoint_deployment_id": snapshot.deployment_id,
+                        "endpoint_slot": snapshot.slot,
+                        "endpoint_rollout_generation": snapshot.rollout_generation,
                     },
                 }
                 for snapshot in self.registry.values()
@@ -890,6 +907,8 @@ class _EndpointApiConnection:
 
     async def fetchrow(self, query, *params):
         normalized = " ".join(query.strip().lower().split())
+        if "ready_build_id" in normalized and "from bundle_endpoints e" in normalized:
+            return None
         if normalized.startswith("update bundle_endpoints set delete_requested_at"):
             if self.tombstoned or self.deleted:
                 return None
@@ -936,8 +955,9 @@ class _EndpointApiConnection:
         if normalized.startswith("insert into managed_endpoint_containers"):
             self.container_records[params[0]] = {
                 "container_id": params[0],
-                "lifecycle": params[7],
-                "started_at": params[9],
+                "worker_id": params[7],
+                "lifecycle": params[8],
+                "started_at": params[10],
                 "drain_started_at": None,
             }
             return "INSERT 1"
@@ -994,10 +1014,14 @@ def test_endpoint_api_updates_managed_scale_and_tombstones_before_reconcile_dele
     async def get_module(module_id):
         return {"id": module_id}
 
+    async def get_deployment_status(endpoint_id):
+        return {"endpoint_id": endpoint_id, "phase": "ready"}
+
     services.connect_backend = no_op
     services.disconnect = no_op
     services.reconcile_endpoint_worker_assignments = no_op
     services.get_module = get_module
+    services.get_endpoint_deployment_status = get_deployment_status
     monkeypatch.setattr(main_mod, "AppServices", lambda settings: services)
     monkeypatch.setattr(main_mod, "get_settings", lambda: SimpleNamespace())
 

@@ -15,7 +15,12 @@ from app.config import get_cors_origins_from_env, get_settings
 from app.executor import run_bundle_eval
 from app.revision_image_builder import BuildContextError
 from app.revision_image_coordinator import RevisionImageEnqueueError
-from app.services import AppServices, EndpointUnavailableError, ModuleSyncError
+from app.services import (
+    AppServices,
+    EndpointImageNotReadyError,
+    EndpointUnavailableError,
+    ModuleSyncError,
+)
 from app.validator import validate_bundle
 
 
@@ -82,6 +87,21 @@ def _endpoint_unavailable_response(exc: EndpointUnavailableError) -> JSONRespons
             "error": str(exc),
             "code": exc.code,
             "routing_state": exc.routing_state,
+        },
+    )
+
+
+def _endpoint_image_not_ready_response(
+    exc: EndpointImageNotReadyError,
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=409,
+        content={
+            "error": str(exc),
+            "code": exc.code,
+            "revision_id": exc.revision_id,
+            "build_status": exc.build_status,
+            "build": json.loads(json.dumps(exc.build, default=str)),
         },
     )
 
@@ -624,10 +644,14 @@ async def list_bundle_endpoints(module_id: str, request: Request):
 
 
 @app.post("/modules/{module_id}/endpoints")
-async def create_bundle_endpoint(module_id: str, request: Request, payload: BundleEndpointCreateRequest):
+async def create_bundle_endpoint(
+    module_id: str, request: Request, payload: BundleEndpointCreateRequest
+):
     services: AppServices = request.app.state.services
     try:
         endpoint = await services.create_bundle_endpoint(module_id, payload.name, payload.lm_profile_id, payload.pinned_worker_count)
+    except EndpointImageNotReadyError as exc:
+        return _endpoint_image_not_ready_response(exc)
     except ValueError as exc:
         return JSONResponse(status_code=400, content={"error": str(exc)})
     if endpoint is None:
@@ -680,7 +704,9 @@ async def list_all_bundle_endpoints(request: Request):
 
 
 @app.post("/bundle-endpoints")
-async def create_bundle_endpoint_global(request: Request, payload: BundleEndpointCreateRequest):
+async def create_bundle_endpoint_global(
+    request: Request, payload: BundleEndpointCreateRequest
+):
     services: AppServices = request.app.state.services
     try:
         endpoint = await services.create_bundle_endpoint_global(
@@ -689,6 +715,8 @@ async def create_bundle_endpoint_global(request: Request, payload: BundleEndpoin
             payload.lm_profile_id,
             payload.pinned_worker_count,
         )
+    except EndpointImageNotReadyError as exc:
+        return _endpoint_image_not_ready_response(exc)
     except ValueError as exc:
         return JSONResponse(status_code=400, content={"error": str(exc)})
     if endpoint is None:
@@ -705,8 +733,19 @@ async def get_bundle_endpoint(endpoint_id: str, request: Request):
     return endpoint
 
 
+@app.get("/bundle-endpoints/{endpoint_id}/deployment")
+async def get_bundle_endpoint_deployment(endpoint_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    status = await services.get_endpoint_deployment_status(endpoint_id)
+    if status is None:
+        return JSONResponse(status_code=404, content={"error": "endpoint not found"})
+    return status
+
+
 @app.patch("/bundle-endpoints/{endpoint_id}")
-async def update_bundle_endpoint_global(endpoint_id: str, request: Request, payload: BundleEndpointUpdateRequest):
+async def update_bundle_endpoint_global(
+    endpoint_id: str, request: Request, payload: BundleEndpointUpdateRequest
+):
     services: AppServices = request.app.state.services
     try:
         endpoint = await services.update_bundle_endpoint_global(
@@ -716,6 +755,8 @@ async def update_bundle_endpoint_global(endpoint_id: str, request: Request, payl
             lm_profile_id=payload.lm_profile_id,
             pinned_worker_count=payload.pinned_worker_count,
         )
+    except EndpointImageNotReadyError as exc:
+        return _endpoint_image_not_ready_response(exc)
     except ValueError as exc:
         message = str(exc)
         status_code = 404 if message == "module not found" else 400

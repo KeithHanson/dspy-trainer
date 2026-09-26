@@ -58,6 +58,10 @@ def _managed_runtime_identity(bundle_path: str = BUNDLE_IMAGE_PATH):
         "build_id": "build-1",
         "revision_id": "revision-1",
         "bundle_path": bundle_path,
+        "worker_id": "worker-1",
+        "deployment_id": "deployment-1",
+        "slot": 0,
+        "rollout_generation": 2,
     }
     return {
         "runtime_instance_id": "runtime-1",
@@ -72,6 +76,10 @@ def _managed_runtime_identity(bundle_path: str = BUNDLE_IMAGE_PATH):
             "baked_build_id": "build-1",
             "baked_revision_id": "revision-1",
             "bundle_path": bundle_path,
+            "worker_id": "worker-1",
+            "endpoint_deployment_id": "deployment-1",
+            "endpoint_slot": 0,
+            "endpoint_rollout_generation": 2,
         },
     }
 
@@ -89,6 +97,10 @@ def test_managed_boot_identity_requires_the_fixed_existing_baked_bundle(
             "DSPY_TRAINER_BAKED_BUILD_ID": "build-1",
             "DSPY_TRAINER_BAKED_REVISION_ID": "revision-1",
             "DSPY_TRAINER_BUNDLE_PATH": str(baked_bundle),
+            "DSPY_TRAINER_WORKER_ID": "worker-1",
+            "DSPY_TRAINER_ENDPOINT_DEPLOYMENT_ID": "deployment-1",
+            "DSPY_TRAINER_ENDPOINT_SLOT": "0",
+            "DSPY_TRAINER_ENDPOINT_ROLLOUT_GENERATION": "2",
         }
     )
     assert identity == {
@@ -97,6 +109,10 @@ def test_managed_boot_identity_requires_the_fixed_existing_baked_bundle(
         "build_id": "build-1",
         "revision_id": "revision-1",
         "bundle_path": str(baked_bundle),
+        "worker_id": "worker-1",
+        "deployment_id": "deployment-1",
+        "slot": 0,
+        "rollout_generation": 2,
     }
 
     with pytest.raises(RuntimeError, match="bundle path must be"):
@@ -107,6 +123,10 @@ def test_managed_boot_identity_requires_the_fixed_existing_baked_bundle(
                 "DSPY_TRAINER_BAKED_BUILD_ID": "build-1",
                 "DSPY_TRAINER_BAKED_REVISION_ID": "revision-1",
                 "DSPY_TRAINER_BUNDLE_PATH": str(tmp_path / "checkout"),
+                "DSPY_TRAINER_WORKER_ID": "worker-1",
+                "DSPY_TRAINER_ENDPOINT_DEPLOYMENT_ID": "deployment-1",
+                "DSPY_TRAINER_ENDPOINT_SLOT": "0",
+                "DSPY_TRAINER_ENDPOINT_ROLLOUT_GENERATION": "2",
             }
         )
 
@@ -306,7 +326,12 @@ def test_managed_identity_validation_matches_baked_labels_to_database_assignment
         }
 
     async def build(build_id):
-        return {"id": build_id, "revision_id": "revision-1", "status": "ready"}
+        return {
+            "id": build_id,
+            "revision_id": "revision-1",
+            "status": "ready",
+            "image_id": "sha256:image",
+        }
 
     services.get_endpoint_deployment = deployment  # type: ignore[method-assign]
     services.get_revision_image_build = build  # type: ignore[method-assign]
@@ -348,7 +373,26 @@ def test_managed_invocation_trace_records_actual_pinned_image_provenance(monkeyp
             "name": "Managed",
         }
 
-    async def validate(metadata):
+    async def registration(worker_id):
+        assert worker_id == "worker-1"
+        return {
+            "is_live": True,
+            "runtime_metadata": {
+                "execution_mode": "managed_image",
+                "endpoint_id": "endpoint-1",
+                "worker_id": "worker-1",
+                "endpoint_deployment_id": "deployment-1",
+                "endpoint_slot": 0,
+                "endpoint_rollout_generation": 1,
+                "desired_build_id": "build-1",
+                "desired_revision_id": "revision-1",
+                "baked_build_id": "build-1",
+                "baked_revision_id": "revision-1",
+                "bundle_path": BUNDLE_IMAGE_PATH,
+            },
+        }
+
+    async def validate(metadata, *, worker_id=None):
         return {
             "endpoint_id": metadata["endpoint_id"],
             "build_id": metadata["desired_build_id"],
@@ -379,6 +423,7 @@ def test_managed_invocation_trace_records_actual_pinned_image_provenance(monkeyp
         return operation(), "trace-1"
 
     services.get_bundle_endpoint = endpoint  # type: ignore[method-assign]
+    services._get_endpoint_worker_registration = registration  # type: ignore[method-assign]
     services.validate_managed_endpoint_worker_identity = validate  # type: ignore[method-assign]
     services.get_module_runtime_environment = runtime_environment  # type: ignore[method-assign]
     services.publish_endpoint_invocation_event = publish  # type: ignore[method-assign]

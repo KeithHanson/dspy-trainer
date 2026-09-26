@@ -144,7 +144,7 @@ An **LM profile** configures direct provider runtime access:
 
 ### 🔌 Managed Endpoint
 
-A **managed endpoint** exposes a validated bundle to external callers with a rotatable API key:
+A **managed endpoint** exposes a validated bundle to external callers with a rotatable API key. Creation is accepted only when the module's exact current revision is validated and has a ready, non-pruned local image; otherwise the API returns `409` with a stable `endpoint_revision_not_ready` or `endpoint_image_not_ready` code and writes no endpoint or deployment intent. New endpoints begin as managed-image deployments and become invokable only after their exact container slots report ready.
 
 - Create, rename, delete, and rotate keys from the bundle detail page
 - `POST /bundle-endpoints/{id}/invoke` returns one JSON output payload

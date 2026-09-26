@@ -26,7 +26,7 @@ _UNSET = object()
 
 def load_endpoint_worker_boot_identity(
     environ: dict[str, str] | None = None,
-) -> dict[str, str | None]:
+) -> dict[str, object]:
     source = environ if environ is not None else os.environ
     execution_mode = str(
         source.get("DSPY_TRAINER_ENDPOINT_WORKER_MODE") or "legacy_static"
@@ -38,6 +38,10 @@ def load_endpoint_worker_boot_identity(
             "build_id": None,
             "revision_id": None,
             "bundle_path": None,
+            "worker_id": None,
+            "deployment_id": None,
+            "slot": None,
+            "rollout_generation": None,
         }
     if execution_mode != "managed_image":
         raise RuntimeError(
@@ -49,6 +53,14 @@ def load_endpoint_worker_boot_identity(
         "build_id": str(source.get("DSPY_TRAINER_BAKED_BUILD_ID") or "").strip(),
         "revision_id": str(source.get("DSPY_TRAINER_BAKED_REVISION_ID") or "").strip(),
         "bundle_path": str(source.get("DSPY_TRAINER_BUNDLE_PATH") or "").strip(),
+        "worker_id": str(source.get("DSPY_TRAINER_WORKER_ID") or "").strip(),
+        "deployment_id": str(
+            source.get("DSPY_TRAINER_ENDPOINT_DEPLOYMENT_ID") or ""
+        ).strip(),
+        "slot": str(source.get("DSPY_TRAINER_ENDPOINT_SLOT") or "").strip(),
+        "rollout_generation": str(
+            source.get("DSPY_TRAINER_ENDPOINT_ROLLOUT_GENERATION") or ""
+        ).strip(),
     }
     missing = sorted(
         name
@@ -59,6 +71,19 @@ def load_endpoint_worker_boot_identity(
         raise RuntimeError(
             f"managed endpoint worker identity is missing: {', '.join(missing)}"
         )
+    try:
+        slot = int(str(identity["slot"]))
+        rollout_generation = int(str(identity["rollout_generation"]))
+    except ValueError as exc:
+        raise RuntimeError(
+            "managed endpoint worker slot and rollout generation must be integers"
+        ) from exc
+    if slot < 0 or rollout_generation < 0:
+        raise RuntimeError(
+            "managed endpoint worker slot and rollout generation must be non-negative"
+        )
+    identity["slot"] = slot
+    identity["rollout_generation"] = rollout_generation
     if identity["bundle_path"] != BUNDLE_IMAGE_PATH:
         raise RuntimeError(
             f"managed endpoint worker bundle path must be {BUNDLE_IMAGE_PATH}"
@@ -98,6 +123,10 @@ def _build_runtime_identity(
             },
             "execution_mode": boot_identity["execution_mode"],
             "endpoint_id": boot_identity["endpoint_id"],
+            "worker_id": boot_identity["worker_id"],
+            "endpoint_deployment_id": boot_identity["deployment_id"],
+            "endpoint_slot": boot_identity["slot"],
+            "endpoint_rollout_generation": boot_identity["rollout_generation"],
             "desired_build_id": boot_identity["build_id"],
             "desired_revision_id": boot_identity["revision_id"],
             "baked_build_id": boot_identity["build_id"],
@@ -452,7 +481,12 @@ async def ensure_endpoint_assignment_ready(
         return expected
 
     deployment = await services.get_endpoint_deployment(endpoint_id)
-    if deployment is None or str(deployment.get("phase") or "") != "legacy_static":
+    if deployment is None or not bool(
+        deployment.get(
+            "legacy_fallback",
+            str(deployment.get("phase") or "") == "legacy_static",
+        )
+    ):
         await _heartbeat(
             services,
             worker_id,
