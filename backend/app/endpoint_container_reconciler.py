@@ -118,6 +118,12 @@ class ObservedContainer:
 
 
 @dataclass(frozen=True)
+class ContainerObservation:
+    containers: tuple[ObservedContainer, ...]
+    complete: bool
+
+
+@dataclass(frozen=True)
 class ContainerRecord:
     container_id: str
     lifecycle: str
@@ -231,7 +237,7 @@ class EndpointContainerStore(Protocol):
 class EndpointDockerAdapter(Protocol):
     async def resolve_network(self, selector: str, compose_project: str) -> str: ...
 
-    async def list_containers(self) -> list[ObservedContainer]: ...
+    async def list_containers(self) -> ContainerObservation: ...
 
     async def start_container(self, spec: ContainerLaunchSpec) -> ObservedContainer: ...
 
@@ -320,7 +326,8 @@ class EndpointContainerReconciler:
         )
         registry = await self._store.list_registry_snapshots()
         records = await self._store.list_container_records()
-        observed = await self._docker.list_containers()
+        observation = await self._docker.list_containers()
+        observed = list(observation.containers)
         owned = self._owned_containers(observed)
         intents_by_endpoint = {intent.endpoint_id: intent for intent in intents}
 
@@ -328,6 +335,24 @@ class EndpointContainerReconciler:
             intent = intents_by_endpoint.get(identity.endpoint_id)
             if intent is not None and self._identity_matches_intent(identity, intent):
                 await self._store.observe_container(identity, container, now=now)
+
+        if observation.complete:
+            present_owned_ids = {container.container_id for container, _ in owned}
+            missing_record_ids = sorted(
+                container_id
+                for container_id, record in records.items()
+                if record.lifecycle != "removed"
+                and container_id not in present_owned_ids
+            )
+            if missing_record_ids:
+                await self._store.record_container_removed(
+                    missing_record_ids[0],
+                    now=now,
+                    timed_out=False,
+                    reason="container absent during complete Docker observation",
+                    logs="",
+                )
+                return True
 
         for container, identity in owned:
             if identity.endpoint_id not in intents_by_endpoint:
@@ -1203,8 +1228,8 @@ class DockerSdkEndpointAdapter:
 
         return await asyncio.to_thread(resolve)
 
-    async def list_containers(self) -> list[ObservedContainer]:
-        def collect() -> list[ObservedContainer]:
+    async def list_containers(self) -> ContainerObservation:
+        def collect() -> ContainerObservation:
             prefix = self._label_namespace
             containers = self._docker().containers.list(
                 all=True,
@@ -1215,7 +1240,8 @@ class DockerSdkEndpointAdapter:
                     ]
                 },
             )
-            return [self._observed(container) for container in containers]
+            observed = tuple(self._observed(container) for container in containers)
+            return ContainerObservation(containers=observed, complete=True)
 
         return await asyncio.to_thread(collect)
 

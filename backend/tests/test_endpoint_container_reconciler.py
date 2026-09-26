@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import main as main_mod
 from app.endpoint_container_reconciler import (
+    ContainerObservation,
     ContainerRecord,
     DeploymentIntent,
     DockerSdkEndpointAdapter,
@@ -198,6 +199,8 @@ class _Docker:
         self.pruned = []
         self.fail_start = False
         self.invalid_start_labels = False
+        self.observation_complete = True
+        self.fail_observation = False
         self._next_id = 1
 
     async def resolve_network(self, selector, compose_project):
@@ -206,7 +209,12 @@ class _Docker:
         return "network-id"
 
     async def list_containers(self):
-        return list(self.containers)
+        if self.fail_observation:
+            raise RuntimeError("injected Docker observation failure")
+        return ContainerObservation(
+            containers=tuple(self.containers),
+            complete=self.observation_complete,
+        )
 
     async def start_container(self, spec):
         if self.fail_start:
@@ -803,6 +811,8 @@ class _EndpointApiConnection:
         self.deleted = False
         self.worker_claims_blocked = False
         self.finalized = False
+        self.prune_candidate = None
+        self.pruned = False
 
     def is_closed(self):
         return False
@@ -869,6 +879,12 @@ class _EndpointApiConnection:
                 if record["lifecycle"] != "removed"
             ]
         if "with ranked as" in normalized:
+            has_reference = any(
+                record["lifecycle"] != "removed"
+                for record in self.container_records.values()
+            )
+            if self.prune_candidate is not None and not has_reference:
+                return [dict(self.prune_candidate)]
             return []
         raise AssertionError(f"unexpected fetch SQL: {normalized}")
 
@@ -892,6 +908,8 @@ class _EndpointApiConnection:
             )
             return dict(self.endpoint)
         if normalized.startswith("select e.id from bundle_endpoints e"):
+            if self.deleted:
+                return None
             active = any(
                 record["lifecycle"] != "removed"
                 for record in self.container_records.values()
@@ -943,6 +961,9 @@ class _EndpointApiConnection:
             return "DELETE 2"
         if normalized.startswith("delete from endpoint_deployments"):
             return "DELETE 1"
+        if normalized.startswith("update revision_image_builds"):
+            self.pruned = True
+            return "UPDATE 1"
         if normalized.startswith("delete from bundle_endpoints"):
             self.deleted = True
             self.finalized = True
@@ -1031,6 +1052,98 @@ def test_endpoint_api_updates_managed_scale_and_tombstones_before_reconcile_dele
     assert docker.containers == []
     assert connection.deleted is True
     assert connection.finalized is True
+
+
+def _missing_container_restart_state():
+    connection = _EndpointApiConnection()
+    connection.tombstoned = True
+    connection.deployment = replace(connection.deployment, phase="draining")
+    connection.container_records["missing-container"] = {
+        "container_id": "missing-container",
+        "lifecycle": "ready",
+        "started_at": NOW,
+        "drain_started_at": None,
+    }
+    connection.prune_candidate = {
+        "id": "released-build",
+        "revision_id": "released-revision",
+        "module_import_id": "module-1",
+        "image_id": "sha256:released",
+    }
+    return connection
+
+
+def test_complete_restart_observation_finalizes_missing_row_endpoint_and_image():
+    async def scenario():
+        connection = _missing_container_restart_state()
+        store = _endpoint_store(connection)
+        clock = _Clock()
+        docker = _Docker(clock)
+        foreign = replace(
+            _container(
+                "foreign",
+                labels={
+                    f"{NAMESPACE}.owner": OWNER,
+                    f"{NAMESPACE}.managed-kind": "endpoint-worker",
+                    f"{NAMESPACE}.endpoint-id": "endpoint-1",
+                },
+            ),
+            name="container-name-missing-container",
+        )
+        docker.containers.append(foreign)
+        reconciler = _reconciler(store, docker, clock)
+
+        assert await reconciler.run_cycle() is True
+        assert (
+            connection.container_records["missing-container"]["lifecycle"] == "removed"
+        )
+        assert foreign in docker.containers
+        assert ("stop", "foreign") not in docker.events
+
+        assert await reconciler.run_cycle() is True
+        assert connection.deleted is True
+        assert connection.container_records == {}
+
+        assert await reconciler.run_cycle() is True
+        assert docker.pruned == ["sha256:released"]
+        assert connection.pruned is True
+        assert foreign in docker.containers
+
+    asyncio.run(scenario())
+
+
+def test_incomplete_restart_observation_preserves_row_endpoint_and_image():
+    async def scenario():
+        connection = _missing_container_restart_state()
+        store = _endpoint_store(connection)
+        docker = _Docker(_Clock())
+        docker.observation_complete = False
+        reconciler = _reconciler(store, docker, _Clock())
+
+        assert await reconciler.run_cycle() is False
+        assert connection.container_records["missing-container"]["lifecycle"] == "ready"
+        assert connection.deleted is False
+        assert connection.pruned is False
+        assert docker.pruned == []
+
+    asyncio.run(scenario())
+
+
+def test_failed_restart_observation_preserves_row_endpoint_and_image():
+    async def scenario():
+        connection = _missing_container_restart_state()
+        store = _endpoint_store(connection)
+        docker = _Docker(_Clock())
+        docker.fail_observation = True
+        reconciler = _reconciler(store, docker, _Clock())
+
+        with pytest.raises(RuntimeError, match="observation failure"):
+            await reconciler.run_cycle()
+        assert connection.container_records["missing-container"]["lifecycle"] == "ready"
+        assert connection.deleted is False
+        assert connection.pruned is False
+
+    asyncio.run(scenario())
 
 
 class _PruneSqlConnection:
