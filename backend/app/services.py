@@ -1850,12 +1850,14 @@ class AppServices:
                   key_hash text not null,
                   key_preview text not null,
                   created_at timestamptz not null,
-                  updated_at timestamptz not null
+                  updated_at timestamptz not null,
+                  delete_requested_at timestamptz
                 );
                 """
             )
             await conn.execute("alter table bundle_endpoints add column if not exists lm_profile_id text references lm_profiles(id) on delete set null;")
             await conn.execute("alter table bundle_endpoints add column if not exists pinned_worker_count int not null default 1;")
+            await conn.execute("alter table bundle_endpoints add column if not exists delete_requested_at timestamptz;")
             await conn.execute("create index if not exists idx_bundle_endpoints_module_import_id on bundle_endpoints(module_import_id, created_at desc);")
             await conn.execute("alter table bundle_revisions add column if not exists source_snapshot_path text;")
             await conn.execute("alter table bundle_revisions add column if not exists source_content_digest text;")
@@ -2036,8 +2038,11 @@ class AppServices:
                   last_observed_at timestamptz,
                   last_heartbeat_at timestamptz,
                   started_at timestamptz,
+                  drain_started_at timestamptz,
                   stopped_at timestamptz,
+                  drain_timed_out boolean not null default false,
                   failure_reason text check (failure_reason is null or char_length(failure_reason) <= {MAX_FAILURE_REASON_CHARS}),
+                  container_log text not null default '',
                   created_at timestamptz not null,
                   updated_at timestamptz not null,
                   foreign key (deployment_id, endpoint_id)
@@ -2046,6 +2051,15 @@ class AppServices:
                     references revision_image_builds(id, revision_id) match full on delete restrict
                 );
                 """
+            )
+            await conn.execute(
+                "alter table managed_endpoint_containers add column if not exists drain_started_at timestamptz;"
+            )
+            await conn.execute(
+                "alter table managed_endpoint_containers add column if not exists drain_timed_out boolean not null default false;"
+            )
+            await conn.execute(
+                "alter table managed_endpoint_containers add column if not exists container_log text not null default '';"
             )
             await conn.execute(
                 """
@@ -2077,6 +2091,7 @@ class AppServices:
                 select 'legacy-' || e.id, e.id, 'legacy_static', greatest(1, e.pinned_worker_count), 0,
                        e.created_at, e.updated_at
                 from bundle_endpoints e
+                where e.delete_requested_at is null
                 on conflict (endpoint_id, rollout_generation) do nothing;
                 """
             )
@@ -3700,7 +3715,7 @@ class AppServices:
             updated_at,
         )
 
-    async def _update_legacy_endpoint_deployment_replica_count(
+    async def _update_endpoint_deployment_replica_count(
         self,
         conn: Any,
         *,
@@ -3712,7 +3727,13 @@ class AppServices:
             """
             update endpoint_deployments
             set desired_replica_count = $2, updated_at = $3
-            where endpoint_id = $1 and rollout_generation = 0 and phase = 'legacy_static'
+            where id = (
+              select id
+              from endpoint_deployments
+              where endpoint_id = $1
+              order by rollout_generation desc
+              limit 1
+            )
             """,
             endpoint_id,
             desired_replica_count,
@@ -3898,8 +3919,8 @@ class AppServices:
             rows = await conn.fetch(
                 """
                 select container_id, container_name, endpoint_id, deployment_id, build_id, revision_id,
-                       slot, lifecycle, last_observed_at, last_heartbeat_at, started_at, stopped_at,
-                       failure_reason, created_at, updated_at
+                       slot, lifecycle, last_observed_at, last_heartbeat_at, started_at, drain_started_at,
+                       stopped_at, drain_timed_out, failure_reason, container_log, created_at, updated_at
                 from managed_endpoint_containers
                 where endpoint_id = $1
                 order by created_at asc, container_id asc
@@ -3932,7 +3953,7 @@ class AppServices:
                 from bundle_endpoints e
                 join module_imports m on m.id = e.module_import_id
                 left join lm_profiles lp on lp.id = e.lm_profile_id and lp.archived_at is null
-                where m.deleted_at is null
+                where m.deleted_at is null and e.delete_requested_at is null
                 order by e.created_at desc
                 """
             )
@@ -3950,7 +3971,7 @@ class AppServices:
                 from bundle_endpoints e
                 join module_imports m on m.id = e.module_import_id
                 left join lm_profiles lp on lp.id = e.lm_profile_id and lp.archived_at is null
-                where e.id = $1 and m.deleted_at is null
+                where e.id = $1 and m.deleted_at is null and e.delete_requested_at is null
                 """,
                 endpoint_id,
             )
@@ -3973,7 +3994,7 @@ class AppServices:
                 from bundle_endpoints e
                 join module_imports m on m.id = e.module_import_id
                 left join lm_profiles lp on lp.id = e.lm_profile_id and lp.archived_at is null
-                where e.module_import_id = $1 and m.deleted_at is null
+                where e.module_import_id = $1 and m.deleted_at is null and e.delete_requested_at is null
                 order by created_at asc
                 """,
                 module_id,
@@ -4090,7 +4111,7 @@ class AppServices:
                     now,
                 )
                 if row is not None:
-                    await self._update_legacy_endpoint_deployment_replica_count(
+                    await self._update_endpoint_deployment_replica_count(
                         conn,
                         endpoint_id=endpoint_id,
                         desired_replica_count=normalized_pinned_worker_count,
@@ -4150,7 +4171,7 @@ class AppServices:
                     now,
                 )
                 if row is not None:
-                    await self._update_legacy_endpoint_deployment_replica_count(
+                    await self._update_endpoint_deployment_replica_count(
                         conn,
                         endpoint_id=endpoint_id,
                         desired_replica_count=normalized_pinned_worker_count,
@@ -4165,22 +4186,57 @@ class AppServices:
     async def delete_bundle_endpoint(self, module_id: str, endpoint_id: str) -> bool:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
+        now = datetime.now(timezone.utc)
         async with self.postgres_pool.acquire() as conn:
-            result = await conn.execute(
-                "delete from bundle_endpoints where id = $1 and module_import_id = $2",
-                endpoint_id,
-                module_id,
-            )
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    update bundle_endpoints
+                    set delete_requested_at = $3, updated_at = $3
+                    where id = $1 and module_import_id = $2 and delete_requested_at is null
+                    returning id
+                    """,
+                    endpoint_id,
+                    module_id,
+                    now,
+                )
+                if row is not None:
+                    await conn.execute(
+                        """
+                        update endpoint_deployments
+                        set phase = 'draining', deadline_at = null,
+                            failure_reason = 'endpoint deletion requested', updated_at = $2
+                        where id = (
+                          select id from endpoint_deployments
+                          where endpoint_id = $1
+                          order by rollout_generation desc
+                          limit 1
+                        )
+                        """,
+                        endpoint_id,
+                        now,
+                    )
+                    await conn.execute(
+                        """
+                        update endpoint_worker_registrations
+                        set assigned_endpoint_id = null, updated_at = $2
+                        where assigned_endpoint_id = $1
+                        """,
+                        endpoint_id,
+                        now,
+                    )
+        if row is None:
+            return False
         await self.reconcile_endpoint_worker_assignments()
-        return result.endswith("1")
+        return True
 
     async def delete_bundle_endpoint_global(self, endpoint_id: str) -> bool:
         current = await self.get_bundle_endpoint(endpoint_id)
         if current is None:
             return False
-        deleted = await self.delete_bundle_endpoint(str(current["module_import_id"]), endpoint_id)
-        await self.reconcile_endpoint_worker_assignments()
-        return deleted
+        return await self.delete_bundle_endpoint(
+            str(current["module_import_id"]), endpoint_id
+        )
 
     async def regenerate_bundle_endpoint_key(self, module_id: str, endpoint_id: str) -> dict[str, Any] | None:
         if self.postgres_pool is None:
@@ -4236,7 +4292,7 @@ class AppServices:
                 """
                 select id, module_import_id, lm_profile_id, pinned_worker_count, name, key_hash, key_preview, created_at, updated_at
                 from bundle_endpoints
-                where id = $1
+                where id = $1 and delete_requested_at is null
                 """,
                 endpoint_id,
             )
@@ -4291,6 +4347,66 @@ class AppServices:
             "bundle_path": _clean_optional_text(registration.get("bundle_path")),
             "is_live": bool(registration.get("is_live")),
         }
+
+    async def claim_endpoint_worker_task(
+        self,
+        *,
+        worker_id: str,
+        endpoint_id: str,
+        task_id: str,
+        execution_mode: str | None,
+        build_id: str | None,
+        revision_id: str | None,
+        bundle_path: str | None,
+    ) -> bool:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        now = datetime.now(timezone.utc)
+        runtime_metadata = {
+            "endpoint_id": endpoint_id,
+            "execution_mode": execution_mode,
+            "desired_build_id": build_id,
+            "warmed_build_id": build_id,
+            "desired_revision_id": revision_id,
+            "warmed_revision_id": revision_id,
+            "bundle_path": bundle_path,
+        }
+        async with self.postgres_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                update endpoint_worker_registrations
+                set status = 'running',
+                    task_id = $3,
+                    last_seen_at = $4,
+                    heartbeat_expires_at = $5,
+                    runtime_metadata = runtime_metadata || $10::jsonb,
+                    updated_at = $4
+                where worker_id = $1
+                  and assigned_endpoint_id = $2
+                  and status = 'listening'
+                  and task_id is null
+                  and heartbeat_expires_at > $4
+                  and runtime_metadata->>'endpoint_id' = $2
+                  and coalesce(runtime_metadata->>'execution_mode', 'legacy_static') = $6
+                  and runtime_metadata->>'desired_build_id' is not distinct from $7::text
+                  and runtime_metadata->>'warmed_build_id' is not distinct from $7::text
+                  and runtime_metadata->>'desired_revision_id' is not distinct from $8::text
+                  and runtime_metadata->>'warmed_revision_id' is not distinct from $8::text
+                  and runtime_metadata->>'bundle_path' is not distinct from $9::text
+                returning worker_id
+                """,
+                str(worker_id),
+                str(endpoint_id),
+                str(task_id),
+                now,
+                self._endpoint_worker_heartbeat_expires_at(now),
+                str(execution_mode or "legacy_static"),
+                _clean_optional_text(build_id),
+                _clean_optional_text(revision_id),
+                _clean_optional_text(bundle_path),
+                json.dumps(runtime_metadata),
+            )
+        return row is not None
 
     async def _set_endpoint_worker_assignment(
         self, worker_id: str, endpoint_id: str | None

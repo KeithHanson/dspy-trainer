@@ -9,10 +9,17 @@ from app.config import DeployerSettings, Settings, get_cors_origins_from_env
 from app.revision_images import MAX_BUILD_LOG_BYTES
 
 
-def test_cors_origins_include_explicit_and_vite_public_origins_without_duplicates(monkeypatch):
-    monkeypatch.setenv("DSPY_TRAINER_CORS_ALLOW_ORIGINS", "https://agents.abatix.com, http://localhost:3000 ")
+def test_cors_origins_include_explicit_and_vite_public_origins_without_duplicates(
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "DSPY_TRAINER_CORS_ALLOW_ORIGINS",
+        "https://agents.abatix.com, http://localhost:3000 ",
+    )
     monkeypatch.setenv("VITE_API_BASE_URL", "https://agents.abatix.com:8000/modules")
-    monkeypatch.setenv("VITE_MLFLOW_BASE_URL", "https://agents.abatix.com:5001/#/experiments/1")
+    monkeypatch.setenv(
+        "VITE_MLFLOW_BASE_URL", "https://agents.abatix.com:5001/#/experiments/1"
+    )
 
     assert get_cors_origins_from_env() == [
         "https://agents.abatix.com",
@@ -43,20 +50,29 @@ def test_cors_origins_ignore_relative_public_urls(monkeypatch):
 
 
 def test_endpoint_worker_heartbeat_ttl_defaults_to_five_minutes():
-    settings = Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer")
+    settings = Settings(
+        postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"
+    )
 
     assert settings.endpoint_worker_heartbeat_ttl_seconds == 300
 
 
 def test_bundle_install_concurrency_defaults_to_eight_and_must_be_positive():
-    settings = Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer")
+    settings = Settings(
+        postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"
+    )
 
     assert settings.bundle_install_max_concurrency == 8
-    with pytest.raises(ValueError, match="DSPY_TRAINER_BUNDLE_INSTALL_MAX_CONCURRENCY must be at least 1"):
+    with pytest.raises(
+        ValueError,
+        match="DSPY_TRAINER_BUNDLE_INSTALL_MAX_CONCURRENCY must be at least 1",
+    ):
         Settings(
             postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer",
             bundle_install_max_concurrency=0,
         )
+
+
 def _deployer_settings(**overrides):
     values = {
         "postgres_dsn": "postgresql://postgres:postgres@localhost:5432/dspy_trainer",
@@ -64,6 +80,7 @@ def _deployer_settings(**overrides):
         "deployment_id": "deployment-a",
         "compose_project_name": "dspy-trainer",
         "compose_network_name": "dspy-trainer-network",
+        "compose_network_project_label": "dspy-trainer",
     }
     values.update(overrides)
     return DeployerSettings(**values)
@@ -75,10 +92,19 @@ def test_deployer_settings_have_bounded_positive_coordinator_defaults():
     assert settings.deployer_leader_timeout_seconds == 15.0
     assert settings.deployer_claim_timeout_seconds == 300.0
     assert settings.deployer_poll_interval_seconds == 1.0
+    assert settings.deployer_endpoint_readiness_timeout_seconds == 120.0
+    assert settings.deployer_endpoint_drain_timeout_seconds == 300.0
+    assert settings.deployer_endpoint_reconcile_interval_seconds == 2.0
+    assert settings.deployer_image_retention_count == 2
+    assert settings.managed_label_namespace == "io.dspy-trainer"
     assert settings.deployer_build_log_max_bytes == MAX_BUILD_LOG_BYTES
 
     with pytest.raises(ValueError, match="durations must be positive"):
-        _deployer_settings(deployer_claim_timeout_seconds=0)
+        _deployer_settings(deployer_endpoint_drain_timeout_seconds=0)
+    with pytest.raises(ValueError, match="must be at least 2"):
+        _deployer_settings(deployer_image_retention_count=1)
+    with pytest.raises(ValueError, match="Docker label namespace"):
+        _deployer_settings(managed_label_namespace="invalid namespace")
     with pytest.raises(ValueError, match="must be between"):
         _deployer_settings(deployer_build_log_max_bytes=MAX_BUILD_LOG_BYTES + 1)
 

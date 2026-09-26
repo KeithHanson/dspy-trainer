@@ -190,7 +190,7 @@ DSPy handles execution, optimization, and prompt engineering for you.
 └──────┬──────┘
        │
 ┌──────▼──────┐       ┌──────────────┐
-│  Backend    │       │   Deployer   │  advisory leader, one durable image build
+│  Backend    │       │   Deployer   │  image builds and endpoint reconciliation
 └──────┬──────┘       └──────┬───────┘
        │                     │ Docker socket (deployer only)
 ┌──────▼──────┐              │
@@ -205,7 +205,7 @@ DSPy handles execution, optimization, and prompt engineering for you.
 **Services:**
 - **Backend**: Control plane (FastAPI)
 - **Worker**: Execution engine (async job processing)
-- **Deployer**: Internal-only PostgreSQL advisory leader that claims one durable revision-image build globally; it alone installs the Docker SDK and mounts the Docker socket
+- **Deployer**: Internal-only PostgreSQL advisory leader that builds revision images and reconciles exact-image endpoint containers; it alone installs the Docker SDK and mounts the Docker socket
 - **Postgres**: Primary app store
 - **Redis**: Queue + worker coordination
 - **MLflow**: Experiment tracking with metadata stored in a dedicated Postgres `mlflow` schema and artifacts on a Docker volume
@@ -552,6 +552,10 @@ Key variables in `.env`:
 | `DSPY_TRAINER_BUNDLE_INSTALL_MAX_CONCURRENCY` | Deployment-wide maximum concurrent bundle dependency installs (default `8`) | Optional |
 | `DSPY_TRAINER_TOTAL_ENDPOINT_WORKER_REPLICAS` | Number of dedicated endpoint worker containers in Compose | Optional |
 | `DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS` | Seconds before an endpoint-worker heartbeat is marked stale | Optional |
+| `DSPY_TRAINER_DEPLOYER_ENDPOINT_READINESS_TIMEOUT_SECONDS` | Seconds allowed for an exact managed-image worker to report ready before rollback | Optional |
+| `DSPY_TRAINER_DEPLOYER_ENDPOINT_DRAIN_TIMEOUT_SECONDS` | Seconds allowed for an active invocation to drain before forced removal | Optional |
+| `DSPY_TRAINER_DEPLOYER_IMAGE_RETENTION_COUNT` | Ready images retained per module, minimum `2`; referenced images are always protected | Optional |
+| `DSPY_TRAINER_COMPOSE_NETWORK_PROJECT_LABEL` | Exact Compose project label required on the selected runtime network | ✅ in deployment environments |
 | `DSPY_TRAINER_POSTGRES_DSN` | Postgres connection | ✅ (auto in Compose) |
 | `DSPY_TRAINER_REDIS_URL` | Redis connection | ✅ (auto in Compose) |
 
@@ -577,18 +581,15 @@ LM Profiles store the provider model, API base, model type, optional LM class ov
 
 ### Managed Endpoint Workers
 
-Managed bundle endpoints do not execute inside the backend container. The backend authenticates, enqueues, and relays responses, while dedicated `endpoint-worker` containers perform bundle installation/bootstrap and invocation.
+Managed bundle endpoints do not execute inside the backend container. The backend authenticates, selects a ready build-pinned worker, enqueues, and relays responses. The deployer creates deterministic per-endpoint slots from immutable revision-image IDs on the actual Compose network; the static `endpoint-worker` service remains migration-only for deployments explicitly marked `legacy_static`.
 
-- Set `DSPY_TRAINER_TOTAL_WORKERS` in `.env` to control the number of general worker containers Compose starts.
-- Set `DSPY_TRAINER_TOTAL_ENDPOINT_WORKER_REPLICAS` in `.env` to control how many dedicated endpoint-worker containers Compose starts.
-- Compose-backed endpoint workers now self-register into the backend's durable endpoint-worker registry; operator-facing assignment and readiness come directly from those live registry records rather than from an env-defined logical roster.
-- Endpoint-worker heartbeats default to a 5 minute stale threshold (`DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS=300`). Override it in `.env` if you need operator stale detection to move faster or slower.
-- Bundle system dependency commands and Python package installs share a PostgreSQL-backed deployment-wide concurrency limit. Set `DSPY_TRAINER_BUNDLE_INSTALL_MAX_CONCURRENCY` to a positive integer (default `8`) and recreate `backend`, `worker`, and `endpoint-worker` together when changing it.
-- Each endpoint stores a `pinned_worker_count`.
-- Endpoint workers are assigned deterministically to endpoints based on those pinned counts and the current registry-backed worker set.
-- Only workers assigned to a given endpoint consume that endpoint's invocation queue.
-- `GET /endpoint-workers` exposes operator-facing readiness details for each endpoint worker from the durable endpoint-worker registry, including `deploy_state`, `state_summary`, and the desired versus warmed bundle revisions.
-- Common endpoint worker states: `idle` (unassigned), `preparing` (installing the desired revision / warming up), `listening` (ready), `running` (serving traffic), `failed` (warmup or invocation failure), and `stale` (heartbeat expired / non-live).
+- Each endpoint's `pinned_worker_count` is the desired managed container count. Slots, names, and retirement order are deterministic.
+- A rollout starts one target slot at a time and requires a live `managed_image` registration with matching endpoint and desired/warmed build and revision before the old slot drains.
+- Draining first blocks the worker's next atomic claim. An already claimed invocation may finish until the configured timeout; a timed-out removal is recorded with bounded container logs.
+- Failed target startup or readiness restores the old revision capacity and records rollback state. Reconciler restart adopts only containers with the complete ownership/provenance label set, exact deployment owner, and exact immutable image ID.
+- Scale-down and endpoint deletion remove only fully owned slots. Similarly named, partially labeled, wrong-owner, and wrong-image containers are never adopted or deleted.
+- Image cleanup retains at least the current and previous ready images per module and protects every build referenced by a deployment or non-removed managed container.
+- Endpoint jobs use build/revision-specific Redis queues. After `BRPOP`, an atomic PostgreSQL claim serializes with drain; a losing claim puts the exact job back on the same queue once rather than executing it.
 
 The revision-image build layer is deliberately separate from endpoint scheduling and rollout. Given one immutable revision snapshot and its content digest, it creates a deterministic tar context, uses the configured immutable backend image ID as `FROM`, runs `runtime.system_dependency_commands` before `requirements.txt`, writes a sorted Python package manifest to `/opt/dspy-trainer/python-manifest.txt`, bakes the bundle at `/opt/dspy-bundle`, and installs the platform endpoint-worker entrypoint. Builds use the local Docker Engine cache and host architecture only; the builder has no registry login, pull, or push path.
 

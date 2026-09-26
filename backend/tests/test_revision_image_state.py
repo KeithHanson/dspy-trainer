@@ -129,8 +129,13 @@ class _SchemaConnection:
                 },
             )
         elif normalized.startswith("update endpoint_deployments set desired_replica_count"):
-            deployment = self.deployments.get((params[0], 0))
-            if deployment is not None and deployment["phase"] == "legacy_static":
+            matches = [
+                deployment
+                for (endpoint_id, _), deployment in self.deployments.items()
+                if endpoint_id == params[0]
+            ]
+            if matches:
+                deployment = max(matches, key=lambda item: item["rollout_generation"])
                 deployment["desired_replica_count"] = params[1]
         return "OK"
 
@@ -548,7 +553,7 @@ def test_legacy_deployment_intent_is_created_once_and_tracks_replica_updates():
                 created_at=now,
                 updated_at=now,
             )
-            await services._update_legacy_endpoint_deployment_replica_count(
+            await services._update_endpoint_deployment_replica_count(
                 connection,
                 endpoint_id="endpoint-new",
                 desired_replica_count=4,

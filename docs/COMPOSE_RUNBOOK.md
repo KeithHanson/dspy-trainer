@@ -44,7 +44,7 @@ MLflow concurrency can be tuned with `MLFLOW_WEB_WORKERS` in `.env` (default `4`
 
 Before starting the stack, ensure `.env` contains `GITHUB_PAT` if you want to import, sync, or push GitHub-backed bundles. Backend and worker read that variable server-side; the web UI only reports whether GitHub access is configured. GitHub imports may target either the repo root or a configured bundle subfolder. Optimization writeback now pushes to an `optimization-<job-prefix>` branch for manual merge, so also set `GIT_COMMIT_NAME` and `GIT_COMMIT_EMAIL` (defaults are provided if omitted).
 
-The default local `.env.sample` also defines deployer leader/claim timeouts, poll interval, bounded log size, immutable backend image ID, and stable Compose project/network/deployment identities. All deployer durations and sizes must be positive; the log cap cannot exceed 262144 bytes. `DSPY_TRAINER_DEPLOYER_BACKEND_BASE_IMAGE_ID` must be the exact local `sha256:...` image ID, never a mutable tag.
+The default local `.env.sample` also defines deployer leader/claim timeouts, endpoint readiness/drain/reconcile timing, per-module image retention, bounded log size, immutable backend image ID, strict managed-label namespace, and stable Compose project/network/deployment identities. All deployer durations and sizes must be positive; image retention cannot be lower than two and the log cap cannot exceed 262144 bytes. `DSPY_TRAINER_DEPLOYER_BACKEND_BASE_IMAGE_ID` must be the exact local `sha256:...` image ID, never a mutable tag. `DSPY_TRAINER_COMPOSE_NETWORK_PROJECT_LABEL` must equal the actual `com.docker.compose.project` label on the selected runtime network.
 
 Secret storage note:
 - `DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY` is required if you want to store module environment entries or LM Profile provider API keys in Postgres.
@@ -165,7 +165,29 @@ Only `deployer` installs the Docker SDK and mounts `/var/run/docker.sock`; it ha
 4. Supersede a queued fixture and then an active slow fixture. Confirm the queued row becomes terminal, the deployer terminates the active build child, Docker daemon-side work stops rather than continuing after client disconnect, the new generation runs, and the old result cannot publish.
 5. Stop the leader cleanly during a slow build and confirm the claim returns to `queued`; make Docker unavailable for another build and confirm only that generation becomes `failed` with bounded logs while any prior ready generation remains ready.
 6. Inspect every Compose service and image package set: only `deployer` has the socket and Docker SDK, and the deployer has no published port or runtime-secret environment variables.
-### Deployment-host Acceptance (Do Not Run on Development Workstations)
+
+## Managed Endpoint Container Reconciliation
+
+The same advisory leader reconciles durable endpoint deployment intent against Docker one action at a time. It discovers the configured network by exact name and Compose project label, starts deterministic slots with restart policy `unless-stopped`, and always uses the inspected immutable image ID. Adoption and deletion require the complete `io.dspy-trainer.*` container identity: platform owner, stack owner, managed kind, endpoint, deployment, slot, build, revision, rollout generation, worker, and image ID. A similar name, incomplete labels, wrong owner, or image mismatch is foreign and remains untouched.
+
+Rolling replacement is slot-by-slot. A target container must register live in `managed_image` mode with matching endpoint plus matching desired/warmed build and revision before its old slot can drain. Draining atomically clears assignment before the worker may claim another job. A job already claimed may finish; after the drain timeout the reconciler force-removes the container and records the timeout, reason, and bounded final log. Startup or readiness failure enters durable rollback and restores any missing old-revision slots before target containers are removed.
+
+Restarting the deployer re-observes only containers whose deployment ID and rollout generation match the current intent, then resumes the durable phase without duplicating slots. Pinned worker-count changes update the latest managed deployment and scale from that durable intent. Scale-down retires the highest surplus slots deterministically. Endpoint deletion first tombstones the API row and blocks worker claims; the reconciler drains and removes exact owned containers before deleting their RESTRICT-protected container/deployment rows and finalizing the endpoint. Cleanup runs only after all deployment intents converge. It retains at least the newest two ready images per module and never prunes an image referenced as active, target, previous, or by a non-removed managed container; a successful prune marks the build `pruned` durably.
+
+Container absence is durable evidence only after a complete, successful Docker listing in which every returned container was inspectable. If an exact owned container recorded in PostgreSQL is absent from that complete observation, the reconciler finalizes its container row as removed; this lets a tombstoned endpoint finish deletion and releases the row's image reference for retention pruning. A partial, failed, or uninspectable Docker observation preserves container rows, endpoint tombstones, and image references for the next cycle. Similarly named or incompletely labeled foreign resources are never adopted, stopped, or removed.
+
+### Reconciler Deployment-host Acceptance (Do Not Run on Development Workstations)
+
+1. Build the backend, set `DSPY_TRAINER_DEPLOYER_BACKEND_BASE_IMAGE_ID` from `docker image inspect --format '{{.Id}}'`, rebuild/recreate the deployer, and confirm the configured network name and project label select exactly one actual Compose network.
+2. Create a ready managed deployment pinned above one replica. Confirm every slot has a deterministic distinct name, exact immutable image ID, `unless-stopped`, the complete ownership label set, and only the intended network and runtime environment.
+3. Keep one invocation active while deploying a new ready revision. Observe mixed old/new exact build labels during rollout, verify each new slot becomes registry-ready before its old peer starts draining, and confirm the active invocation completes without interruption.
+4. Deploy an image that starts but never reports matching readiness. After the readiness timeout, confirm rollback records the bounded reason, restores all old slots, and removes only target containers.
+5. Restart the deployer while target startup, readiness wait, and drain are each in progress. Confirm reconciliation resumes without duplicate slots, duplicate claims, or removal of a ready old slot before its replacement.
+6. Create similarly named containers and images with missing labels, a different owner/project, or a wrong immutable image ID. Exercise rollout, scale-down, and deletion; confirm every foreign resource remains untouched.
+7. Scale the endpoint up and down, then delete its deployment intent. Confirm deterministic slot creation and highest-slot retirement, readiness-before-drain, active-drain timeout behavior, and complete removal of only owned endpoint containers.
+8. Produce more than the configured retention count of ready images. Confirm current, previous, target, and container-referenced images remain; only old unreferenced images are deleted and their build rows become `pruned`.
+
+### Builder Deployment-host Acceptance (Do Not Run on Development Workstations)
 
 On the deployment host, use a harmless validated fixture snapshot containing one observable system command and one small Python requirement. Calculate its digest with `calculate_source_content_digest`, build it through `RevisionImageBuilder(DockerSdkImageAdapter.from_env())`, and retain the returned tag, image ID, labels, bounded log, and manifest digest. Then:
 
