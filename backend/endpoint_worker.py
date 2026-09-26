@@ -198,6 +198,7 @@ async def _heartbeat(
     status: str,
     *,
     task_id: str | None = None,
+    expected_task_id: str | None = None,
     endpoint_id: object = _UNSET,
     desired_build_id: object = _UNSET,
     warmed_build_id: object = _UNSET,
@@ -235,6 +236,8 @@ async def _heartbeat(
         ),
         "last_error": last_error,
     }
+    if expected_task_id is not None:
+        payload["expected_task_id"] = expected_task_id
     if registration:
         response = await services.register_endpoint_worker(
             worker_id=worker_id if str(worker_id or "").strip() else None,
@@ -419,6 +422,7 @@ async def process_endpoint_job(
             services,
             worker_id,
             "listening",
+            expected_task_id=invocation_id,
             endpoint_id=endpoint_id,
             desired_build_id=expected["build_id"],
             warmed_build_id=expected["build_id"],

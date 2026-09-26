@@ -1274,6 +1274,7 @@ def test_claimed_draining_worker_heartbeats_completes_but_cannot_reclaim_or_rest
             runtime_instance_id="runtime-original",
             status="listening",
             task_id=None,
+            expected_task_id="invocation-1",
             runtime_metadata=metadata,
             now=NOW.replace(day=4),
         )

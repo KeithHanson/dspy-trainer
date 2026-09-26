@@ -1731,6 +1731,7 @@ class AppServices:
         status: str,
         assigned_endpoint_id: str | None = None,
         task_id: str | None = None,
+        expected_task_id: str | None = None,
         hostname: str | None = None,
         pid: int | None = None,
         runtime_metadata: dict[str, Any] | None = None,
@@ -1759,16 +1760,18 @@ class AppServices:
             merged_runtime_metadata = _merge_runtime_metadata(existing_row["runtime_metadata"], runtime_metadata or {})
             requested_status = str(status or "idle")
             requested_task_id = _clean_optional_text(task_id)
-            existing_task_id = _clean_optional_text(existing_row["task_id"])
+            expected_current_task_id = _clean_optional_text(expected_task_id)
+            if requested_task_id is not None:
+                if expected_current_task_id is None:
+                    expected_current_task_id = requested_task_id
+                elif expected_current_task_id != requested_task_id:
+                    return None
             if str(merged_runtime_metadata.get("execution_mode") or "") == "managed_image":
-                managed_identity = await self.validate_managed_endpoint_worker_identity(
+                await self.validate_managed_endpoint_worker_identity(
                     merged_runtime_metadata,
                     worker_id=str(worker_id),
                 )
-                if managed_identity.get("container_lifecycle") == "draining" and (
-                    (requested_task_id is not None and requested_task_id != existing_task_id)
-                    or (requested_task_id is not None and requested_status != "running")
-                ):
+                if requested_task_id is not None and requested_status != "running":
                     return None
             row = await conn.fetchrow(
                 """
@@ -1797,7 +1800,7 @@ class AppServices:
                 pid,
                 json.dumps(merged_runtime_metadata),
                 _clean_optional_text(last_error),
-                existing_task_id,
+                expected_current_task_id,
             )
         if row is None:
             return None

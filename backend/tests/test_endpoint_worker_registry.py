@@ -40,6 +40,32 @@ class _RegistryConn:
             self.state["workers"][worker_id] = row
             return row
         if normalized.startswith(
+            "update endpoint_worker_registrations set status = 'running'"
+        ):
+            worker_id = str(params[0])
+            row = self.state["workers"].get(worker_id)
+            if (
+                row is None
+                or row["assigned_endpoint_id"] != params[1]
+                or row["status"] != "listening"
+                or row["task_id"] is not None
+                or row["heartbeat_expires_at"] <= params[3]
+            ):
+                return None
+            row.update(
+                status="running",
+                task_id=params[2],
+                last_seen_at=params[3],
+                heartbeat_expires_at=params[4],
+                runtime_metadata={
+                    **row["runtime_metadata"],
+                    **json.loads(params[9]),
+                },
+                updated_at=params[3],
+            )
+            return {"worker_id": worker_id}
+
+        if normalized.startswith(
             "update endpoint_worker_registrations set status = $3"
         ):
             worker_id = str(params[0])
@@ -419,6 +445,30 @@ def test_endpoint_worker_registry_register_heartbeat_and_stale_transition():
             == (registered_at + timedelta(minutes=5)).isoformat()
         )
 
+        ready = await services.heartbeat_endpoint_worker(
+            "endpoint-worker-1",
+            runtime_instance_id="runtime-1",
+            status="listening",
+            runtime_metadata={
+                "endpoint_id": "endpoint-1",
+                "execution_mode": "legacy_static",
+            },
+            now=registered_at + timedelta(seconds=1),
+        )
+        assert ready is not None
+        await services._set_endpoint_worker_assignment(
+            "endpoint-worker-1", "endpoint-1"
+        )
+        assert await services.claim_endpoint_worker_task(
+            worker_id="endpoint-worker-1",
+            endpoint_id="endpoint-1",
+            task_id="inv-1",
+            execution_mode="legacy_static",
+            build_id=None,
+            revision_id=None,
+            bundle_path=None,
+        )
+
         heartbeat_at = registered_at + timedelta(seconds=5)
         heartbeat = await services.heartbeat_endpoint_worker(
             "endpoint-worker-1",
@@ -459,6 +509,102 @@ def test_endpoint_worker_registry_register_heartbeat_and_stale_transition():
         assert workers[0]["is_stale"] is True
 
     asyncio.run(scenario())
+
+def test_task_cas_rejects_late_same_runtime_heartbeats_after_next_claim():
+    async def scenario() -> None:
+        services = _make_services()
+        now = datetime(2099, 1, 1, tzinfo=timezone.utc)
+        worker_id = "endpoint-worker-1"
+        runtime_id = "runtime-1"
+        endpoint_id = "endpoint-1"
+        runtime_metadata = {
+            "endpoint_id": endpoint_id,
+            "execution_mode": "legacy_static",
+            "desired_build_id": None,
+            "warmed_build_id": None,
+            "desired_revision_id": None,
+            "warmed_revision_id": None,
+            "bundle_path": None,
+        }
+        await services.register_endpoint_worker(
+            worker_id=worker_id,
+            runtime_instance_id=runtime_id,
+            status="listening",
+            runtime_metadata=runtime_metadata,
+            now=now,
+        )
+        await services._set_endpoint_worker_assignment(worker_id, endpoint_id)
+
+        assert await services.claim_endpoint_worker_task(
+            worker_id=worker_id,
+            endpoint_id=endpoint_id,
+            task_id="task-1",
+            execution_mode="legacy_static",
+            build_id=None,
+            revision_id=None,
+            bundle_path=None,
+        )
+        completed = await services.heartbeat_endpoint_worker(
+            worker_id,
+            runtime_instance_id=runtime_id,
+            status="listening",
+            task_id=None,
+            expected_task_id="task-1",
+            runtime_metadata={"transition": "task-1-complete"},
+            now=now + timedelta(seconds=1),
+        )
+        assert completed is not None
+        assert completed["task_id"] is None
+
+        assert await services.claim_endpoint_worker_task(
+            worker_id=worker_id,
+            endpoint_id=endpoint_id,
+            task_id="task-2",
+            execution_mode="legacy_static",
+            build_id=None,
+            revision_id=None,
+            bundle_path=None,
+        )
+        current = services.postgres_pool.state["workers"][worker_id]
+        before_late_heartbeats = dict(current)
+        before_late_heartbeats["runtime_metadata"] = dict(current["runtime_metadata"])
+
+        late_running = await services.heartbeat_endpoint_worker(
+            worker_id,
+            runtime_instance_id=runtime_id,
+            status="running",
+            task_id="task-1",
+            runtime_metadata={"late": "running"},
+            last_error="late running task-1",
+            now=now + timedelta(seconds=2),
+        )
+        late_idle = await services.heartbeat_endpoint_worker(
+            worker_id,
+            runtime_instance_id=runtime_id,
+            status="idle",
+            task_id=None,
+            runtime_metadata={"late": "idle"},
+            last_error="late idle task-1",
+            now=now + timedelta(seconds=3),
+        )
+        late_completion = await services.heartbeat_endpoint_worker(
+            worker_id,
+            runtime_instance_id=runtime_id,
+            status="listening",
+            task_id=None,
+            expected_task_id="task-1",
+            runtime_metadata={"late": "completion"},
+            last_error="late completion task-1",
+            now=now + timedelta(seconds=4),
+        )
+
+        assert late_running is None
+        assert late_idle is None
+        assert late_completion is None
+        assert services.postgres_pool.state["workers"][worker_id] == before_late_heartbeats
+
+    asyncio.run(scenario())
+
 
 def test_replaced_runtime_fences_stale_heartbeat_from_same_worker_id():
     async def scenario() -> None:
