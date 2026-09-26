@@ -10,6 +10,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Protocol
+from uuid import uuid4
 
 from app.revision_image_builder import (
     LABEL_BUILD_ID,
@@ -83,6 +84,9 @@ class RegistrySnapshot:
     execution_mode: str | None
     build_id: str | None
     revision_id: str | None
+    deployment_id: str | None
+    slot: int | None
+    rollout_generation: int | None
     task_id: str | None
     is_live: bool
     last_seen_at: datetime | None = None
@@ -96,6 +100,9 @@ class RegistrySnapshot:
             and self.execution_mode == "managed_image"
             and self.build_id == identity.build_id
             and self.revision_id == identity.revision_id
+            and self.deployment_id == identity.deployment_id
+            and self.slot == identity.slot
+            and self.rollout_generation == identity.rollout_generation
         )
 
     @property
@@ -176,6 +183,8 @@ class EndpointContainerStore(Protocol):
     async def release_leadership(self) -> None: ...
 
     async def disconnect(self) -> None: ...
+
+    async def reconcile_deployment_targets(self) -> int: ...
 
     async def list_deployment_intents(self) -> list[DeploymentIntent]: ...
 
@@ -320,6 +329,7 @@ class EndpointContainerReconciler:
         network_id = await self._docker.resolve_network(
             self._network_selector, self._compose_project
         )
+        await self._store.reconcile_deployment_targets()
         intents = sorted(
             await self._store.list_deployment_intents(),
             key=lambda item: (item.endpoint_id, item.rollout_generation),
@@ -531,7 +541,7 @@ class EndpointContainerReconciler:
                 if pair[1].slot == slot
                 and pair[0].container_id != target_container.container_id
             ]
-            if obsolete:
+            if obsolete and not intent.is_rollout:
                 obsolete.sort(
                     key=lambda pair: (pair[0].created_at, pair[0].container_id)
                 )
@@ -544,6 +554,12 @@ class EndpointContainerReconciler:
                     reason="slot replacement became ready",
                 )
                 return acted, False
+
+        if intent.is_rollout:
+            await self._store.complete_deployment(
+                intent.deployment_id, rolled_back=intent.phase == "rollback"
+            )
+            return True, True
 
         excess = [
             pair
@@ -569,11 +585,6 @@ class EndpointContainerReconciler:
             )
             return acted, False
 
-        if intent.is_rollout:
-            await self._store.complete_deployment(
-                intent.deployment_id, rolled_back=intent.phase == "rollback"
-            )
-            return True, True
         return False, True
 
     async def _drain_and_remove(
@@ -714,6 +725,9 @@ class EndpointContainerReconciler:
             "DSPY_TRAINER_ENDPOINT_WORKER_MODE": "managed_image",
             "DSPY_TRAINER_ENDPOINT_ID": intent.endpoint_id,
             "DSPY_TRAINER_WORKER_ID": worker_id,
+            "DSPY_TRAINER_ENDPOINT_DEPLOYMENT_ID": intent.deployment_id,
+            "DSPY_TRAINER_ENDPOINT_SLOT": str(slot),
+            "DSPY_TRAINER_ENDPOINT_ROLLOUT_GENERATION": str(intent.rollout_generation),
             "DSPY_TRAINER_DEPLOYMENT_ID": self._deployment_id,
         }
         return ContainerLaunchSpec(
@@ -850,12 +864,105 @@ class PostgresEndpointContainerStore:
         self._connection = None
         self._leader = False
 
+    async def reconcile_deployment_targets(self) -> int:
+        conn = await self._conn()
+        async with conn.transaction():
+            candidate = await conn.fetchrow("""
+                with latest as (
+                  select distinct on (d.endpoint_id) d.*
+                  from endpoint_deployments d
+                  order by d.endpoint_id, d.rollout_generation desc
+                )
+                select e.id as endpoint_id, greatest(1, e.pinned_worker_count) as replica_count,
+                       d.*, ready.id as ready_build_id,
+                       m.current_revision_id as ready_revision_id,
+                       m.id as ready_module_import_id
+                from bundle_endpoints e
+                join latest d on d.endpoint_id = e.id
+                join module_imports m on m.id = coalesce(d.failed_module_import_id, e.module_import_id)
+                join runtime_bundles rb on rb.module_import_id = m.id
+                join lateral (
+                  select b.id
+                  from revision_image_builds b
+                  where b.revision_id = m.current_revision_id
+                    and b.status = 'ready'
+                    and b.image_id is not null
+                  order by b.generation desc
+                  limit 1
+                ) ready on true
+                where e.delete_requested_at is null
+                  and m.deleted_at is null
+                  and rb.validation_status = 'passed'
+                  and rb.validation_revision_id = m.current_revision_id
+                  and d.phase in ('legacy_static', 'ready', 'failed')
+                  and ready.id is distinct from d.active_build_id
+                  and ready.id is distinct from d.target_build_id
+                  and ready.id is distinct from d.failed_build_id
+                order by e.created_at, e.id
+                limit 1
+                for update of e
+                """)
+            if candidate is None:
+                return 0
+            phase = str(candidate["phase"] or "")
+            legacy_fallback = bool(candidate["legacy_fallback"])
+            if legacy_fallback or phase == "failed":
+                await conn.execute(
+                    """
+                    update endpoint_deployments
+                    set target_build_id = $2, target_revision_id = $3,
+                        target_module_import_id = $4,
+                        phase = 'pending', desired_replica_count = $5,
+                        rollout_generation = rollout_generation + case
+                          when target_build_id is null and phase = 'legacy_static' then 0 else 1 end,
+                        failed_build_id = null, failed_revision_id = null,
+                        failed_module_import_id = null,
+                        rollout_started_at = now(), ready_at = null, deadline_at = null,
+                        failure_reason = null, updated_at = now()
+                    where id = $1
+                    """,
+                    str(candidate["id"]),
+                    str(candidate["ready_build_id"]),
+                    str(candidate["ready_revision_id"]),
+                    str(candidate["ready_module_import_id"]),
+                    int(candidate["replica_count"]),
+                )
+                return 1
+            next_generation = int(candidate["rollout_generation"] or 0) + 1
+            endpoint_id = str(candidate["endpoint_id"])
+            await conn.execute(
+                """
+                insert into endpoint_deployments (
+                  id, endpoint_id, active_build_id, active_revision_id, active_module_import_id,
+                  target_build_id, target_revision_id, target_module_import_id,
+                  previous_build_id, previous_revision_id, previous_module_import_id,
+                  phase, desired_replica_count, legacy_fallback, rollout_generation,
+                  rollout_started_at, created_at, updated_at
+                ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                          'pending', $12, false, $13, now(), now(), now())
+                """,
+                f"rollout-{endpoint_id}-{next_generation}-{uuid4().hex[:12]}",
+                endpoint_id,
+                _text(candidate["active_build_id"]),
+                _text(candidate["active_revision_id"]),
+                _text(candidate["active_module_import_id"]),
+                str(candidate["ready_build_id"]),
+                str(candidate["ready_revision_id"]),
+                str(candidate["ready_module_import_id"]),
+                _text(candidate["previous_build_id"]),
+                _text(candidate["previous_revision_id"]),
+                _text(candidate["previous_module_import_id"]),
+                int(candidate["replica_count"]),
+                next_generation,
+            )
+            return 1
+
     async def list_deployment_intents(self) -> list[DeploymentIntent]:
         conn = await self._conn()
         rows = await conn.fetch("""
             with latest as (
               select distinct on (d.endpoint_id)
-                     d.*, e.module_import_id
+                     d.*, e.module_import_id as endpoint_module_import_id
               from endpoint_deployments d
               join bundle_endpoints e on e.id = d.endpoint_id
               where e.delete_requested_at is null
@@ -876,7 +983,7 @@ class PostgresEndpointContainerStore:
             DeploymentIntent(
                 deployment_id=str(row["id"]),
                 endpoint_id=str(row["endpoint_id"]),
-                module_id=str(row["module_import_id"]),
+                module_id=str(row["target_module_import_id"] or row["active_module_import_id"] or row["endpoint_module_import_id"]),
                 phase=str(row["phase"]),
                 desired_replica_count=int(row["desired_replica_count"]),
                 rollout_generation=int(row["rollout_generation"]),
@@ -923,6 +1030,11 @@ class PostgresEndpointContainerStore:
                     if desired_revision_id == warmed_revision_id
                     else None
                 ),
+                deployment_id=_text(metadata.get("endpoint_deployment_id")),
+                slot=_integer(metadata.get("endpoint_slot")),
+                rollout_generation=_integer(
+                    metadata.get("endpoint_rollout_generation")
+                ),
                 task_id=_text(row["task_id"]),
                 is_live=bool(
                     row["heartbeat_expires_at"] and row["heartbeat_expires_at"] > now
@@ -960,10 +1072,11 @@ class PostgresEndpointContainerStore:
             """
             insert into managed_endpoint_containers (
               container_id, container_name, endpoint_id, deployment_id, build_id, revision_id,
-              slot, lifecycle, last_observed_at, started_at, created_at, updated_at
-            ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10, $9)
+              slot, worker_id, lifecycle, last_observed_at, started_at, created_at, updated_at
+            ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11, $10)
             on conflict (container_id) do update set
               container_name = excluded.container_name,
+              worker_id = excluded.worker_id,
               last_observed_at = excluded.last_observed_at,
               lifecycle = case
                 when managed_endpoint_containers.lifecycle in ('draining', 'failed') then managed_endpoint_containers.lifecycle
@@ -979,6 +1092,7 @@ class PostgresEndpointContainerStore:
             identity.build_id,
             identity.revision_id,
             identity.slot,
+            identity.worker_id,
             "ready" if container.running else "stopped",
             now,
             container.created_at,
@@ -1035,6 +1149,13 @@ class PostgresEndpointContainerStore:
         conn = await self._conn()
         await conn.execute(
             """
+            with blocked as (
+              update managed_endpoint_containers
+              set lifecycle = 'draining', drain_started_at = coalesce(drain_started_at, now()),
+                  updated_at = now()
+              where worker_id = $1 and lifecycle in ('created', 'starting', 'ready', 'busy')
+              returning container_id
+            )
             update endpoint_worker_registrations
             set assigned_endpoint_id = null, updated_at = now()
             where worker_id = $1
@@ -1061,9 +1182,13 @@ class PostgresEndpointContainerStore:
         await conn.execute(
             """
             update endpoint_deployments
-            set phase = case when active_build_id is null then 'failed' else 'rollback' end,
-                target_build_id = case when active_build_id is null then target_build_id else active_build_id end,
-                target_revision_id = case when active_build_id is null then target_revision_id else active_revision_id end,
+            set failed_build_id = target_build_id,
+                failed_revision_id = target_revision_id,
+                failed_module_import_id = target_module_import_id,
+                phase = case when active_build_id is null then 'failed' else 'rollback' end,
+                target_build_id = active_build_id,
+                target_revision_id = active_revision_id,
+                target_module_import_id = active_module_import_id,
                 failure_reason = $2,
                 deadline_at = null,
                 updated_at = now()
@@ -1081,7 +1206,8 @@ class PostgresEndpointContainerStore:
             await conn.execute(
                 """
                 update endpoint_deployments
-                set target_build_id = null, target_revision_id = null, phase = 'ready',
+                set target_build_id = null, target_revision_id = null,
+                    target_module_import_id = null, phase = 'ready',
                     deadline_at = null, ready_at = now(), updated_at = now()
                 where id = $1
                 """,
@@ -1090,16 +1216,27 @@ class PostgresEndpointContainerStore:
             return
         await conn.execute(
             """
-            update endpoint_deployments
-            set previous_build_id = active_build_id,
-                previous_revision_id = active_revision_id,
-                active_build_id = target_build_id,
-                active_revision_id = target_revision_id,
-                target_build_id = null,
-                target_revision_id = null,
-                phase = 'ready', deadline_at = null, failure_reason = null,
-                ready_at = now(), updated_at = now()
-            where id = $1
+            with promoted as (
+              update endpoint_deployments
+              set previous_build_id = active_build_id,
+                  previous_revision_id = active_revision_id,
+                  previous_module_import_id = active_module_import_id,
+                  active_build_id = target_build_id,
+                  active_revision_id = target_revision_id,
+                  active_module_import_id = target_module_import_id,
+                  target_build_id = null,
+                  target_revision_id = null,
+                  target_module_import_id = null,
+                  phase = 'ready', legacy_fallback = false,
+                  deadline_at = null, failure_reason = null,
+                  ready_at = now(), updated_at = now()
+              where id = $1
+              returning endpoint_id, active_module_import_id
+            )
+            update bundle_endpoints e
+            set module_import_id = promoted.active_module_import_id, updated_at = now()
+            from promoted
+            where e.id = promoted.endpoint_id
             """,
             deployment_id,
         )
@@ -1123,6 +1260,7 @@ class PostgresEndpointContainerStore:
               select active_build_id as build_id from endpoint_deployments where active_build_id is not null
               union select target_build_id from endpoint_deployments where target_build_id is not null
               union select previous_build_id from endpoint_deployments where previous_build_id is not null
+              union select failed_build_id from endpoint_deployments where failed_build_id is not null
               union select build_id from managed_endpoint_containers where lifecycle <> 'removed'
             )
             select ranked.id, ranked.revision_id, ranked.module_import_id, ranked.image_id
@@ -1379,6 +1517,13 @@ def managed_container_name(
 def _text(value: Any) -> str | None:
     normalized = str(value or "").strip()
     return normalized or None
+
+
+def _integer(value: Any) -> int | None:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
 
 
 def _metadata(value: Any) -> dict[str, Any]:

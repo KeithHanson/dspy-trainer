@@ -49,7 +49,6 @@ from app.revision_images import (
 )
 from app.validator import read_bundle_metadata, validate_bundle
 
-
 logger = logging.getLogger(__name__)
 _BUNDLE_INSTALL_ADVISORY_LOCK_NAMESPACE = 0x44535059
 _BUNDLE_INSTALL_SLOT_POLL_SECONDS = 0.25
@@ -63,6 +62,23 @@ class ModuleSyncError(RuntimeError):
     def __init__(self, message: str, *, sync_state: dict[str, Any] | None = None) -> None:
         super().__init__(message)
         self.sync_state = sync_state or {}
+
+
+class EndpointImageNotReadyError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str,
+        revision_id: str | None,
+        build_status: str,
+        build: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = str(code)
+        self.revision_id = _clean_optional_text(revision_id)
+        self.build_status = str(build_status)
+        self.build = dict(build) if build is not None else None
 
 
 class EndpointUnavailableError(RuntimeError):
@@ -1005,8 +1021,11 @@ class AppServices:
         await self.connect()
         if self.postgres_pool is None:
             return
-        cleared_registrations = await self.clear_endpoint_worker_registrations()
-        logger.info("Cleared %s endpoint worker registrations during backend startup", cleared_registrations)
+        expired_registrations = await self.mark_stale_endpoint_workers()
+        logger.info(
+            "Expired %s endpoint worker registrations during backend startup",
+            expired_registrations,
+        )
         await self._reconcile_revision_builds(trigger="startup")
 
     async def _reconcile_revision_builds(self, *, trigger: str) -> int:
@@ -1407,6 +1426,13 @@ class AppServices:
                 runtime_metadata.get("warmed_revision_id")
             ),
             "bundle_path": _clean_optional_text(runtime_metadata.get("bundle_path")),
+            "endpoint_deployment_id": _clean_optional_text(
+                runtime_metadata.get("endpoint_deployment_id")
+            ),
+            "endpoint_slot": runtime_metadata.get("endpoint_slot"),
+            "endpoint_rollout_generation": runtime_metadata.get(
+                "endpoint_rollout_generation"
+            ),
             "kind": "endpoint",
             "is_stale": is_stale,
             "is_live": not is_stale,
@@ -1451,7 +1477,10 @@ class AppServices:
     async def validate_managed_endpoint_worker_identity(
         self,
         runtime_metadata: dict[str, Any],
-    ) -> dict[str, str]:
+        *,
+        worker_id: str | None = None,
+        require_claim_eligible: bool = False,
+    ) -> dict[str, Any]:
         required = {
             "endpoint_id": _clean_optional_text(runtime_metadata.get("endpoint_id")),
             "build_id": _clean_optional_text(runtime_metadata.get("desired_build_id")),
@@ -1471,7 +1500,9 @@ class AppServices:
             raise ValueError(
                 f"managed endpoint worker identity is missing: {', '.join(missing)}"
             )
-        identity = {name: str(value) for name, value in required.items()}
+        identity: dict[str, Any] = {
+            name: str(value) for name, value in required.items()
+        }
         if (
             identity["build_id"] != identity["baked_build_id"]
             or identity["revision_id"] != identity["baked_revision_id"]
@@ -1499,10 +1530,83 @@ class AppServices:
                 "managed endpoint worker image is not assigned to the endpoint deployment"
             )
         build = await self.get_revision_image_build(identity["build_id"])
-        if build is None or str(build.get("status") or "") != "ready":
-            raise ValueError("managed endpoint worker image build is not ready")
+        if (
+            build is None
+            or str(build.get("status") or "") != "ready"
+            or not _clean_optional_text(build.get("image_id"))
+        ):
+            raise ValueError("managed endpoint worker image build is not ready locally")
         if str(build.get("revision_id") or "") != identity["revision_id"]:
             raise ValueError("managed endpoint worker image build revision mismatch")
+
+        effective_worker_id = _clean_optional_text(worker_id)
+        if effective_worker_id is not None:
+            exact_required = {
+                "worker_id": _clean_optional_text(runtime_metadata.get("worker_id")),
+                "deployment_id": _clean_optional_text(
+                    runtime_metadata.get("endpoint_deployment_id")
+                ),
+            }
+            exact_missing = sorted(
+                name for name, value in exact_required.items() if value is None
+            )
+            try:
+                slot = int(runtime_metadata.get("endpoint_slot"))
+                rollout_generation = int(
+                    runtime_metadata.get("endpoint_rollout_generation")
+                )
+            except (TypeError, ValueError):
+                exact_missing.extend(["slot", "rollout_generation"])
+                slot = -1
+                rollout_generation = -1
+            if exact_missing:
+                raise ValueError(
+                    "managed endpoint worker identity is missing: "
+                    + ", ".join(sorted(set(exact_missing)))
+                )
+            if exact_required["worker_id"] != effective_worker_id:
+                raise ValueError(
+                    "managed endpoint worker id does not match registration"
+                )
+            if slot < 0 or slot >= int(deployment.get("desired_replica_count") or 0):
+                raise ValueError(
+                    "managed endpoint worker slot is outside the deployment"
+                )
+            if self.postgres_pool is None:
+                raise RuntimeError("database not initialized")
+            async with self.postgres_pool.acquire() as conn:
+                observed = await conn.fetchrow(
+                    """
+                    select c.container_id, c.lifecycle
+                    from managed_endpoint_containers c
+                    join endpoint_deployments d on d.id = c.deployment_id
+                    where c.deployment_id = $1 and c.endpoint_id = $2 and c.slot = $3
+                      and c.worker_id = $4 and c.build_id = $5 and c.revision_id = $6
+                      and d.rollout_generation = $7
+                      and (c.lifecycle = 'ready' or ($8::boolean and c.lifecycle = 'draining'))
+                    """,
+                    exact_required["deployment_id"],
+                    identity["endpoint_id"],
+                    slot,
+                    effective_worker_id,
+                    identity["build_id"],
+                    identity["revision_id"],
+                    rollout_generation,
+                    not require_claim_eligible,
+                )
+            if observed is None:
+                raise ValueError(
+                    "managed endpoint worker is not an observed deployment slot"
+                )
+            identity.update(
+                {
+                    "worker_id": effective_worker_id,
+                    "deployment_id": exact_required["deployment_id"],
+                    "slot": slot,
+                    "rollout_generation": rollout_generation,
+                    "container_lifecycle": str(observed["lifecycle"]),
+                }
+            )
         return identity
 
     async def register_endpoint_worker(
@@ -1533,11 +1637,14 @@ class AppServices:
             _clean_optional_text(normalized_runtime_metadata.get("execution_mode"))
             or "legacy_static"
         )
+        managed_identity: dict[str, Any] | None = None
         if execution_mode == "managed_image":
-            identity = await self.validate_managed_endpoint_worker_identity(
-                normalized_runtime_metadata
+            managed_identity = await self.validate_managed_endpoint_worker_identity(
+                normalized_runtime_metadata,
+                worker_id=effective_worker_id,
+                require_claim_eligible=True,
             )
-            assigned_endpoint_id = identity["endpoint_id"]
+            assigned_endpoint_id = managed_identity["endpoint_id"]
         elif execution_mode != "legacy_static":
             raise ValueError(
                 f"unsupported endpoint worker execution mode: {execution_mode}"
@@ -1560,7 +1667,16 @@ class AppServices:
                   created_at,
                   updated_at
                 )
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $12)
+                select $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $12
+                where $13::boolean or exists (
+                  select 1
+                  from managed_endpoint_containers c
+                  join endpoint_deployments d on d.id = c.deployment_id
+                  where c.deployment_id = $14 and c.endpoint_id = $15 and c.slot = $16
+                    and c.worker_id = $1 and c.build_id = $17 and c.revision_id = $18
+                    and d.rollout_generation = $19 and c.lifecycle = 'ready'
+                  for update of c
+                )
                 on conflict (worker_id) do update set
                   runtime_instance_id = excluded.runtime_instance_id,
                   assigned_endpoint_id = excluded.assigned_endpoint_id,
@@ -1588,7 +1704,16 @@ class AppServices:
                 json.dumps(normalized_runtime_metadata),
                 _clean_optional_text(last_error),
                 registration_time,
+                execution_mode != "managed_image",
+                managed_identity.get("deployment_id") if managed_identity else None,
+                managed_identity.get("endpoint_id") if managed_identity else None,
+                managed_identity.get("slot") if managed_identity else None,
+                managed_identity.get("build_id") if managed_identity else None,
+                managed_identity.get("revision_id") if managed_identity else None,
+                managed_identity.get("rollout_generation") if managed_identity else None,
             )
+        if row is None:
+            raise ValueError("managed endpoint worker is not claim-eligible")
         if execution_mode == "legacy_static":
             await self.reconcile_endpoint_worker_assignments()
         updated = await self._get_endpoint_worker_registration(
@@ -1606,6 +1731,7 @@ class AppServices:
         status: str,
         assigned_endpoint_id: str | None = None,
         task_id: str | None = None,
+        expected_task_id: str | None = None,
         hostname: str | None = None,
         pid: int | None = None,
         runtime_metadata: dict[str, Any] | None = None,
@@ -1629,14 +1755,28 @@ class AppServices:
                 return None
             existing_runtime_instance_id = _clean_optional_text(existing_row["runtime_instance_id"])
             requested_runtime_instance_id = _clean_optional_text(runtime_instance_id)
-            if requested_runtime_instance_id and requested_runtime_instance_id != existing_runtime_instance_id:
+            if not requested_runtime_instance_id or requested_runtime_instance_id != existing_runtime_instance_id:
                 return None
             merged_runtime_metadata = _merge_runtime_metadata(existing_row["runtime_metadata"], runtime_metadata or {})
+            requested_status = str(status or "idle")
+            requested_task_id = _clean_optional_text(task_id)
+            expected_current_task_id = _clean_optional_text(expected_task_id)
+            if requested_task_id is not None:
+                if expected_current_task_id is None:
+                    expected_current_task_id = requested_task_id
+                elif expected_current_task_id != requested_task_id:
+                    return None
+            if str(merged_runtime_metadata.get("execution_mode") or "") == "managed_image":
+                await self.validate_managed_endpoint_worker_identity(
+                    merged_runtime_metadata,
+                    worker_id=str(worker_id),
+                )
+                if requested_task_id is not None and requested_status != "running":
+                    return None
             row = await conn.fetchrow(
                 """
                 update endpoint_worker_registrations
-                set runtime_instance_id = coalesce($2, runtime_instance_id),
-                    status = $3,
+                set status = $3,
                     task_id = $4,
                     last_seen_at = $5,
                     heartbeat_expires_at = $6,
@@ -1645,20 +1785,22 @@ class AppServices:
                     runtime_metadata = $9::jsonb,
                     last_error = $10,
                     updated_at = $5
-                where worker_id = $1
+                where worker_id = $1 and runtime_instance_id = $2
+                  and task_id is not distinct from $11
                 returning worker_id, runtime_instance_id, status, assigned_endpoint_id, task_id, last_seen_at,
                           heartbeat_expires_at, hostname, pid, runtime_metadata, last_error, created_at, updated_at
                 """,
                 str(worker_id),
                 requested_runtime_instance_id,
-                str(status or "idle"),
-                _clean_optional_text(task_id),
+                requested_status,
+                requested_task_id,
                 heartbeat_time,
                 self._endpoint_worker_heartbeat_expires_at(heartbeat_time),
                 _clean_optional_text(hostname),
                 pid,
                 json.dumps(merged_runtime_metadata),
                 _clean_optional_text(last_error),
+                expected_current_task_id,
             )
         if row is None:
             return None
@@ -1971,19 +2113,25 @@ class AppServices:
                 for each row execute function enforce_revision_image_build_contract();
                 """
             )
-            await conn.execute(
-                f"""
+            await conn.execute(f"""
                 create table if not exists endpoint_deployments (
                   id text primary key,
                   endpoint_id text not null references bundle_endpoints(id) on delete cascade,
                   active_build_id text,
                   active_revision_id text,
+                  active_module_import_id text references module_imports(id) on delete restrict,
                   target_build_id text,
                   target_revision_id text,
+                  target_module_import_id text references module_imports(id) on delete restrict,
                   previous_build_id text,
                   previous_revision_id text,
+                  previous_module_import_id text references module_imports(id) on delete restrict,
+                  failed_build_id text,
+                  failed_revision_id text,
+                  failed_module_import_id text references module_imports(id) on delete restrict,
                   phase text not null check (phase in ('legacy_static', 'pending', 'rolling', 'ready', 'draining', 'rollback', 'failed')),
                   desired_replica_count int not null check (desired_replica_count >= 1),
+                  legacy_fallback boolean not null default true,
                   rollout_generation bigint not null check (rollout_generation >= 0),
                   deadline_at timestamptz,
                   failure_reason text check (failure_reason is null or char_length(failure_reason) <= {MAX_FAILURE_REASON_CHARS}),
@@ -1998,10 +2146,59 @@ class AppServices:
                   foreign key (target_build_id, target_revision_id)
                     references revision_image_builds(id, revision_id) match full on delete restrict,
                   foreign key (previous_build_id, previous_revision_id)
+                    references revision_image_builds(id, revision_id) match full on delete restrict,
+                  constraint endpoint_deployments_failed_build_revision_fk
+                    foreign key (failed_build_id, failed_revision_id)
                     references revision_image_builds(id, revision_id) match full on delete restrict
                 );
-                """
-            )
+                """)
+            await conn.execute("""
+                alter table endpoint_deployments
+                  add column if not exists legacy_fallback boolean;
+                alter table endpoint_deployments add column if not exists active_module_import_id text references module_imports(id) on delete restrict;
+                alter table endpoint_deployments add column if not exists target_module_import_id text references module_imports(id) on delete restrict;
+                alter table endpoint_deployments add column if not exists previous_module_import_id text references module_imports(id) on delete restrict;
+                alter table endpoint_deployments add column if not exists failed_build_id text;
+                alter table endpoint_deployments add column if not exists failed_revision_id text;
+                alter table endpoint_deployments add column if not exists failed_module_import_id text references module_imports(id) on delete restrict;
+                update endpoint_deployments
+                set legacy_fallback = (phase = 'legacy_static')
+                where legacy_fallback is null;
+                update endpoint_deployments d
+                set active_module_import_id = coalesce(
+                      d.active_module_import_id,
+                      (select r.module_import_id from bundle_revisions r where r.id = d.active_revision_id),
+                      (select e.module_import_id from bundle_endpoints e where e.id = d.endpoint_id)
+                    ),
+                    target_module_import_id = coalesce(
+                      d.target_module_import_id,
+                      (select r.module_import_id from bundle_revisions r where r.id = d.target_revision_id)
+                    ),
+                    previous_module_import_id = coalesce(
+                      d.previous_module_import_id,
+                      (select r.module_import_id from bundle_revisions r where r.id = d.previous_revision_id)
+                    );
+                alter table endpoint_deployments
+                  alter column legacy_fallback set default true;
+                alter table endpoint_deployments
+                  alter column legacy_fallback set not null;
+                """)
+            await conn.execute("""
+                do $$
+                begin
+                  if not exists (
+                    select 1 from pg_constraint
+                    where conrelid = 'endpoint_deployments'::regclass
+                      and conname = 'endpoint_deployments_failed_build_revision_fk'
+                  ) then
+                    alter table endpoint_deployments
+                      add constraint endpoint_deployments_failed_build_revision_fk
+                      foreign key (failed_build_id, failed_revision_id)
+                      references revision_image_builds(id, revision_id) match full on delete restrict;
+                  end if;
+                end
+                $$;
+                """)
             await conn.execute(
                 """
                 create unique index if not exists uq_endpoint_deployments_active_rollout
@@ -2025,7 +2222,9 @@ class AppServices:
                 "create index if not exists idx_endpoint_deployments_previous_build on endpoint_deployments(previous_build_id);"
             )
             await conn.execute(
-                f"""
+                "create index if not exists idx_endpoint_deployments_failed_build on endpoint_deployments(failed_build_id);"
+            )
+            await conn.execute(f"""
                 create table if not exists managed_endpoint_containers (
                   container_id text primary key,
                   container_name text not null unique,
@@ -2034,6 +2233,7 @@ class AppServices:
                   build_id text not null,
                   revision_id text not null,
                   slot int not null check (slot >= 0),
+                  worker_id text,
                   lifecycle text not null check (lifecycle in ('created', 'starting', 'ready', 'busy', 'draining', 'stopped', 'failed', 'missing', 'removed')),
                   last_observed_at timestamptz,
                   last_heartbeat_at timestamptz,
@@ -2050,7 +2250,9 @@ class AppServices:
                   foreign key (build_id, revision_id)
                     references revision_image_builds(id, revision_id) match full on delete restrict
                 );
-                """
+                """)
+            await conn.execute(
+                "alter table managed_endpoint_containers add column if not exists worker_id text;"
             )
             await conn.execute(
                 "alter table managed_endpoint_containers add column if not exists drain_started_at timestamptz;"
@@ -2086,9 +2288,9 @@ class AppServices:
             await conn.execute(
                 """
                 insert into endpoint_deployments (
-                  id, endpoint_id, phase, desired_replica_count, rollout_generation, created_at, updated_at
+                  id, endpoint_id, active_module_import_id, phase, desired_replica_count, rollout_generation, created_at, updated_at
                 )
-                select 'legacy-' || e.id, e.id, 'legacy_static', greatest(1, e.pinned_worker_count), 0,
+                select 'legacy-' || e.id, e.id, e.module_import_id, 'legacy_static', greatest(1, e.pinned_worker_count), 0,
                        e.created_at, e.updated_at
                 from bundle_endpoints e
                 where e.delete_requested_at is null
@@ -2656,6 +2858,7 @@ class AppServices:
                     ),
                 )
         return revision_id
+
     async def _finalize_synced_module(
         self,
         module_id: str,
@@ -2722,6 +2925,7 @@ class AppServices:
                 if validation_result == "UPDATE 0":
                     raise RuntimeError("module runtime not found")
         return revision_id
+
     async def resolve_module_execution_state(
         self,
         module_id: str,
@@ -3691,6 +3895,204 @@ class AppServices:
             payload["lm_profile_name"] = lm_profile_name
         return payload
 
+    async def _resolve_ready_endpoint_image(
+        self, conn: Any, module_id: str
+    ) -> dict[str, Any] | None:
+        row = await conn.fetchrow(
+            """
+            select m.id as module_id, m.current_revision_id,
+                   rb.validation_status, rb.validation_revision_id,
+                   ready.id as ready_build_id, ready.generation as ready_generation,
+                   ready.image_id as ready_image_id,
+                   latest.id as latest_build_id, latest.generation as latest_generation,
+                   latest.status as latest_build_status, latest.image_id as latest_image_id,
+                   latest.failure_reason as latest_failure_reason
+            from module_imports m
+            left join runtime_bundles rb on rb.module_import_id = m.id
+            left join lateral (
+              select b.id, b.generation, b.image_id
+              from revision_image_builds b
+              where b.revision_id = m.current_revision_id
+                and b.status = 'ready'
+                and b.image_id is not null
+              order by b.generation desc
+              limit 1
+            ) ready on true
+            left join lateral (
+              select b.id, b.generation, b.status, b.image_id, b.failure_reason
+              from revision_image_builds b
+              where b.revision_id = m.current_revision_id
+              order by b.generation desc
+              limit 1
+            ) latest on true
+            where m.id = $1 and m.deleted_at is null
+            for share of m
+            """,
+            module_id,
+        )
+        if row is None:
+            return None
+        revision_id = _clean_optional_text(row["current_revision_id"])
+        if (
+            revision_id is None
+            or str(row["validation_status"] or "") != "passed"
+            or _clean_optional_text(row["validation_revision_id"]) != revision_id
+        ):
+            raise EndpointImageNotReadyError(
+                "endpoint requires a validated current module revision",
+                code="endpoint_revision_not_ready",
+                revision_id=revision_id,
+                build_status="revision_not_ready",
+            )
+        ready_build_id = _clean_optional_text(row["ready_build_id"])
+        ready_image_id = _clean_optional_text(row["ready_image_id"])
+        if ready_build_id and ready_image_id:
+            locked_ready = await conn.fetchrow(
+                """
+                select id, generation, image_id
+                from revision_image_builds
+                where id = $1 and revision_id = $2
+                  and status = 'ready' and image_id = $3
+                for share
+                """,
+                ready_build_id,
+                revision_id,
+                ready_image_id,
+            )
+            if locked_ready is not None:
+                return {
+                    "module_id": module_id,
+                    "revision_id": revision_id,
+                    "build_id": str(locked_ready["id"]),
+                    "image_id": str(locked_ready["image_id"]),
+                    "generation": int(locked_ready["generation"] or 0),
+                    "status": "ready",
+                }
+        latest_build_id = _clean_optional_text(row["latest_build_id"])
+        latest_status = str(row["latest_build_status"] or "missing")
+        if ready_build_id and ready_image_id and locked_ready is None:
+            latest_status = "pruned"
+        if latest_status == "ready" and not _clean_optional_text(
+            row["latest_image_id"]
+        ):
+            latest_status = "missing_local_image"
+        build = None
+        if latest_build_id:
+            build = {
+                "id": latest_build_id,
+                "revision_id": revision_id,
+                "generation": int(row["latest_generation"] or 0),
+                "status": latest_status,
+                "image_id": _clean_optional_text(row["latest_image_id"]),
+                "failure_reason": _clean_optional_text(row["latest_failure_reason"]),
+            }
+        raise EndpointImageNotReadyError(
+            "endpoint requires a ready non-pruned local revision image",
+            code="endpoint_image_not_ready",
+            revision_id=revision_id,
+            build_status=latest_status,
+            build=build,
+        )
+
+    async def _schedule_endpoint_rollout(
+        self,
+        conn: Any,
+        *,
+        endpoint_id: str,
+        build_id: str,
+        revision_id: str,
+        target_module_import_id: str,
+        desired_replica_count: int,
+        now: datetime,
+    ) -> bool:
+        deployment = await conn.fetchrow(
+            """
+            select id, endpoint_id, active_build_id, active_revision_id, active_module_import_id,
+                   target_build_id, target_revision_id, target_module_import_id,
+                   previous_build_id, previous_revision_id, previous_module_import_id,
+                   failed_build_id, failed_revision_id, failed_module_import_id,
+                   phase, desired_replica_count, legacy_fallback, rollout_generation, created_at
+            from endpoint_deployments
+            where endpoint_id = $1
+            order by rollout_generation desc
+            limit 1
+            for update
+            """,
+            endpoint_id,
+        )
+        if deployment is None:
+            raise RuntimeError("endpoint deployment intent is missing")
+        active_pair = (
+            _clean_optional_text(deployment["active_build_id"]),
+            _clean_optional_text(deployment["active_revision_id"]),
+        )
+        target_pair = (
+            _clean_optional_text(deployment["target_build_id"]),
+            _clean_optional_text(deployment["target_revision_id"]),
+        )
+        desired_pair = (build_id, revision_id)
+        if desired_pair in {active_pair, target_pair}:
+            await self._update_endpoint_deployment_replica_count(
+                conn,
+                endpoint_id=endpoint_id,
+                desired_replica_count=desired_replica_count,
+                updated_at=now,
+            )
+            return False
+        legacy_fallback = bool(deployment["legacy_fallback"])
+        phase = str(deployment["phase"] or "")
+        if legacy_fallback or phase in {"pending", "rolling", "draining", "rollback", "failed"}:
+            await conn.execute(
+                """
+                update endpoint_deployments
+                set target_build_id = $2, target_revision_id = $3,
+                    target_module_import_id = $4,
+                    phase = 'pending', desired_replica_count = $5,
+                    rollout_generation = rollout_generation + case
+                      when target_build_id is null and phase = 'legacy_static' then 0 else 1 end,
+                    failed_build_id = null, failed_revision_id = null,
+                    failed_module_import_id = null,
+                    rollout_started_at = $6, ready_at = null, deadline_at = null,
+                    failure_reason = null, updated_at = $6
+                where id = $1
+                """,
+                str(deployment["id"]),
+                build_id,
+                revision_id,
+                target_module_import_id,
+                desired_replica_count,
+                now,
+            )
+            return True
+        next_generation = int(deployment["rollout_generation"] or 0) + 1
+        await conn.execute(
+            """
+            insert into endpoint_deployments (
+              id, endpoint_id, active_build_id, active_revision_id, active_module_import_id,
+              target_build_id, target_revision_id, target_module_import_id,
+              previous_build_id, previous_revision_id, previous_module_import_id,
+              phase, desired_replica_count, legacy_fallback, rollout_generation,
+              rollout_started_at, created_at, updated_at
+            ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                      'pending', $12, false, $13, $14, $14, $14)
+            """,
+            f"rollout-{endpoint_id}-{next_generation}-{uuid4().hex[:12]}",
+            endpoint_id,
+            active_pair[0],
+            active_pair[1],
+            _clean_optional_text(deployment["active_module_import_id"]),
+            build_id,
+            revision_id,
+            target_module_import_id,
+            _clean_optional_text(deployment["previous_build_id"]),
+            _clean_optional_text(deployment["previous_revision_id"]),
+            _clean_optional_text(deployment["previous_module_import_id"]),
+            desired_replica_count,
+            next_generation,
+            now,
+        )
+        return True
+
     async def _ensure_legacy_endpoint_deployment(
         self,
         conn: Any,
@@ -3703,9 +4105,9 @@ class AppServices:
         await conn.execute(
             """
             insert into endpoint_deployments (
-              id, endpoint_id, phase, desired_replica_count, rollout_generation, created_at, updated_at
+              id, endpoint_id, active_module_import_id, phase, desired_replica_count, rollout_generation, created_at, updated_at
             )
-            values ($1, $2, 'legacy_static', $3, 0, $4, $5)
+            values ($1, $2, (select module_import_id from bundle_endpoints where id = $2), 'legacy_static', $3, 0, $4, $5)
             on conflict (endpoint_id, rollout_generation) do nothing
             """,
             f"legacy-{endpoint_id}",
@@ -3896,10 +4298,12 @@ class AppServices:
         async with self.postgres_pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                select id, endpoint_id, active_build_id, active_revision_id, target_build_id,
-                       target_revision_id, previous_build_id, previous_revision_id, phase,
-                       desired_replica_count, rollout_generation, deadline_at, failure_reason,
-                       rollout_started_at, ready_at, created_at, updated_at
+                select id, endpoint_id, active_build_id, active_revision_id, active_module_import_id,
+                       target_build_id, target_revision_id, target_module_import_id,
+                       previous_build_id, previous_revision_id, previous_module_import_id,
+                       failed_build_id, failed_revision_id, failed_module_import_id, phase,
+                       desired_replica_count, legacy_fallback, rollout_generation, deadline_at,
+                       failure_reason, rollout_started_at, ready_at, created_at, updated_at
                 from endpoint_deployments
                 where endpoint_id = $1
                 order by rollout_generation desc
@@ -3912,15 +4316,18 @@ class AppServices:
         deployments = await self.list_endpoint_deployments(endpoint_id)
         return deployments[0] if deployments else None
 
-    async def list_managed_endpoint_containers(self, endpoint_id: str) -> list[dict[str, Any]]:
+    async def list_managed_endpoint_containers(
+        self, endpoint_id: str
+    ) -> list[dict[str, Any]]:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
         async with self.postgres_pool.acquire() as conn:
             rows = await conn.fetch(
                 """
                 select container_id, container_name, endpoint_id, deployment_id, build_id, revision_id,
-                       slot, lifecycle, last_observed_at, last_heartbeat_at, started_at, drain_started_at,
-                       stopped_at, drain_timed_out, failure_reason, container_log, created_at, updated_at
+                       slot, worker_id, lifecycle, last_observed_at, last_heartbeat_at, started_at,
+                       drain_started_at, stopped_at, drain_timed_out, failure_reason, container_log,
+                       created_at, updated_at
                 from managed_endpoint_containers
                 where endpoint_id = $1
                 order by created_at asc, container_id asc
@@ -3928,6 +4335,140 @@ class AppServices:
                 endpoint_id,
             )
         return [build_managed_container_payload(row) for row in rows]
+
+    async def get_endpoint_deployment_status(
+        self, endpoint_id: str
+    ) -> dict[str, Any] | None:
+        deployment = await self.get_endpoint_deployment(endpoint_id)
+        if deployment is None:
+            return None
+        containers = await self.list_managed_endpoint_containers(endpoint_id)
+        registrations = {
+            str(worker.get("worker_id") or ""): worker
+            for worker in await self.list_endpoint_worker_registrations()
+            if worker.get("worker_id")
+        }
+
+        async def build_ref(role: str) -> dict[str, Any] | None:
+            build_id = _clean_optional_text(deployment.get(f"{role}_build_id"))
+            revision_id = _clean_optional_text(deployment.get(f"{role}_revision_id"))
+            if build_id is None and revision_id is None:
+                return None
+            build = (
+                await self.get_revision_image_build_status(build_id)
+                if build_id is not None
+                else None
+            )
+            return {
+                "build_id": build_id,
+                "module_import_id": _clean_optional_text(deployment.get(f"{role}_module_import_id")),
+                "revision_id": revision_id,
+                "build_status": (
+                    str(build.get("status") or "unknown") if build else "missing"
+                ),
+                "failure_reason": build.get("failure_reason") if build else None,
+                "logs_url": (
+                    f"/revision-image-builds/{build_id}/logs" if build_id else None
+                ),
+            }
+
+        phase = str(deployment.get("phase") or "unknown")
+        legacy_fallback = bool(
+            deployment.get("legacy_fallback", phase == "legacy_static")
+        )
+        if legacy_fallback:
+            migration_state = {
+                "legacy_static": "awaiting_image",
+                "failed": "migration_failed",
+            }.get(phase, "warming_managed")
+        else:
+            migration_state = {
+                "ready": "managed",
+                "rollback": "rolling_back",
+                "failed": "rollout_failed",
+            }.get(phase, "rolling")
+
+        deployment_id = str(deployment.get("id") or "")
+        rollout_generation = int(deployment.get("rollout_generation") or 0)
+        slots: list[dict[str, Any]] = []
+        for container in containers:
+            worker_id = _clean_optional_text(container.get("worker_id"))
+            worker = registrations.get(worker_id or "")
+            lifecycle = str(container.get("lifecycle") or "unknown")
+            current_deployment = (
+                str(container.get("deployment_id") or "") == deployment_id
+            )
+            ready = bool(
+                current_deployment
+                and lifecycle == "ready"
+                and worker
+                and worker.get("is_live")
+                and str(worker.get("status") or "") == "listening"
+                and str(worker.get("assigned_endpoint_id") or "") == endpoint_id
+                and str(worker.get("endpoint_deployment_id") or "") == deployment_id
+                and int(
+                    worker.get("endpoint_slot")
+                    if worker.get("endpoint_slot") is not None
+                    else -1
+                )
+                == int(container.get("slot") or 0)
+                and int(
+                    worker.get("endpoint_rollout_generation")
+                    if worker.get("endpoint_rollout_generation") is not None
+                    else -1
+                )
+                == rollout_generation
+                and _clean_optional_text(worker.get("warmed_build_id"))
+                == _clean_optional_text(container.get("build_id"))
+                and _clean_optional_text(worker.get("warmed_revision_id"))
+                == _clean_optional_text(container.get("revision_id"))
+            )
+            slots.append(
+                {
+                    "slot": int(container.get("slot") or 0),
+                    "container_id": container.get("container_id"),
+                    "container_name": container.get("container_name"),
+                    "deployment_id": container.get("deployment_id"),
+                    "worker_id": worker_id,
+                    "build_id": container.get("build_id"),
+                    "revision_id": container.get("revision_id"),
+                    "lifecycle": lifecycle,
+                    "ready": ready,
+                    "draining": lifecycle == "draining",
+                    "failure_reason": container.get("failure_reason"),
+                    "last_observed_at": container.get("last_observed_at"),
+                    "last_heartbeat_at": container.get("last_heartbeat_at"),
+                }
+            )
+        slots.sort(
+            key=lambda item: (
+                str(item.get("deployment_id") or "") != deployment_id,
+                int(item["slot"]),
+                str(item.get("container_id") or ""),
+            )
+        )
+        failure_reason = _clean_optional_text(deployment.get("failure_reason"))
+        return {
+            "endpoint_id": endpoint_id,
+            "deployment_id": deployment_id,
+            "phase": phase,
+            "migration_state": migration_state,
+            "legacy_fallback": legacy_fallback,
+            "desired_replica_count": int(deployment.get("desired_replica_count") or 1),
+            "rollout_generation": rollout_generation,
+            "active": await build_ref("active"),
+            "target": await build_ref("target"),
+            "previous": await build_ref("previous"),
+            "failed_target": await build_ref("failed"),
+            "slots": slots,
+            "failure_reason": failure_reason,
+            "rollout_reason": failure_reason if phase == "failed" else None,
+            "rollback_reason": failure_reason if phase == "rollback" else None,
+            "rollout_started_at": deployment.get("rollout_started_at"),
+            "ready_at": deployment.get("ready_at"),
+            "deadline_at": deployment.get("deadline_at"),
+            "updated_at": deployment.get("updated_at"),
+        }
 
     @staticmethod
     def validate_revision_image_build_transition(current: Any, target: Any) -> str:
@@ -4010,9 +4551,6 @@ class AppServices:
     ) -> dict[str, Any] | None:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
-        module = await self.get_module(module_id)
-        if module is None:
-            return None
         normalized_lm_profile_id = str(lm_profile_id or "").strip() or None
         normalized_pinned_worker_count = _normalize_pinned_worker_count(pinned_worker_count)
         if normalized_lm_profile_id is not None:
@@ -4027,6 +4565,9 @@ class AppServices:
         now = datetime.now(timezone.utc)
         async with self.postgres_pool.acquire() as conn:
             async with conn.transaction():
+                image = await self._resolve_ready_endpoint_image(conn, module_id)
+                if image is None:
+                    return None
                 row = await conn.fetchrow(
                     """
                     insert into bundle_endpoints (id, module_import_id, lm_profile_id, pinned_worker_count, name, key_hash, key_preview, created_at, updated_at)
@@ -4043,18 +4584,27 @@ class AppServices:
                     now,
                     now,
                 )
-                await self._ensure_legacy_endpoint_deployment(
-                    conn,
-                    endpoint_id=endpoint_id,
-                    desired_replica_count=normalized_pinned_worker_count,
-                    created_at=now,
-                    updated_at=now,
+                await conn.execute(
+                    """
+                    insert into endpoint_deployments (
+                      id, endpoint_id, target_build_id, target_revision_id, target_module_import_id, phase,
+                      desired_replica_count, legacy_fallback, rollout_generation,
+                      rollout_started_at, created_at, updated_at
+                    ) values ($1, $2, $3, $4, $5, 'pending', $6, false, 0, $7, $7, $7)
+                    """,
+                    f"managed-{endpoint_id}-0",
+                    endpoint_id,
+                    image["build_id"],
+                    image["revision_id"],
+                    module_id,
+                    normalized_pinned_worker_count,
+                    now,
                 )
         payload = await self.get_bundle_endpoint(str(row["id"]))
         if payload is None:
             return None
         payload["api_key"] = key
-        await self.reconcile_endpoint_worker_assignments()
+        payload["deployment"] = await self.get_endpoint_deployment_status(endpoint_id)
         return payload
 
     async def create_bundle_endpoint_global(
@@ -4141,36 +4691,56 @@ class AppServices:
         next_module_id = str(module_import_id or current["module_import_id"]).strip()
         next_lm_profile_id = lm_profile_id if lm_profile_id is not None else current.get("lm_profile_id")
         normalized_lm_profile_id = str(next_lm_profile_id or "").strip() or None
-        next_pinned_worker_count = current.get("pinned_worker_count") if pinned_worker_count is None else pinned_worker_count
-        normalized_pinned_worker_count = _normalize_pinned_worker_count(next_pinned_worker_count)
+        next_pinned_worker_count = (
+            current.get("pinned_worker_count")
+            if pinned_worker_count is None
+            else pinned_worker_count
+        )
+        normalized_pinned_worker_count = _normalize_pinned_worker_count(
+            next_pinned_worker_count
+        )
         if not next_module_id:
             raise ValueError("module_import_id is required")
-        if await self.get_module(next_module_id) is None:
-            raise ValueError("module not found")
         if normalized_lm_profile_id is not None and await self.get_lm_profile(normalized_lm_profile_id) is None:
             raise ValueError("lm profile not found")
+        module_changed = next_module_id != str(current["module_import_id"])
         now = datetime.now(timezone.utc)
         async with self.postgres_pool.acquire() as conn:
             async with conn.transaction():
+                image = None
+                if module_changed:
+                    image = await self._resolve_ready_endpoint_image(
+                        conn, next_module_id
+                    )
+                    if image is None:
+                        raise ValueError("module not found")
                 row = await conn.fetchrow(
                     """
                     update bundle_endpoints
                     set name = $2,
-                        module_import_id = $3,
-                        lm_profile_id = $4,
-                        pinned_worker_count = $5,
-                        updated_at = $6
+                        lm_profile_id = $3,
+                        pinned_worker_count = $4,
+                        updated_at = $5
                     where id = $1
                     returning id, module_import_id, lm_profile_id, pinned_worker_count, name, key_preview, created_at, updated_at
                     """,
                     endpoint_id,
                     next_name,
-                    next_module_id,
                     normalized_lm_profile_id,
                     normalized_pinned_worker_count,
                     now,
                 )
-                if row is not None:
+                if row is not None and image is not None:
+                    await self._schedule_endpoint_rollout(
+                        conn,
+                        endpoint_id=endpoint_id,
+                        build_id=str(image["build_id"]),
+                        revision_id=str(image["revision_id"]),
+                        target_module_import_id=next_module_id,
+                        desired_replica_count=normalized_pinned_worker_count,
+                        now=now,
+                    )
+                elif row is not None:
                     await self._update_endpoint_deployment_replica_count(
                         conn,
                         endpoint_id=endpoint_id,
@@ -4180,6 +4750,10 @@ class AppServices:
         if row is None:
             return None
         payload = await self.get_bundle_endpoint(str(row["id"]))
+        if payload is not None:
+            payload["deployment"] = await self.get_endpoint_deployment_status(
+                endpoint_id
+            )
         await self.reconcile_endpoint_worker_assignments()
         return payload
 
@@ -4440,9 +5014,11 @@ class AppServices:
         legacy_endpoints: list[dict[str, Any]] = []
         for endpoint in endpoints:
             deployment = await self.get_endpoint_deployment(str(endpoint["id"]))
-            if (
-                deployment is not None
-                and str(deployment.get("phase") or "") == "legacy_static"
+            if deployment is not None and bool(
+                deployment.get(
+                    "legacy_fallback",
+                    str(deployment.get("phase") or "") == "legacy_static",
+                )
             ):
                 legacy_endpoints.append(endpoint)
 
@@ -4528,7 +5104,13 @@ class AppServices:
     async def get_endpoint_routing_state(self, endpoint_id: str) -> dict[str, Any]:
         deployment = await self.get_endpoint_deployment(endpoint_id)
         phase = str(deployment.get("phase") or "") if deployment else ""
-        legacy_static = phase == "legacy_static"
+        legacy_static = bool(
+            deployment
+            and deployment.get(
+                "legacy_fallback",
+                phase == "legacy_static",
+            )
+        )
         desired_revision_id = (
             await self._get_endpoint_desired_revision_id(endpoint_id)
             if legacy_static
@@ -4542,13 +5124,6 @@ class AppServices:
             )
             if all(active_pair):
                 allowed_pairs.add((str(active_pair[0]), str(active_pair[1])))
-            if phase in {"rolling", "draining", "rollback"}:
-                target_pair = (
-                    _clean_optional_text(deployment.get("target_build_id")),
-                    _clean_optional_text(deployment.get("target_revision_id")),
-                )
-                if all(target_pair):
-                    allowed_pairs.add((str(target_pair[0]), str(target_pair[1])))
 
         workers = (await self.list_endpoint_workers())["items"]
         assigned_workers = 0
@@ -4716,26 +5291,45 @@ class AppServices:
             return
         try:
             if execution_mode == "managed_image":
-                identity = await self.validate_managed_endpoint_worker_identity(
+                registration = await self._get_endpoint_worker_registration(worker_id)
+                if registration is None or not registration.get("is_live"):
+                    raise RuntimeError("managed endpoint worker registration is not live")
+                runtime_identity = dict(registration.get("runtime_metadata") or {})
+                runtime_identity.update(
                     {
                         "execution_mode": execution_mode,
                         "endpoint_id": endpoint_id,
                         "desired_build_id": build_id,
                         "desired_revision_id": revision_id,
-                        "baked_build_id": build_id,
-                        "baked_revision_id": revision_id,
                         "bundle_path": bundle_path,
                     }
                 )
+                identity = await self.validate_managed_endpoint_worker_identity(
+                    runtime_identity,
+                    worker_id=worker_id,
+                )
+                if (
+                    identity.get("container_lifecycle") == "draining"
+                    and (
+                        str(registration.get("status") or "") != "running"
+                        or _clean_optional_text(registration.get("task_id"))
+                        != invocation_id
+                    )
+                ):
+                    raise RuntimeError(
+                        "draining managed endpoint worker may only finish its claimed invocation"
+                    )
                 resolved_bundle_path = identity["bundle_path"]
                 resolved_revision_id = identity["revision_id"]
                 resolved_build_id = identity["build_id"]
                 bundle_commit_sha = None
             else:
                 deployment = await self.get_endpoint_deployment(endpoint_id)
-                if (
-                    deployment is None
-                    or str(deployment.get("phase") or "") != "legacy_static"
+                if deployment is None or not bool(
+                    deployment.get(
+                        "legacy_fallback",
+                        str(deployment.get("phase") or "") == "legacy_static",
+                    )
                 ):
                     raise RuntimeError(
                         "legacy static execution is not enabled for this endpoint"

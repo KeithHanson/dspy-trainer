@@ -10,7 +10,6 @@ from unittest.mock import patch
 
 import pytest
 
-
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_ROOT))
 
@@ -257,7 +256,7 @@ class _Transaction:
 class _EndpointWriteConnection(_SchemaConnection):
     def __init__(self) -> None:
         super().__init__()
-        self.fail_legacy_write = False
+        self.fail_deployment_write = False
         self.transaction_entries = 0
         self.transaction_rollbacks = 0
 
@@ -267,6 +266,23 @@ class _EndpointWriteConnection(_SchemaConnection):
     async def fetchrow(self, query, *params):
         normalized = " ".join(query.strip().lower().split())
         self.queries.append(normalized)
+        if normalized.startswith("select id, generation, image_id"):
+            return {"id": params[0], "generation": 1, "image_id": params[2]}
+        if normalized.startswith("select m.id as module_id"):
+            return {
+                "module_id": params[0],
+                "current_revision_id": "revision-a",
+                "validation_status": "passed",
+                "validation_revision_id": "revision-a",
+                "ready_build_id": "build-ready",
+                "ready_generation": 1,
+                "ready_image_id": "sha256:ready",
+                "latest_build_id": "build-ready",
+                "latest_generation": 1,
+                "latest_build_status": "ready",
+                "latest_image_id": "sha256:ready",
+                "latest_failure_reason": None,
+            }
         if normalized.startswith("insert into bundle_endpoints"):
             row = {
                 "id": params[0],
@@ -306,9 +322,11 @@ class _EndpointWriteConnection(_SchemaConnection):
 
     async def execute(self, query, *params):
         normalized = " ".join(query.strip().lower().split())
-        if self.fail_legacy_write and (
+        if self.fail_deployment_write and (
             normalized.startswith("insert into endpoint_deployments")
-            or normalized.startswith("update endpoint_deployments set desired_replica_count")
+            or normalized.startswith(
+                "update endpoint_deployments set desired_replica_count"
+            )
         ):
             raise RuntimeError("deployment intent write failed")
         return await super().execute(query, *params)
@@ -482,7 +500,7 @@ def test_build_identity_claim_retry_and_container_endpoint_constraints_are_enfor
     asyncio.run(scenario())
 
 
-def test_endpoint_and_legacy_deployment_writes_roll_back_together():
+def test_endpoint_and_managed_deployment_writes_roll_back_together():
     async def scenario():
         with _service_module() as module:
             connection = _EndpointWriteConnection()
@@ -501,7 +519,7 @@ def test_endpoint_and_legacy_deployment_writes_roll_back_together():
             services.get_module = get_module
             services.get_bundle_endpoint = get_endpoint
             services.reconcile_endpoint_worker_assignments = reconcile
-            connection.fail_legacy_write = True
+            connection.fail_deployment_write = True
             endpoints_before_create = deepcopy(connection.endpoints)
 
             with pytest.raises(RuntimeError, match="deployment intent write failed"):
