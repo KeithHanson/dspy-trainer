@@ -517,18 +517,15 @@ class AppServices:
         )
         self._revision_build_store = revision_build_store
         if self._revision_build_store is None:
-            base_image_id = str(
-                os.getenv("DSPY_TRAINER_DEPLOYER_BACKEND_BASE_IMAGE_ID") or ""
-            ).strip()
             deployment_id = str(
                 os.getenv("DSPY_TRAINER_DEPLOYMENT_ID") or ""
             ).strip()
-            if base_image_id and deployment_id:
+            if deployment_id:
                 self._revision_build_store = PostgresRevisionImageBuildStore(
                     postgres_dsn=settings.postgres_dsn,
                     instance_id=f"backend-{uuid4().hex[:12]}",
                     deployment_id=deployment_id,
-                    base_image_id=base_image_id,
+                    base_image_id=None,
                     image_repository=str(
                         os.getenv("DSPY_TRAINER_DEPLOYER_IMAGE_REPOSITORY")
                         or "dspy-trainer-revision"
@@ -2003,6 +2000,20 @@ class AppServices:
             await conn.execute("create index if not exists idx_bundle_endpoints_module_import_id on bundle_endpoints(module_import_id, created_at desc);")
             await conn.execute("alter table bundle_revisions add column if not exists source_snapshot_path text;")
             await conn.execute("alter table bundle_revisions add column if not exists source_content_digest text;")
+            await conn.execute(
+                """
+                create table if not exists deployer_runtime_state (
+                  deployment_id text primary key,
+                  base_image_name text not null,
+                  base_image_id text not null,
+                  leader_instance_id text,
+                  leader_heartbeat_at timestamptz,
+                  build_leader boolean not null default false,
+                  endpoint_leader boolean not null default false,
+                  updated_at timestamptz not null
+                );
+                """
+            )
             await conn.execute(
                 f"""
                 create table if not exists revision_image_builds (

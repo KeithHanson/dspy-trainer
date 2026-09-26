@@ -291,6 +291,10 @@ class EndpointContainerReconciler:
         self._stopping = asyncio.Event()
         self._leader = False
 
+    @property
+    def is_leader(self) -> bool:
+        return self._leader
+
     def request_stop(self) -> None:
         self._stopping.set()
 
@@ -983,7 +987,11 @@ class PostgresEndpointContainerStore:
             DeploymentIntent(
                 deployment_id=str(row["id"]),
                 endpoint_id=str(row["endpoint_id"]),
-                module_id=str(row["target_module_import_id"] or row["active_module_import_id"] or row["endpoint_module_import_id"]),
+                module_id=str(
+                    row["target_module_import_id"]
+                    or row["active_module_import_id"]
+                    or row["endpoint_module_import_id"]
+                ),
                 phase=str(row["phase"]),
                 desired_replica_count=int(row["desired_replica_count"]),
                 rollout_generation=int(row["rollout_generation"]),

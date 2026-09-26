@@ -335,7 +335,7 @@ class PostgresRevisionImageBuildStore:
         postgres_dsn: str,
         instance_id: str,
         deployment_id: str,
-        base_image_id: str,
+        base_image_id: str | None,
         image_repository: str,
         platform_version: str,
         build_log_max_bytes: int,
@@ -344,7 +344,7 @@ class PostgresRevisionImageBuildStore:
         self._postgres_dsn = postgres_dsn
         self._instance_id = instance_id
         self._deployment_id = deployment_id
-        self._base_image_id = base_image_id
+        self._base_image_id = str(base_image_id or "").strip() or None
         self._image_repository = image_repository
         self._platform_version = platform_version
         self._build_log_max_bytes = build_log_max_bytes
@@ -355,6 +355,19 @@ class PostgresRevisionImageBuildStore:
 
     def set_operation_pool(self, pool: Any) -> None:
         self._operation_pool = pool
+
+    async def _current_base_image_id(self, conn: Any) -> str:
+        if self._base_image_id is not None:
+            return self._base_image_id
+        base_image_id = await conn.fetchval(
+            "select base_image_id from deployer_runtime_state where deployment_id = $1",
+            self._deployment_id,
+        )
+        if not base_image_id:
+            raise RuntimeError(
+                "the deployer has not registered an immutable backend base image"
+            )
+        return str(base_image_id)
 
     @asynccontextmanager
     async def _operation_connection(self):
@@ -841,6 +854,7 @@ class PostgresRevisionImageBuildStore:
                 raise RevisionImageEnqueueError(
                     "not_eligible", "build revision is not currently eligible"
                 )
+            base_image_id = await self._current_base_image_id(conn)
             duplicate = await conn.fetchval(
                 """
                 select id from revision_image_builds
@@ -848,7 +862,7 @@ class PostgresRevisionImageBuildStore:
                 order by generation desc limit 1
                 """,
                 build_id,
-                self._base_image_id,
+                base_image_id,
             )
             if duplicate is not None:
                 raise RevisionImageEnqueueError(
@@ -871,6 +885,7 @@ class PostgresRevisionImageBuildStore:
                 generation=generation,
                 retry_of_build_id=build_id,
                 initial_log=_RETRY_LOG,
+                base_image_id=base_image_id,
             )
 
     async def enqueue_rebuild_all(self) -> list[str]:
@@ -883,6 +898,7 @@ class PostgresRevisionImageBuildStore:
             await conn.execute(
                 "select pg_advisory_xact_lock($1)", _REBUILD_ALL_ADVISORY_LOCK
             )
+            base_image_id = await self._current_base_image_id(conn)
             rows = await conn.fetch(
                 """
                 select r.id as revision_id, r.module_import_id as module_id, r.commit_sha as source_commit,
@@ -906,7 +922,7 @@ class PostgresRevisionImageBuildStore:
                 order by r.created_at asc, r.id asc
                 for update of r
                 """,
-                self._base_image_id,
+                base_image_id,
             )
             duplicate = next(
                 (row["active_build_id"] for row in rows if row["active_build_id"]),
@@ -935,6 +951,7 @@ class PostgresRevisionImageBuildStore:
                         generation=generation,
                         retry_of_build_id=row["retry_of_build_id"],
                         initial_log="",
+                        base_image_id=base_image_id,
                     )
                 )
         return build_ids
@@ -964,8 +981,10 @@ class PostgresRevisionImageBuildStore:
         *,
         generation: int,
         retry_of_build_id: str | None,
+        base_image_id: str | None = None,
         initial_log: str = "",
     ) -> str:
+        base_image_id = base_image_id or await self._current_base_image_id(conn)
         build_id = f"build-{uuid4().hex}"
         spec = RevisionImageBuildSpec(
             owner=self._deployment_id,
@@ -976,7 +995,7 @@ class PostgresRevisionImageBuildStore:
             source_commit=str(row["source_commit"] or "unversioned"),
             source_snapshot_path=Path(str(row["source_snapshot_path"])),
             source_content_digest=str(row["source_content_digest"]),
-            base_image_id=self._base_image_id,
+            base_image_id=base_image_id,
             image_repository=self._image_repository,
             platform_version=self._platform_version,
         )
@@ -1005,6 +1024,7 @@ class PostgresRevisionImageBuildStore:
             _bounded_utf8(initial_log, self._build_log_max_bytes),
         )
         return build_id
+
 
 def _claim_from_row(row: Any) -> RevisionImageBuildClaim:
     return RevisionImageBuildClaim(

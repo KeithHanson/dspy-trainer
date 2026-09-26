@@ -73,7 +73,6 @@ services:
       DSPY_TRAINER_REDIS_URL: redis://redis:6379/0
       DSPY_TRAINER_QUEUE_NAME: dspy-trainer:jobs
       DSPY_TRAINER_DEPLOYER_BUILD_LOG_MAX_BYTES: ${DSPY_TRAINER_DEPLOYER_BUILD_LOG_MAX_BYTES:-262144}
-      DSPY_TRAINER_DEPLOYER_BACKEND_BASE_IMAGE_ID: ${DSPY_TRAINER_DEPLOYER_BACKEND_BASE_IMAGE_ID:?Set an immutable sha256 backend image ID}
       DSPY_TRAINER_DEPLOYER_IMAGE_REPOSITORY: ${DSPY_TRAINER_DEPLOYER_IMAGE_REPOSITORY:-dspy-trainer-revision}
       DSPY_TRAINER_DEPLOYER_PLATFORM_VERSION: ${DSPY_TRAINER_DEPLOYER_PLATFORM_VERSION:-local}
       DSPY_TRAINER_DEPLOYMENT_ID: ${DSPY_TRAINER_DEPLOYMENT_ID:?Set a stable deployment identity}
@@ -191,8 +190,6 @@ services:
     build:
       context: .
       dockerfile: backend/Deployer.Dockerfile
-      args:
-        BACKEND_BASE_IMAGE: ${DSPY_TRAINER_DEPLOYER_BACKEND_BASE_IMAGE_ID:?Set an immutable sha256 backend image ID}
     image: ${DSPY_TRAINER_DEPLOYER_IMAGE:-dspy-trainer-deployer:local}
     container_name: ${COMPOSE_PROJECT_NAME:-dspy-trainer}-deployer
     command: ["python", "backend/deployer.py"]
@@ -214,7 +211,7 @@ services:
       DSPY_TRAINER_DEPLOYER_ENDPOINT_RECONCILE_INTERVAL_SECONDS: ${DSPY_TRAINER_DEPLOYER_ENDPOINT_RECONCILE_INTERVAL_SECONDS:-2}
       DSPY_TRAINER_DEPLOYER_IMAGE_RETENTION_COUNT: ${DSPY_TRAINER_DEPLOYER_IMAGE_RETENTION_COUNT:-2}
       DSPY_TRAINER_DEPLOYER_BUILD_LOG_MAX_BYTES: ${DSPY_TRAINER_DEPLOYER_BUILD_LOG_MAX_BYTES:-262144}
-      DSPY_TRAINER_DEPLOYER_BACKEND_BASE_IMAGE_ID: ${DSPY_TRAINER_DEPLOYER_BACKEND_BASE_IMAGE_ID:?Set an immutable sha256 backend image ID}
+      DSPY_TRAINER_DEPLOYER_BACKEND_BASE_IMAGE: ${DSPY_TRAINER_BACKEND_IMAGE:-dspy-trainer-backend:local}
       DSPY_TRAINER_DEPLOYER_IMAGE_REPOSITORY: ${DSPY_TRAINER_DEPLOYER_IMAGE_REPOSITORY:-dspy-trainer-revision}
       DSPY_TRAINER_DEPLOYER_PLATFORM_VERSION: ${DSPY_TRAINER_DEPLOYER_PLATFORM_VERSION:-local}
       DSPY_TRAINER_MANAGED_LABEL_NAMESPACE: ${DSPY_TRAINER_MANAGED_LABEL_NAMESPACE:-io.dspy-trainer}
@@ -230,6 +227,12 @@ services:
     volumes:
       - checkouts_data:/tmp/dspy-trainer/checkouts:ro
       - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD", "python", "backend/deployer.py", "--readiness"]
+      interval: 15s
+      timeout: 10s
+      retries: 4
+      start_period: 30s
   web:
     build:
       context: .

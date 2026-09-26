@@ -44,7 +44,7 @@ MLflow concurrency can be tuned with `MLFLOW_WEB_WORKERS` in `.env` (default `4`
 
 Before starting the stack, ensure `.env` contains `GITHUB_PAT` if you want to import, sync, or push GitHub-backed bundles. Backend and worker read that variable server-side; the web UI only reports whether GitHub access is configured. GitHub imports may target either the repo root or a configured bundle subfolder. Optimization writeback now pushes to an `optimization-<job-prefix>` branch for manual merge, so also set `GIT_COMMIT_NAME` and `GIT_COMMIT_EMAIL` (defaults are provided if omitted).
 
-The default local `.env.sample` also defines deployer leader/claim timeouts, endpoint readiness/drain/reconcile timing, per-module image retention, bounded log size, immutable backend image ID, strict managed-label namespace, and stable Compose project/network/deployment identities. All deployer durations and sizes must be positive; image retention cannot be lower than two and the log cap cannot exceed 262144 bytes. `DSPY_TRAINER_DEPLOYER_BACKEND_BASE_IMAGE_ID` must be the exact local `sha256:...` image ID, never a mutable tag. `DSPY_TRAINER_COMPOSE_NETWORK_PROJECT_LABEL` must equal the actual `com.docker.compose.project` label on the selected runtime network.
+The default local .env.sample defines deployer leader/claim timeouts, endpoint readiness/drain/reconcile timing, per-module image retention, bounded log size, a stable explicitly tagged local backend image name, a strict managed-label namespace, and stable Compose project/network/deployment identities. All deployer durations and sizes must be positive; image retention cannot be lower than two and the log cap cannot exceed 262144 bytes. The named image is discovery input only: startup inspects it once, persists the immutable sha256 ID, and generated builds receive only that ID. A later tag change is rejected until an operator explicitly accepts it with no queued or running builds. DSPY_TRAINER_COMPOSE_NETWORK_PROJECT_LABEL must equal the actual com.docker.compose.project label on the selected runtime network.
 
 Secret storage note:
 - `DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY` is required if you want to store module environment entries or LM Profile provider API keys in Postgres.
@@ -65,15 +65,14 @@ Bundle runtime note:
 - Managed revision-image workers never resolve a checkout or install dependencies at startup or invocation time; source, system packages, and Python requirements are baked during image construction.
 - The generated managed entrypoint clears the inherited environment and passes only process basics, Postgres, Redis, MLflow, endpoint/worker/build/revision identity, queue settings, and the module-environment encryption key. Git, GitHub, deployer/build, and checkout configuration are not passed.
 
-Build the backend first, record its immutable local image ID in `.env`, then start the stack. The deployer Dockerfile and every generated revision image use that exact ID as their base:
+Build the named backend image before the deployer image. On first startup the deployer preflight inspects the local name, records its immutable ID, and refuses to pull a substitute:
 
-```bash
+~~~bash
 docker compose build --pull backend
-docker image inspect --format '{{.Id}}' "${DSPY_TRAINER_BACKEND_IMAGE:-dspy-trainer-backend:local}"
-# Set DSPY_TRAINER_DEPLOYER_BACKEND_BASE_IMAGE_ID to the printed sha256 ID.
 docker compose build --pull
 docker compose up -d --remove-orphans
-```
+docker compose exec -T deployer python backend/deployer.py --readiness
+~~~
 
 ## Non-Interactive Operations
 
@@ -111,22 +110,19 @@ docker compose logs -f --timestamps backend worker deployer
 
 ### Rebuild
 
-Rebuild the backend, update `DSPY_TRAINER_DEPLOYER_BACKEND_BASE_IMAGE_ID` to its new immutable ID, then rebuild and restart all images:
+Rebuilds deliberately stop the deployer before changing the named backend image. Confirm the build-status API has no queued or building generation, then accept the newly inspected ID explicitly:
 
-```bash
-docker compose build --pull backend
-docker image inspect --format '{{.Id}}' "${DSPY_TRAINER_BACKEND_IMAGE:-dspy-trainer-backend:local}"
-# Update .env with the printed ID before continuing.
-docker compose build --pull
-docker compose up -d --remove-orphans
-```
-
-Recreate the Python runtime and deployer services only after the immutable ID is current:
-
-```bash
-docker compose build --pull backend worker endpoint-worker deployer
+~~~bash
+curl -fsS 'http://localhost:8000/revision-image-builds?limit=100&offset=0'
+docker compose stop deployer
+docker compose build --pull backend deployer
+docker compose run --rm deployer python backend/deployer.py --preflight --accept-base-image
+docker compose build --pull worker endpoint-worker
 docker compose up -d --force-recreate backend worker endpoint-worker deployer
-```
+docker compose exec -T deployer python backend/deployer.py --readiness
+~~~
+
+Never accept base-image drift while a build is active. Existing build rows retain their original immutable base ID; only generations queued after acceptance use the new ID. To roll back, stop the deployer, restore the prior backend image under the configured local name, rebuild the deployer image, repeat the explicit acceptance command, recreate services, and use rebuild-all only after readiness is healthy.
 
 ## Revision Image Builder Contract
 
@@ -178,7 +174,7 @@ Container absence is durable evidence only after a complete, successful Docker l
 
 ### Reconciler Deployment-host Acceptance (Do Not Run on Development Workstations)
 
-1. Build the backend, set `DSPY_TRAINER_DEPLOYER_BACKEND_BASE_IMAGE_ID` from `docker image inspect --format '{{.Id}}'`, rebuild/recreate the deployer, and confirm the configured network name and project label select exactly one actual Compose network.
+1. Build the configured local backend image, start the deployer, and confirm --preflight reports the inspected immutable ID plus exactly one configured network/project-label match. Retag the name and confirm normal startup rejects drift; after all builds drain, confirm --accept-base-image records the new ID.
 2. Create a ready managed deployment pinned above one replica. Confirm every slot has a deterministic distinct name, exact immutable image ID, `unless-stopped`, the complete ownership label set, and only the intended network and runtime environment.
 3. Keep one invocation active while deploying a new ready revision. Observe mixed old/new exact build labels during rollout, verify each new slot becomes registry-ready before its old peer starts draining, and confirm the active invocation completes without interruption.
 4. Deploy an image that starts but never reports matching readiness. After the readiness timeout, confirm rollback records the bounded reason, restores all old slots, and removes only target containers.
@@ -198,6 +194,29 @@ On the deployment host, use a harmless validated fixture snapshot containing one
 5. Run failing system-command and requirements fixtures; confirm each result is `failed`, keeps bounded useful logs, and returns no ready image ID.
 6. Confirm the daemon was not contacted for an escaping-symlink or source-digest-mismatch fixture, and confirm no registry login, pull, or push occurs.
 
+## Deployer Preflight, Migration, and Evidence
+
+The deployer is local-only: it publishes no port, is the only Compose service with the Docker SDK and socket mount, and receives neither GitHub/provider credentials nor general module secrets. Its readiness command verifies Docker access, the named base image and persisted immutable ID, the exact Compose network/project label, database migrations, label namespace, and fresh build plus endpoint leadership. Its separate liveness command checks only the process heartbeat.
+
+~~~bash
+docker compose exec -T deployer python backend/deployer.py --liveness
+docker compose exec -T deployer python backend/deployer.py --readiness
+~~~
+
+For coexistence backfill, keep the static endpoint-worker pool running. Use only the existing status/operator APIs: call rebuild-all once, poll revision-image-builds until every required current revision is ready, then inspect each endpoint deployment. The static pool remains eligible only where legacy_fallback is true; managed endpoint/build/revision queues are isolated from the general and static queues. A safe cutover is reported as migration_state managed, phase ready, no target rollout, and every desired slot ready. Warming or failed targets leave legacy/active traffic in place. Do not disable the static pool until every intended endpoint reports managed readiness.
+
+Rollback is durable and automatic for startup/readiness/drain failures: inspect the deployment rollback reason and bounded build logs, fix or rebuild the target, and let reconciliation restore the previous managed revision or retained legacy fallback. Image retention keeps at least the configured newest ready images per module and never prunes active, target, previous, or container-referenced images.
+
+Capture only sanitized, bounded evidence. The preflight JSON intentionally omits DSNs, credentials, socket paths, and raw exceptions. Do not attach container inspect output, environment dumps, Docker socket metadata, or unbounded logs.
+
+~~~bash
+umask 077
+mkdir -p deployment-evidence
+docker compose exec -T deployer python backend/deployer.py --readiness > deployment-evidence/deployer-readiness.json
+curl -fsS 'http://localhost:8000/revision-image-builds?limit=100&offset=0' > deployment-evidence/revision-image-builds.json
+curl -fsS 'http://localhost:8000/bundle-endpoints/ENDPOINT_ID/deployment' > deployment-evidence/endpoint-deployment.json
+docker compose ps > deployment-evidence/compose-ps.txt
+~~~
 ## Health Verification
 
 ### Compose Health Status

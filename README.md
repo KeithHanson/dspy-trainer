@@ -27,8 +27,8 @@ Building production LLM programs requires iteration—lots of it. DSPy Trainer g
 
 ```bash
 cp .env.sample .env
-# Edit .env: add GITHUB_PAT, stable Compose/deployment identities, and later
-# the immutable backend image ID required by the dedicated deployer.
+# Edit .env: add GITHUB_PAT and stable Compose, network, deployment, and
+# local backend image names. The deployer records the immutable image ID.
 # If you plan to store module environment entries in the UI OR save LM
 # Profile provider API keys, also generate DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY:
 # python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
@@ -39,10 +39,9 @@ cp .env.sample .env
 ```bash
 docker compose pull --ignore-pull-failures
 docker compose build --pull backend
-docker image inspect --format '{{.Id}}' "${DSPY_TRAINER_BACKEND_IMAGE:-dspy-trainer-backend:local}"
-# Put that exact sha256 ID in DSPY_TRAINER_DEPLOYER_BACKEND_BASE_IMAGE_ID.
 docker compose build --pull
 docker compose up -d --remove-orphans
+docker compose exec -T deployer python backend/deployer.py --readiness
 ```
 
 If MLflow trace or run requests time out under load, increase `MLFLOW_WEB_WORKERS` in `.env` before restarting the stack.

@@ -17,6 +17,7 @@ from app.revision_image_coordinator import (
     RevisionImageBuildClaim,
     RevisionImageEnqueueError,
 )
+
 BASE_IMAGE_ID = f"sha256:{'a' * 64}"
 IMAGE_ID = f"sha256:{'b' * 64}"
 
@@ -46,6 +47,7 @@ class _StatefulPostgresConnection:
         self.builds: dict[str, dict] = {}
         self.endpoint_modules: set[str] = set()
         self.deployment_revisions: set[str] = set()
+        self.deployer_base_image_id = BASE_IMAGE_ID
 
     def is_closed(self):
         return False
@@ -74,7 +76,9 @@ class _StatefulPostgresConnection:
                     build["claim_expires_at"] = None
                     combined = f"{build['build_log']}{recovery_log}"
                     build["build_log"] = (
-                        combined if len(combined.encode()) <= max_bytes else recovery_log
+                        combined
+                        if len(combined.encode()) <= max_bytes
+                        else recovery_log
                     )
                     build["failure_reason"] = None
                     count += 1
@@ -208,7 +212,9 @@ class _StatefulPostgresConnection:
                 "source_content_digest": revision["source_content_digest"],
             }
             if rebuild_all:
-                latest = max(related, key=lambda build: build["generation"], default=None)
+                latest = max(
+                    related, key=lambda build: build["generation"], default=None
+                )
                 active = max(
                     (
                         build
@@ -279,6 +285,8 @@ class _StatefulPostgresConnection:
     async def fetchval(self, sql, *args):
         query = " ".join(sql.lower().split())
 
+        if "select base_image_id from deployer_runtime_state" in query:
+            return self.deployer_base_image_id
         if "where retry_of_build_id = $1 and base_image_id = $2" in query:
             matches = [
                 build
@@ -298,7 +306,16 @@ class _StatefulPostgresConnection:
             return max(generations, default=0) + 1
 
         if "with completion_candidate as" in query:
-            build_id, owner, attempt, result_status, image_id, image_digest, log, reason = args
+            (
+                build_id,
+                owner,
+                attempt,
+                result_status,
+                image_id,
+                image_digest,
+                log,
+                reason,
+            ) = args
             build = self.builds.get(build_id)
             if (
                 build is None
@@ -353,12 +370,16 @@ class _StatefulPostgresConnection:
         )
 
 
-def _store(connection: _StatefulPostgresConnection) -> PostgresRevisionImageBuildStore:
+def _store(
+    connection: _StatefulPostgresConnection,
+    *,
+    base_image_id: str | None = BASE_IMAGE_ID,
+) -> PostgresRevisionImageBuildStore:
     store = PostgresRevisionImageBuildStore(
         postgres_dsn="postgresql://unused",
         instance_id="deployer-a",
         deployment_id="compose-project-a",
-        base_image_id=BASE_IMAGE_ID,
+        base_image_id=base_image_id,
         image_repository="dspy-trainer-module",
         platform_version="2026.09",
         build_log_max_bytes=256,
@@ -372,14 +393,14 @@ def _snapshot(tmp_path: Path, name: str) -> tuple[str, str]:
     path = tmp_path / name
     path.mkdir()
     (path / "bundle.toml").write_text(
-        '\n'.join(
+        "\n".join(
             (
                 f'name = "{name}"',
                 'version = "1.0.0"',
-                'score_pass_threshold = 0.5',
-                '',
-                '[runtime]',
-                'system_dependency_commands = []',
+                "score_pass_threshold = 0.5",
+                "",
+                "[runtime]",
+                "system_dependency_commands = []",
             )
         ),
         encoding="utf-8",
@@ -733,6 +754,8 @@ def test_completion_atomically_fences_revoked_eligibility_and_never_publishes(tm
     assert build["failure_reason"] == (
         "revision eligibility was revoked before image publication"
     )
+
+
 def test_retry_rejects_active_ineligible_and_duplicate_generations(tmp_path):
     connection = _StatefulPostgresConnection()
     _add_revision(
@@ -783,6 +806,8 @@ def test_rebuild_all_rejects_duplicate_active_request(tmp_path):
     with pytest.raises(RevisionImageEnqueueError) as duplicate_error:
         asyncio.run(store.enqueue_rebuild_all())
     assert duplicate_error.value.code == "build_conflict"
+
+
 def test_concurrent_rebuild_all_requests_create_one_generation(tmp_path):
     connection = _StatefulPostgresConnection()
     _add_revision(
@@ -803,10 +828,30 @@ def test_concurrent_rebuild_all_requests_create_one_generation(tmp_path):
 
     results = asyncio.run(run_concurrently())
     successes = [result for result in results if isinstance(result, list)]
-    conflicts = [result for result in results if isinstance(result, RevisionImageEnqueueError)]
+    conflicts = [
+        result for result in results if isinstance(result, RevisionImageEnqueueError)
+    ]
 
     assert len(successes) == 1
     assert len(successes[0]) == 1
     assert len(conflicts) == 1
     assert conflicts[0].code == "build_conflict"
     assert len(connection.builds) == 1
+
+
+def test_backend_enqueue_uses_registered_immutable_base_image(tmp_path):
+    connection = _StatefulPostgresConnection()
+    connection.deployer_base_image_id = IMAGE_ID
+    _add_revision(
+        connection,
+        module_id="module-a",
+        revision_id="revision-a",
+        snapshot=_snapshot(tmp_path, "revision-a"),
+        created_at=1,
+    )
+    store = _store(connection, base_image_id=None)
+
+    build_ids = asyncio.run(store.enqueue_rebuild_all())
+
+    assert len(build_ids) == 1
+    assert connection.builds[build_ids[0]]["base_image_id"] == IMAGE_ID
