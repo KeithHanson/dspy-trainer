@@ -5,17 +5,29 @@ import { EmptyState } from "../components/states/EmptyState";
 import { ErrorState } from "../components/states/ErrorState";
 import { LoadingState } from "../components/states/LoadingState";
 import { buildAbsoluteApiUrl, buildApiUrl, normalizeApiBaseUrl } from "../api/base";
+import { EndpointDeploymentPanel } from "./EndpointDeploymentPanel";
+
+function safeOperatorText(value) {
+  return String(value || "")
+    .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, "$1[REDACTED]")
+    .replace(/((?:password|secret|token|api[_-]?key|authorization|credential)[A-Za-z0-9_.-]*\s*[:=]\s*)[^\r\n]*/gi, "$1[REDACTED]")
+    .slice(0, 4_096);
+}
 
 async function readApiError(response, fallback) {
   try {
     const payload = await response.json();
-    if (payload?.error) {
-      return payload.error;
+    if (!payload?.error) return fallback;
+    const message = [safeOperatorText(payload.error)];
+    if (response.status === 409 && (payload.revision_id || payload.build_status)) {
+      message.push(`Revision ${payload.revision_id || "unknown"} image status: ${payload.build_status || "unknown"}.`);
+      if (payload.build?.failure_reason) message.push(safeOperatorText(payload.build.failure_reason));
+      message.push("Retry a failed build from Module Bundles → Images, or wait for the current build to finish.");
     }
+    return message.join(" ");
   } catch {
     return fallback;
   }
-  return fallback;
 }
 
 const EMPTY_FORM = {
@@ -330,6 +342,7 @@ export function EndpointEditorPage() {
   const [bundles, setBundles] = useState([]);
   const [lmProfiles, setLmProfiles] = useState([]);
   const [apiKey, setApiKey] = useState(typeof location.state?.apiKey === "string" ? location.state.apiKey : "");
+  const [deploymentRefreshKey, setDeploymentRefreshKey] = useState(0);
   const syncCurlCommand = buildSyncCurlCommand(publicApiBase, endpointId, apiKey);
   const streamCurlCommand = buildStreamCurlCommand(publicApiBase, endpointId, apiKey);
 
@@ -414,6 +427,7 @@ export function EndpointEditorPage() {
         throw new Error(await readApiError(response, `Could not save endpoint (${response.status})`));
       }
       const saved = await response.json();
+      setDeploymentRefreshKey((current) => current + 1);
       if (typeof saved.api_key === "string") {
         setApiKey(saved.api_key);
       }
@@ -532,6 +546,7 @@ export function EndpointEditorPage() {
             <Button variant="primary" onClick={saveEndpoint} disabled={isSaving}>{isSaving ? "Saving..." : "Save endpoint"}</Button>
           </div>
         </section>
+        {isEditing ? <EndpointDeploymentPanel apiBase={apiBase} endpointId={endpointId} refreshKey={deploymentRefreshKey} /> : null}
       </div>
     </section>
   );

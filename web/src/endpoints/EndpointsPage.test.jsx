@@ -318,4 +318,57 @@ describe("EndpointsPage", () => {
     expect(screen.getAllByText(/bundle-endpoints\/ep-1\/invoke/).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/bundle-endpoints\/ep-1\/stream/).length).toBeGreaterThan(0);
   });
+  it("shows actionable sanitized image-not-ready conflicts", async () => {
+    const fetchMock = vi.fn((url, init) => {
+      if (String(url).endsWith("/modules") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([
+          { id: "mod-1", bundle_name: "agentic-chat" },
+        ]) });
+      }
+      if (String(url).endsWith("/lm-profiles") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue([
+          { id: "lm-1", name: "Primary LM" },
+        ]) });
+      }
+      if (String(url).endsWith("/bundle-endpoints/ep-409") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ id: "ep-409", name: "Blocked endpoint", module_import_id: "mod-1", lm_profile_id: "lm-1", pinned_worker_count: 1 }) });
+      }
+      if (String(url).endsWith("/bundle-endpoints/ep-409/deployment") && init?.method === "GET") {
+        return Promise.resolve({ ok: true, json: vi.fn().mockResolvedValue({ phase: "ready", migration_state: "complete", active: { revision_id: "rev-old", build_id: "build-old" }, slots: [] }) });
+      }
+      if (String(url).endsWith("/bundle-endpoints/ep-409") && init?.method === "PATCH") {
+        return Promise.resolve({
+          ok: false,
+          status: 409,
+          json: vi.fn().mockResolvedValue({
+            error: "revision image is not ready",
+            code: "endpoint_image_not_ready",
+            revision_id: "rev-new",
+            build_status: "failed",
+            build: { failure_reason: "API_KEY=server-secret\nDocker build failed" },
+          }),
+        });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter initialEntries={["/endpoints/ep-409/edit"]}>
+        <Routes>
+          <Route path="/endpoints/:endpointId/edit" element={<EndpointEditorPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByDisplayValue("Blocked endpoint")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Save endpoint" }));
+
+    const message = await screen.findByText(/Revision rev-new image status: failed/);
+    expect(message).toHaveTextContent("Docker build failed");
+    expect(message).toHaveTextContent(/Retry a failed build from Module Bundles → Images/);
+    expect(message).not.toHaveTextContent("server-secret");
+    expect(message).toHaveTextContent("[REDACTED]");
+    expect(fetchMock.mock.calls.filter(([url, init]) => String(url).endsWith("/bundle-endpoints/ep-409") && init?.method === "PATCH")).toHaveLength(1);
+  });
 });

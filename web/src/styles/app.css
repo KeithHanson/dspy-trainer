@@ -1137,6 +1137,29 @@ button { font-family: inherit; }
 .auth-preview-title { max-width: 380px; line-height: 1.35; }
 .auth-feature-icon { color: var(--accent); margin-top: 2px; flex: none; }
 
+.image-builds-head, .endpoint-deployment-head { align-items: flex-start; gap: 16px; margin-bottom: 14px; }
+.image-builds-list { display: grid; gap: 12px; }
+.image-build-card, .endpoint-deployment-ref, .endpoint-slot-card { border: 1px solid var(--border-soft); border-radius: 10px; padding: 14px; background: var(--panel); min-width: 0; }
+.image-build-card-head { align-items: flex-start; gap: 12px; }
+.image-build-meta, .endpoint-deployment-meta { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 16px; margin: 12px 0 0; }
+.image-build-meta div, .endpoint-deployment-meta div { min-width: 0; }
+.image-build-meta dt, .endpoint-deployment-meta dt { color: var(--text-muted); font-size: 10px; letter-spacing: .06em; text-transform: uppercase; }
+.image-build-meta dd, .endpoint-deployment-meta dd { margin: 3px 0 0; overflow-wrap: anywhere; }
+.image-build-failure, .endpoint-deployment-reason, .endpoint-mixed-banner, .endpoint-failed-banner { display: flex; gap: 8px; margin-top: 12px; padding: 10px 12px; border-radius: 8px; border: 1px solid color-mix(in oklch, var(--danger) 42%, var(--border-soft)); background: color-mix(in oklch, var(--danger) 10%, var(--panel)); color: var(--text); overflow-wrap: anywhere; }
+.endpoint-mixed-banner { border-color: color-mix(in oklch, var(--accent) 45%, var(--border-soft)); background: var(--accent-dim); }
+.endpoint-failed-banner { display: block; }
+.image-build-actions { margin-top: 12px; }
+.image-build-log-wrap { margin-top: 12px; }
+.image-build-log { max-height: 360px; margin-top: 8px; padding: 12px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--bg); color: var(--text); font-family: var(--mono); font-size: 11px; line-height: 1.5; }
+.endpoint-deployment-refs, .endpoint-slots-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
+.endpoint-deployment-ref > .row, .endpoint-slot-card > .row { gap: 10px; align-items: center; }
+.endpoint-slots-head { margin-top: 18px; }
+
+@media (max-width: 760px) {
+  .image-builds-head, .endpoint-deployment-head { flex-direction: column; }
+  .image-build-meta, .endpoint-deployment-meta, .endpoint-deployment-refs, .endpoint-slots-grid { grid-template-columns: 1fr; }
+}
+
 @media (max-width: 960px) {
   .auth-preview-panel { display: none; }
   .auth-form-wrap { width: 420px; }

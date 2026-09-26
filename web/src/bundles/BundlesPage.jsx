@@ -6,6 +6,7 @@ import { EmptyState } from "../components/states/EmptyState";
 import { ErrorState } from "../components/states/ErrorState";
 import { LoadingState } from "../components/states/LoadingState";
 import { buildApiUrl } from "../api/base";
+import { RevisionImageBuildsPanel } from "./RevisionImageBuildsPanel";
 
 const VALIDATION_CHECKS = [
   {
@@ -782,7 +783,7 @@ function BundleDetailPage({ moduleId, modulesUrl, onBack }) {
         </header>
 
         <div className="row gap-2" style={{ marginBottom: 14 }}>
-          {["details", "sync", "validation", "files", "environment"].map((tab) => (
+          {["details", "sync", "validation", "images", "files", "environment"].map((tab) => (
             <Button key={tab} size="sm" variant={detailTab === tab ? "primary" : "ghost"} onClick={() => setDetailTab(tab)}>
               {tab.charAt(0).toUpperCase() + tab.slice(1)}
             </Button>
@@ -904,6 +905,8 @@ function BundleDetailPage({ moduleId, modulesUrl, onBack }) {
             {environmentError ? <p className="cap" style={{ marginTop: 8 }}>{environmentError}</p> : null}
           </section>
         ) : null}
+
+        <RevisionImageBuildsPanel active={detailTab === "images"} moduleId={bundle.id} />
 
       </div>
     </section>
