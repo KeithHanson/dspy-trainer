@@ -44,6 +44,7 @@ class DeploymentIntent:
     previous_build_id: str | None = None
     previous_revision_id: str | None = None
     previous_image_id: str | None = None
+    rollout_started_at: datetime | None = None
 
     def desired_artifact(self) -> tuple[str, str, str] | None:
         if self.phase == "rollback":
@@ -224,6 +225,8 @@ class EndpointContainerStore(Protocol):
 
     async def record_image_pruned(self, build_id: str) -> None: ...
 
+    async def finalize_endpoint_deletions(self) -> bool: ...
+
 
 class EndpointDockerAdapter(Protocol):
     async def resolve_network(self, selector: str, compose_project: str) -> str: ...
@@ -322,7 +325,8 @@ class EndpointContainerReconciler:
         intents_by_endpoint = {intent.endpoint_id: intent for intent in intents}
 
         for container, identity in owned:
-            if identity.endpoint_id in intents_by_endpoint:
+            intent = intents_by_endpoint.get(identity.endpoint_id)
+            if intent is not None and self._identity_matches_intent(identity, intent):
                 await self._store.observe_container(identity, container, now=now)
 
         for container, identity in owned:
@@ -350,6 +354,8 @@ class EndpointContainerReconciler:
             if acted:
                 return True
 
+        if await self._store.finalize_endpoint_deletions():
+            return True
         if all_converged:
             for candidate in await self._store.list_image_prune_candidates(
                 self._image_retention_count
@@ -388,13 +394,23 @@ class EndpointContainerReconciler:
             matching = [
                 pair
                 for pair in endpoint_containers
-                if pair[1].slot == slot
+                if self._identity_matches_intent(pair[1], intent)
+                and pair[1].slot == slot
                 and pair[1].build_id == build_id
                 and pair[1].revision_id == revision_id
                 and pair[1].image_id == image_id
             ]
             target = self._choose_canonical(matching, registry)
             if target is None:
+                if self._rollout_timed_out(intent, now):
+                    reason = self._bounded_reason(
+                        f"endpoint {intent.endpoint_id} replacement attempts did not produce "
+                        f"a running container before the readiness timeout"
+                    )
+                    await self._store.fail_or_rollback_deployment(
+                        intent.deployment_id, reason
+                    )
+                    return True, False
                 try:
                     launched = await self._docker.start_container(
                         self._launch_spec(
@@ -415,10 +431,27 @@ class EndpointContainerReconciler:
                     )
                     return True, False
                 identity = self._require_owned_identity(launched)
-                if identity is None:
-                    raise RuntimeError(
-                        "Docker returned a container without the exact managed identity labels"
+                valid_launch = bool(
+                    identity is not None
+                    and self._identity_matches_intent(identity, intent)
+                    and identity.slot == slot
+                    and identity.build_id == build_id
+                    and identity.revision_id == revision_id
+                    and identity.image_id == image_id
+                )
+                if not valid_launch:
+                    cleanup_error = None
+                    try:
+                        await self._docker.stop_remove_container(launched.container_id)
+                    except Exception as exc:
+                        cleanup_error = exc
+                    reason = "Docker returned a replacement container without the exact required identity"
+                    if cleanup_error is not None:
+                        reason += f"; cleanup failed: {cleanup_error}"
+                    await self._store.fail_or_rollback_deployment(
+                        intent.deployment_id, self._bounded_reason(reason)
                     )
+                    return True, False
                 await self._store.record_container_started(identity, launched, now=now)
                 if intent.phase == "pending":
                     await self._store.mark_deployment_rolling(intent.deployment_id)
@@ -437,6 +470,14 @@ class EndpointContainerReconciler:
                     reason="replacement container was not running",
                     logs=logs,
                 )
+                if self._rollout_timed_out(intent, now):
+                    await self._store.fail_or_rollback_deployment(
+                        intent.deployment_id,
+                        self._bounded_reason(
+                            f"endpoint {intent.endpoint_id} replacement repeatedly stopped "
+                            "before the readiness timeout"
+                        ),
+                    )
                 return True, False
 
             target_snapshot = registry.get(target_identity.worker_id)
@@ -521,6 +562,8 @@ class EndpointContainerReconciler:
         reason: str,
     ) -> bool:
         record = records.get(container.container_id)
+        if record is None:
+            await self._store.observe_container(identity, container, now=now)
         if record is None or record.lifecycle != "draining":
             await self._store.block_worker_claims(identity.worker_id)
             await self._store.mark_container_draining(container.container_id, now=now)
@@ -665,6 +708,24 @@ class EndpointContainerReconciler:
         )
 
     @staticmethod
+    def _identity_matches_intent(
+        identity: ContainerIdentity, intent: DeploymentIntent
+    ) -> bool:
+        return bool(
+            identity.endpoint_id == intent.endpoint_id
+            and identity.deployment_id == intent.deployment_id
+            and identity.rollout_generation == intent.rollout_generation
+        )
+
+    def _rollout_timed_out(self, intent: DeploymentIntent, now: datetime) -> bool:
+        return bool(
+            intent.phase in {"rolling", "draining"}
+            and intent.rollout_started_at is not None
+            and (now - intent.rollout_started_at).total_seconds()
+            >= self._readiness_timeout_seconds
+        )
+
+    @staticmethod
     def _choose_canonical(
         matching: list[tuple[ObservedContainer, ContainerIdentity]],
         registry: Mapping[str, RegistrySnapshot],
@@ -772,6 +833,7 @@ class PostgresEndpointContainerStore:
                      d.*, e.module_import_id
               from endpoint_deployments d
               join bundle_endpoints e on e.id = d.endpoint_id
+              where e.delete_requested_at is null
               order by d.endpoint_id, d.rollout_generation desc
             )
             select latest.*,
@@ -802,6 +864,7 @@ class PostgresEndpointContainerStore:
                 previous_build_id=_text(row["previous_build_id"]),
                 previous_revision_id=_text(row["previous_revision_id"]),
                 previous_image_id=_text(row["previous_image_id"]),
+                rollout_started_at=row["rollout_started_at"],
             )
             for row in rows
         ]
@@ -1023,12 +1086,13 @@ class PostgresEndpointContainerStore:
         rows = await conn.fetch(
             """
             with ranked as (
-              select b.id, b.revision_id, b.module_import_id, b.image_id,
+              select b.id, b.revision_id, r.module_import_id, b.image_id,
                      row_number() over (
-                       partition by b.module_import_id
+                       partition by r.module_import_id
                        order by b.generation desc, b.finished_at desc nulls last, b.created_at desc
                      ) as position
               from revision_image_builds b
+              join bundle_revisions r on r.id = b.revision_id
               where b.status = 'ready' and b.image_id is not null
             ), referenced as (
               select active_build_id as build_id from endpoint_deployments where active_build_id is not null
@@ -1064,6 +1128,38 @@ class PostgresEndpointContainerStore:
             """,
             build_id,
         )
+
+    async def finalize_endpoint_deletions(self) -> bool:
+        conn = await self._conn()
+        async with conn.transaction():
+            row = await conn.fetchrow("""
+                select e.id
+                from bundle_endpoints e
+                where e.delete_requested_at is not null
+                  and not exists (
+                    select 1
+                    from managed_endpoint_containers c
+                    where c.endpoint_id = e.id and c.lifecycle <> 'removed'
+                  )
+                order by e.delete_requested_at, e.id
+                limit 1
+                for update skip locked
+                """)
+            if row is None:
+                return False
+            endpoint_id = str(row["id"])
+            await conn.execute(
+                "delete from managed_endpoint_containers where endpoint_id = $1",
+                endpoint_id,
+            )
+            await conn.execute(
+                "delete from endpoint_deployments where endpoint_id = $1", endpoint_id
+            )
+            await conn.execute(
+                "delete from bundle_endpoints where id = $1 and delete_requested_at is not null",
+                endpoint_id,
+            )
+        return True
 
 
 class DockerSdkEndpointAdapter:

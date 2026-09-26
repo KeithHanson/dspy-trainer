@@ -4,11 +4,14 @@ from datetime import datetime, timedelta, timezone
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from app import main as main_mod
 from app.endpoint_container_reconciler import (
     ContainerRecord,
     DeploymentIntent,
@@ -16,9 +19,11 @@ from app.endpoint_container_reconciler import (
     EndpointContainerReconciler,
     ImagePruneCandidate,
     ObservedContainer,
+    PostgresEndpointContainerStore,
     RegistrySnapshot,
     managed_container_name,
 )
+from app.services import AppServices
 from endpoint_worker import claim_or_requeue_endpoint_job
 
 NOW = datetime(2099, 1, 1, tzinfo=timezone.utc)
@@ -170,6 +175,9 @@ class _Store:
         ]
         self.events.append(("pruned", build_id))
 
+    async def finalize_endpoint_deletions(self):
+        return False
+
     def _intent(self, deployment_id):
         return next(
             item for item in self.intents if item.deployment_id == deployment_id
@@ -189,6 +197,7 @@ class _Docker:
         self.events = []
         self.pruned = []
         self.fail_start = False
+        self.invalid_start_labels = False
         self._next_id = 1
 
     async def resolve_network(self, selector, compose_project):
@@ -202,11 +211,14 @@ class _Docker:
     async def start_container(self, spec):
         if self.fail_start:
             raise RuntimeError("injected start failure")
+        labels = dict(spec.labels)
+        if self.invalid_start_labels:
+            labels.pop(f"{NAMESPACE}.deployment-id")
         container = ObservedContainer(
             container_id=f"container-{self._next_id}",
             name=spec.name,
             image_id=spec.image_id,
-            labels=dict(spec.labels),
+            labels=labels,
             state="running",
             created_at=self.clock(),
         )
@@ -259,7 +271,7 @@ def _labels(
     build="build-old",
     revision="revision-old",
     image="sha256:old",
-    generation=1,
+    generation=2,
     worker=None,
 ):
     worker = worker or f"worker-{build}-{slot}-{generation}"
@@ -286,7 +298,7 @@ def _container(
     build="build-old",
     revision="revision-old",
     image="sha256:old",
-    generation=1,
+    generation=2,
     created_at=NOW,
     labels=None,
 ):
@@ -555,6 +567,97 @@ def test_failed_start_keeps_old_revision_live_and_records_rollback():
     asyncio.run(scenario())
 
 
+def test_wrong_deployment_or_generation_is_never_adopted():
+    async def scenario():
+        clock = _Clock()
+        store = _Store([_intent(phase="ready")])
+        docker = _Docker(clock)
+        wrong_deployment = _container(
+            "wrong-deployment",
+            labels=_labels(deployment="old-deployment", generation=2),
+        )
+        wrong_generation = _container(
+            "wrong-generation",
+            labels=_labels(deployment="deployment-1", generation=1),
+        )
+        docker.containers.extend([wrong_deployment, wrong_generation])
+        reconciler = _reconciler(store, docker, clock)
+
+        assert await reconciler.run_cycle() is True
+        replacement = next(
+            item
+            for item in docker.containers
+            if item.container_id not in {"wrong-deployment", "wrong-generation"}
+        )
+        assert "wrong-deployment" not in store.records
+        assert "wrong-generation" not in store.records
+        assert replacement.labels[f"{NAMESPACE}.deployment-id"] == "deployment-1"
+        assert replacement.labels[f"{NAMESPACE}.rollout-generation"] == "2"
+
+    asyncio.run(scenario())
+
+
+def test_repeated_non_running_replacements_hit_original_rollout_deadline():
+    async def scenario():
+        clock = _Clock()
+        intent = replace(_intent(phase="rolling"), rollout_started_at=clock())
+        store = _Store([intent])
+        docker = _Docker(clock)
+        old = _container("old-0")
+        docker.containers.append(old)
+        reconciler = _reconciler(store, docker, clock, readiness=5)
+
+        assert await reconciler.run_cycle() is True
+        first = _new_container(docker)
+        docker.containers[docker.containers.index(first)] = replace(
+            first, state="exited"
+        )
+        assert await reconciler.run_cycle() is True
+        assert store.intents[0].phase == "rolling"
+
+        clock.advance(4)
+        assert await reconciler.run_cycle() is True
+        second = _new_container(docker)
+        docker.containers[docker.containers.index(second)] = replace(
+            second, state="exited"
+        )
+        clock.advance(1)
+        assert await reconciler.run_cycle() is True
+
+        assert store.intents[0].phase == "rollback"
+        assert old in docker.containers
+        assert sum(event[0] == "start" for event in docker.events) == 2
+        assert any(
+            event[0] == "rollback" and "repeatedly stopped" in event[2]
+            for event in store.events
+        )
+
+    asyncio.run(scenario())
+
+
+def test_invalid_launch_identity_is_removed_and_rolls_back():
+    async def scenario():
+        clock = _Clock()
+        store = _Store([_intent()])
+        docker = _Docker(clock)
+        old = _container("old-0")
+        docker.containers.append(old)
+        docker.invalid_start_labels = True
+        reconciler = _reconciler(store, docker, clock)
+
+        assert await reconciler.run_cycle() is True
+
+        assert docker.containers == [old]
+        assert ("stop", "container-1") in docker.events
+        assert store.intents[0].phase == "rollback"
+        assert any(
+            event[0] == "rollback" and "exact required identity" in event[2]
+            for event in store.events
+        )
+
+    asyncio.run(scenario())
+
+
 def test_image_pruning_uses_only_store_candidates_after_convergence():
     async def scenario():
         clock = _Clock()
@@ -660,6 +763,326 @@ def test_docker_adapter_requires_one_exact_compose_network():
     asyncio.run(scenario())
 
 
+class _AcquireConnection:
+    def __init__(self, connection):
+        self.connection = connection
+
+    async def __aenter__(self):
+        return self.connection
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+
+class _ConnectionPool:
+    def __init__(self, connection):
+        self.connection = connection
+
+    def acquire(self):
+        return _AcquireConnection(self.connection)
+
+
+class _EndpointApiConnection:
+    def __init__(self):
+        self.endpoint = {
+            "id": "endpoint-1",
+            "module_import_id": "module-1",
+            "lm_profile_id": None,
+            "pinned_worker_count": 1,
+            "name": "Managed endpoint",
+            "key_preview": "abc123",
+            "created_at": NOW,
+            "updated_at": NOW,
+            "module_bundle_name": "bundle",
+            "lm_profile_name": None,
+        }
+        self.deployment = _intent(count=1, phase="ready")
+        self.registry = {}
+        self.container_records = {}
+        self.tombstoned = False
+        self.deleted = False
+        self.worker_claims_blocked = False
+        self.finalized = False
+
+    def is_closed(self):
+        return False
+
+    def transaction(self):
+        return _AcquireConnection(self)
+
+    async def fetchval(self, query, *params):
+        return True
+
+    async def fetch(self, query, *params):
+        normalized = " ".join(query.strip().lower().split())
+        if "with latest as" in normalized:
+            if self.tombstoned or self.deleted:
+                return []
+            intent = self.deployment
+            return [
+                {
+                    "id": intent.deployment_id,
+                    "endpoint_id": intent.endpoint_id,
+                    "module_import_id": intent.module_id,
+                    "phase": intent.phase,
+                    "desired_replica_count": intent.desired_replica_count,
+                    "rollout_generation": intent.rollout_generation,
+                    "active_build_id": intent.active_build_id,
+                    "active_revision_id": intent.active_revision_id,
+                    "active_image_id": intent.active_image_id,
+                    "target_build_id": intent.target_build_id,
+                    "target_revision_id": intent.target_revision_id,
+                    "target_image_id": intent.target_image_id,
+                    "previous_build_id": intent.previous_build_id,
+                    "previous_revision_id": intent.previous_revision_id,
+                    "previous_image_id": intent.previous_image_id,
+                    "rollout_started_at": intent.rollout_started_at,
+                }
+            ]
+        if "from endpoint_worker_registrations" in normalized:
+            return [
+                {
+                    "worker_id": snapshot.worker_id,
+                    "status": snapshot.status,
+                    "assigned_endpoint_id": snapshot.assigned_endpoint_id,
+                    "task_id": snapshot.task_id,
+                    "last_seen_at": snapshot.last_seen_at or NOW,
+                    "heartbeat_expires_at": NOW + timedelta(minutes=1),
+                    "runtime_metadata": {
+                        "endpoint_id": snapshot.reported_endpoint_id,
+                        "execution_mode": snapshot.execution_mode,
+                        "desired_build_id": snapshot.build_id,
+                        "warmed_build_id": snapshot.build_id,
+                        "desired_revision_id": snapshot.revision_id,
+                        "warmed_revision_id": snapshot.revision_id,
+                    },
+                }
+                for snapshot in self.registry.values()
+            ]
+        if (
+            "from managed_endpoint_containers" in normalized
+            and not normalized.startswith("with ranked as")
+        ):
+            return [
+                record
+                for record in self.container_records.values()
+                if record["lifecycle"] != "removed"
+            ]
+        if "with ranked as" in normalized:
+            return []
+        raise AssertionError(f"unexpected fetch SQL: {normalized}")
+
+    async def fetchrow(self, query, *params):
+        normalized = " ".join(query.strip().lower().split())
+        if normalized.startswith("update bundle_endpoints set delete_requested_at"):
+            if self.tombstoned or self.deleted:
+                return None
+            self.tombstoned = True
+            self.endpoint["updated_at"] = params[2]
+            return {"id": self.endpoint["id"]}
+        if normalized.startswith("update bundle_endpoints set name"):
+            if self.tombstoned or self.deleted:
+                return None
+            self.endpoint.update(
+                name=params[1],
+                module_import_id=params[2],
+                lm_profile_id=params[3],
+                pinned_worker_count=params[4],
+                updated_at=params[5],
+            )
+            return dict(self.endpoint)
+        if normalized.startswith("select e.id from bundle_endpoints e"):
+            active = any(
+                record["lifecycle"] != "removed"
+                for record in self.container_records.values()
+            )
+            if self.tombstoned and not active:
+                return {"id": self.endpoint["id"]}
+            return None
+        if "from bundle_endpoints e" in normalized:
+            if self.tombstoned or self.deleted:
+                return None
+            return dict(self.endpoint)
+        raise AssertionError(f"unexpected fetchrow SQL: {normalized}")
+
+    async def execute(self, query, *params):
+        normalized = " ".join(query.strip().lower().split())
+        if normalized.startswith(
+            "update endpoint_deployments set desired_replica_count"
+        ):
+            self.deployment = replace(self.deployment, desired_replica_count=params[1])
+            return "UPDATE 1"
+        if normalized.startswith("update endpoint_deployments set phase = 'draining'"):
+            self.deployment = replace(self.deployment, phase="draining")
+            return "UPDATE 1"
+        if normalized.startswith("insert into managed_endpoint_containers"):
+            self.container_records[params[0]] = {
+                "container_id": params[0],
+                "lifecycle": params[7],
+                "started_at": params[9],
+                "drain_started_at": None,
+            }
+            return "INSERT 1"
+        if normalized.startswith(
+            "update managed_endpoint_containers set lifecycle = 'draining'"
+        ):
+            record = self.container_records[params[0]]
+            record["lifecycle"] = "draining"
+            record["drain_started_at"] = record["drain_started_at"] or params[1]
+            return "UPDATE 1"
+        if normalized.startswith(
+            "update managed_endpoint_containers set lifecycle = 'removed'"
+        ):
+            self.container_records[params[0]]["lifecycle"] = "removed"
+            return "UPDATE 1"
+        if normalized.startswith("update endpoint_worker_registrations"):
+            self.worker_claims_blocked = True
+            return "UPDATE 1"
+        if normalized.startswith("delete from managed_endpoint_containers"):
+            self.container_records.clear()
+            return "DELETE 2"
+        if normalized.startswith("delete from endpoint_deployments"):
+            return "DELETE 1"
+        if normalized.startswith("delete from bundle_endpoints"):
+            self.deleted = True
+            self.finalized = True
+            return "DELETE 1"
+        raise AssertionError(f"unexpected execute SQL: {normalized}")
+
+
+def _endpoint_store(connection):
+    store = PostgresEndpointContainerStore(
+        postgres_dsn="postgresql://unused",
+        instance_id="test",
+        leader_timeout_seconds=15,
+    )
+    store._connection = connection
+    return store
+
+
+def test_endpoint_api_updates_managed_scale_and_tombstones_before_reconcile_delete(
+    monkeypatch,
+):
+    connection = _EndpointApiConnection()
+    services = AppServices(SimpleNamespace())
+    services.postgres_pool = _ConnectionPool(connection)
+
+    async def no_op(*args, **kwargs):
+        return None
+
+    async def get_module(module_id):
+        return {"id": module_id}
+
+    services.connect_backend = no_op
+    services.disconnect = no_op
+    services.reconcile_endpoint_worker_assignments = no_op
+    services.get_module = get_module
+    monkeypatch.setattr(main_mod, "AppServices", lambda settings: services)
+    monkeypatch.setattr(main_mod, "get_settings", lambda: SimpleNamespace())
+
+    with TestClient(main_mod.app) as client:
+        scaled = client.patch(
+            "/bundle-endpoints/endpoint-1", json={"pinned_worker_count": 2}
+        )
+        assert scaled.status_code == 200
+        assert scaled.json()["pinned_worker_count"] == 2
+
+    clock = _Clock()
+    store = _endpoint_store(connection)
+    docker = _Docker(clock)
+    slot_0 = _container("owned-0")
+    docker.containers.append(slot_0)
+    connection.registry[_ready(slot_0).worker_id] = _ready(slot_0)
+    reconciler = _reconciler(store, docker, clock)
+
+    async def reconcile_scaled_endpoint():
+        assert await reconciler.run_cycle() is True
+        slot_1 = next(
+            item
+            for item in docker.containers
+            if item.labels.get(f"{NAMESPACE}.slot") == "1"
+        )
+        connection.registry[_ready(slot_1).worker_id] = _ready(slot_1)
+        assert await reconciler.run_cycle() is False
+        return slot_1
+
+    slot_1 = asyncio.run(reconcile_scaled_endpoint())
+    assert connection.deployment.desired_replica_count == 2
+    assert slot_1 in docker.containers
+
+    with TestClient(main_mod.app) as client:
+        deleted = client.delete("/bundle-endpoints/endpoint-1")
+        assert deleted.status_code == 200
+        assert deleted.json()["deleted"] is True
+
+    assert connection.tombstoned is True
+    assert connection.deleted is False
+    assert connection.deployment.phase == "draining"
+    assert connection.worker_claims_blocked is True
+
+    async def reconcile_deleted_endpoint():
+        for _ in range(8):
+            await reconciler.run_cycle()
+            if connection.deleted:
+                return
+        raise AssertionError("tombstoned endpoint did not finalize")
+
+    asyncio.run(reconcile_deleted_endpoint())
+    assert docker.containers == []
+    assert connection.deleted is True
+    assert connection.finalized is True
+
+
+class _PruneSqlConnection:
+    def __init__(self):
+        self.query = ""
+        self.params = ()
+
+    def is_closed(self):
+        return False
+
+    async def fetch(self, query, *params):
+        self.query = " ".join(query.split())
+        self.params = params
+        if "b.module_import_id" in self.query:
+            raise RuntimeError("column b.module_import_id does not exist")
+        if (
+            "join bundle_revisions r on r.id = b.revision_id" not in self.query
+            or "partition by r.module_import_id" not in self.query
+        ):
+            raise RuntimeError(
+                "module ownership was not resolved through bundle_revisions"
+            )
+        return [
+            {
+                "id": "build-old",
+                "revision_id": "revision-old",
+                "module_import_id": "module-1",
+                "image_id": "sha256:old",
+            }
+        ]
+
+
+def test_postgres_prune_candidates_join_revision_for_module_ownership():
+    async def scenario():
+        connection = _PruneSqlConnection()
+        store = PostgresEndpointContainerStore(
+            postgres_dsn="postgresql://unused",
+            instance_id="test",
+            leader_timeout_seconds=15,
+        )
+        store._connection = connection
+
+        candidates = await store.list_image_prune_candidates(2)
+
+        assert candidates == [
+            ImagePruneCandidate("sha256:old", "module-1", "build-old", "revision-old")
+        ]
+        assert connection.params == (2,)
+
+    asyncio.run(scenario())
+
+
 class _QueueRedis:
     def __init__(self):
         self.commands = []
@@ -668,15 +1091,74 @@ class _QueueRedis:
         self.commands.append(args)
 
 
-class _ClaimServices:
-    def __init__(self, claimed):
-        self.claimed = claimed
-        self.redis = _QueueRedis()
-        self.claims = []
+class _AtomicRegistrationConnection:
+    def __init__(self, winner):
+        self.winner = winner
+        self.lock = asyncio.Lock()
+        self.first_entered = asyncio.Event()
+        self.release_first = asyncio.Event()
+        self.claim_calls = 0
+        self.active_seen_by_drain = False
+        self.registration = {
+            "worker_id": "worker-1",
+            "assigned_endpoint_id": "endpoint-1",
+            "status": "listening",
+            "task_id": None,
+        }
 
-    async def claim_endpoint_worker_task(self, **kwargs):
-        self.claims.append(kwargs)
-        return self.claimed
+    def is_closed(self):
+        return False
+
+    async def fetchrow(self, query, *params):
+        assert "update endpoint_worker_registrations" in query
+        async with self.lock:
+            self.claim_calls += 1
+            if self.winner == "claim":
+                self.first_entered.set()
+                await self.release_first.wait()
+            registration = self.registration
+            if not (
+                registration["worker_id"] == params[0]
+                and registration["assigned_endpoint_id"] == params[1]
+                and registration["status"] == "listening"
+                and registration["task_id"] is None
+            ):
+                return None
+            registration["status"] = "running"
+            registration["task_id"] = params[2]
+            return {"worker_id": params[0]}
+
+    async def execute(self, query, *params):
+        assert "set assigned_endpoint_id = null" in query
+        async with self.lock:
+            if self.winner == "drain":
+                self.first_entered.set()
+                await self.release_first.wait()
+            self.active_seen_by_drain = bool(
+                self.registration["status"] == "running"
+                and self.registration["task_id"]
+            )
+            if self.registration["worker_id"] == params[0]:
+                self.registration["assigned_endpoint_id"] = None
+        return "UPDATE 1"
+
+
+def _claim_services(connection):
+    services = object.__new__(AppServices)
+    services.settings = SimpleNamespace(endpoint_worker_heartbeat_ttl_seconds=30)
+    services.postgres_pool = _ConnectionPool(connection)
+    services.redis = _QueueRedis()
+    return services
+
+
+def _claim_store(connection):
+    store = PostgresEndpointContainerStore(
+        postgres_dsn="postgresql://unused",
+        instance_id="test",
+        leader_timeout_seconds=15,
+    )
+    store._connection = connection
+    return store
 
 
 def _raw_job(**changes):
@@ -705,7 +1187,8 @@ def _ready_target():
 
 def test_wrong_identity_job_never_claims_or_requeues_for_execution():
     async def scenario():
-        services = _ClaimServices(claimed=True)
+        connection = _AtomicRegistrationConnection("claim")
+        services = _claim_services(connection)
         accepted = await claim_or_requeue_endpoint_job(
             services,
             queue_name="endpoint-queue",
@@ -714,43 +1197,70 @@ def test_wrong_identity_job_never_claims_or_requeues_for_execution():
             ready_target=_ready_target(),
         )
         assert accepted is True
-        assert services.claims == []
+        assert connection.claim_calls == 0
         assert services.redis.commands == []
 
     asyncio.run(scenario())
 
 
-def test_drain_winning_before_atomic_claim_requeues_popped_job_exactly_once():
+def test_drain_winning_atomic_registry_update_requeues_exact_job_once():
     async def scenario():
-        services = _ClaimServices(claimed=False)
+        connection = _AtomicRegistrationConnection("drain")
+        services = _claim_services(connection)
+        store = _claim_store(connection)
         raw = _raw_job()
-        claimed = await claim_or_requeue_endpoint_job(
-            services,
-            queue_name="endpoint-queue",
-            raw_payload=raw,
-            worker_id="worker-1",
-            ready_target=_ready_target(),
+
+        drain_task = asyncio.create_task(store.block_worker_claims("worker-1"))
+        await connection.first_entered.wait()
+        claim_task = asyncio.create_task(
+            claim_or_requeue_endpoint_job(
+                services,
+                queue_name="endpoint-queue",
+                raw_payload=raw,
+                worker_id="worker-1",
+                ready_target=_ready_target(),
+            )
         )
-        assert claimed is False
+        await asyncio.sleep(0)
+        connection.release_first.set()
+        await drain_task
+        claimed = await claim_task
+
+        executed = claimed
+        assert executed is False
+        assert connection.registration["task_id"] is None
         assert services.redis.commands == [("RPUSH", "endpoint-queue", raw)]
-        assert len(services.claims) == 1
+        assert connection.claim_calls == 1
 
     asyncio.run(scenario())
 
 
-def test_atomic_claim_winning_before_drain_executes_without_requeue():
+def test_atomic_registry_claim_is_visible_before_drain_and_never_requeues():
     async def scenario():
-        services = _ClaimServices(claimed=True)
+        connection = _AtomicRegistrationConnection("claim")
+        services = _claim_services(connection)
+        store = _claim_store(connection)
         raw = _raw_job()
-        claimed = await claim_or_requeue_endpoint_job(
-            services,
-            queue_name="endpoint-queue",
-            raw_payload=raw,
-            worker_id="worker-1",
-            ready_target=_ready_target(),
+
+        claim_task = asyncio.create_task(
+            claim_or_requeue_endpoint_job(
+                services,
+                queue_name="endpoint-queue",
+                raw_payload=raw,
+                worker_id="worker-1",
+                ready_target=_ready_target(),
+            )
         )
+        await connection.first_entered.wait()
+        drain_task = asyncio.create_task(store.block_worker_claims("worker-1"))
+        await asyncio.sleep(0)
+        connection.release_first.set()
+        claimed = await claim_task
+        await drain_task
+
         assert claimed is True
+        assert connection.active_seen_by_drain is True
+        assert connection.registration["task_id"] == "invocation-1"
         assert services.redis.commands == []
-        assert services.claims[0]["task_id"] == "invocation-1"
 
     asyncio.run(scenario())

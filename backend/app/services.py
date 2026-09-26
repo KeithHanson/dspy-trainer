@@ -1850,12 +1850,14 @@ class AppServices:
                   key_hash text not null,
                   key_preview text not null,
                   created_at timestamptz not null,
-                  updated_at timestamptz not null
+                  updated_at timestamptz not null,
+                  delete_requested_at timestamptz
                 );
                 """
             )
             await conn.execute("alter table bundle_endpoints add column if not exists lm_profile_id text references lm_profiles(id) on delete set null;")
             await conn.execute("alter table bundle_endpoints add column if not exists pinned_worker_count int not null default 1;")
+            await conn.execute("alter table bundle_endpoints add column if not exists delete_requested_at timestamptz;")
             await conn.execute("create index if not exists idx_bundle_endpoints_module_import_id on bundle_endpoints(module_import_id, created_at desc);")
             await conn.execute("alter table bundle_revisions add column if not exists source_snapshot_path text;")
             await conn.execute("alter table bundle_revisions add column if not exists source_content_digest text;")
@@ -2089,6 +2091,7 @@ class AppServices:
                 select 'legacy-' || e.id, e.id, 'legacy_static', greatest(1, e.pinned_worker_count), 0,
                        e.created_at, e.updated_at
                 from bundle_endpoints e
+                where e.delete_requested_at is null
                 on conflict (endpoint_id, rollout_generation) do nothing;
                 """
             )
@@ -3712,7 +3715,7 @@ class AppServices:
             updated_at,
         )
 
-    async def _update_legacy_endpoint_deployment_replica_count(
+    async def _update_endpoint_deployment_replica_count(
         self,
         conn: Any,
         *,
@@ -3724,7 +3727,13 @@ class AppServices:
             """
             update endpoint_deployments
             set desired_replica_count = $2, updated_at = $3
-            where endpoint_id = $1 and rollout_generation = 0 and phase = 'legacy_static'
+            where id = (
+              select id
+              from endpoint_deployments
+              where endpoint_id = $1
+              order by rollout_generation desc
+              limit 1
+            )
             """,
             endpoint_id,
             desired_replica_count,
@@ -3944,7 +3953,7 @@ class AppServices:
                 from bundle_endpoints e
                 join module_imports m on m.id = e.module_import_id
                 left join lm_profiles lp on lp.id = e.lm_profile_id and lp.archived_at is null
-                where m.deleted_at is null
+                where m.deleted_at is null and e.delete_requested_at is null
                 order by e.created_at desc
                 """
             )
@@ -3962,7 +3971,7 @@ class AppServices:
                 from bundle_endpoints e
                 join module_imports m on m.id = e.module_import_id
                 left join lm_profiles lp on lp.id = e.lm_profile_id and lp.archived_at is null
-                where e.id = $1 and m.deleted_at is null
+                where e.id = $1 and m.deleted_at is null and e.delete_requested_at is null
                 """,
                 endpoint_id,
             )
@@ -3985,7 +3994,7 @@ class AppServices:
                 from bundle_endpoints e
                 join module_imports m on m.id = e.module_import_id
                 left join lm_profiles lp on lp.id = e.lm_profile_id and lp.archived_at is null
-                where e.module_import_id = $1 and m.deleted_at is null
+                where e.module_import_id = $1 and m.deleted_at is null and e.delete_requested_at is null
                 order by created_at asc
                 """,
                 module_id,
@@ -4102,7 +4111,7 @@ class AppServices:
                     now,
                 )
                 if row is not None:
-                    await self._update_legacy_endpoint_deployment_replica_count(
+                    await self._update_endpoint_deployment_replica_count(
                         conn,
                         endpoint_id=endpoint_id,
                         desired_replica_count=normalized_pinned_worker_count,
@@ -4162,7 +4171,7 @@ class AppServices:
                     now,
                 )
                 if row is not None:
-                    await self._update_legacy_endpoint_deployment_replica_count(
+                    await self._update_endpoint_deployment_replica_count(
                         conn,
                         endpoint_id=endpoint_id,
                         desired_replica_count=normalized_pinned_worker_count,
@@ -4177,22 +4186,57 @@ class AppServices:
     async def delete_bundle_endpoint(self, module_id: str, endpoint_id: str) -> bool:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
+        now = datetime.now(timezone.utc)
         async with self.postgres_pool.acquire() as conn:
-            result = await conn.execute(
-                "delete from bundle_endpoints where id = $1 and module_import_id = $2",
-                endpoint_id,
-                module_id,
-            )
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    update bundle_endpoints
+                    set delete_requested_at = $3, updated_at = $3
+                    where id = $1 and module_import_id = $2 and delete_requested_at is null
+                    returning id
+                    """,
+                    endpoint_id,
+                    module_id,
+                    now,
+                )
+                if row is not None:
+                    await conn.execute(
+                        """
+                        update endpoint_deployments
+                        set phase = 'draining', deadline_at = null,
+                            failure_reason = 'endpoint deletion requested', updated_at = $2
+                        where id = (
+                          select id from endpoint_deployments
+                          where endpoint_id = $1
+                          order by rollout_generation desc
+                          limit 1
+                        )
+                        """,
+                        endpoint_id,
+                        now,
+                    )
+                    await conn.execute(
+                        """
+                        update endpoint_worker_registrations
+                        set assigned_endpoint_id = null, updated_at = $2
+                        where assigned_endpoint_id = $1
+                        """,
+                        endpoint_id,
+                        now,
+                    )
+        if row is None:
+            return False
         await self.reconcile_endpoint_worker_assignments()
-        return result.endswith("1")
+        return True
 
     async def delete_bundle_endpoint_global(self, endpoint_id: str) -> bool:
         current = await self.get_bundle_endpoint(endpoint_id)
         if current is None:
             return False
-        deleted = await self.delete_bundle_endpoint(str(current["module_import_id"]), endpoint_id)
-        await self.reconcile_endpoint_worker_assignments()
-        return deleted
+        return await self.delete_bundle_endpoint(
+            str(current["module_import_id"]), endpoint_id
+        )
 
     async def regenerate_bundle_endpoint_key(self, module_id: str, endpoint_id: str) -> dict[str, Any] | None:
         if self.postgres_pool is None:
@@ -4248,7 +4292,7 @@ class AppServices:
                 """
                 select id, module_import_id, lm_profile_id, pinned_worker_count, name, key_hash, key_preview, created_at, updated_at
                 from bundle_endpoints
-                where id = $1
+                where id = $1 and delete_requested_at is null
                 """,
                 endpoint_id,
             )
