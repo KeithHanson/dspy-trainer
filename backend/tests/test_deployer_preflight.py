@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import os
 import sys
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import asyncpg
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -257,6 +262,144 @@ async def test_preflight_rejects_tag_drift_and_blocks_acceptance_during_active_b
     assert "no longer resolves" in rejected_check.detail
     assert not blocked_check.ok
     assert "2 build(s)" in blocked_check.detail
+
+
+@pytest.mark.asyncio
+async def test_drift_acceptance_sees_build_committed_while_table_lock_waits():
+    dsn = os.environ.get("DSPY_TRAINER_TEST_POSTGRES_DSN")
+    if not dsn:
+        pytest.skip(
+            "set DSPY_TRAINER_TEST_POSTGRES_DSN to run PostgreSQL locking regression"
+        )
+
+    schema = f"deployer_preflight_{uuid.uuid4().hex}"
+    admin = await asyncpg.connect(dsn)
+    enqueuer = await asyncpg.connect(dsn)
+    enqueue_transaction = None
+    acceptance_task = None
+    connection_ready = asyncio.Event()
+    acceptance_pid: dict[str, int] = {}
+
+    async def connect_acceptance(_dsn: str):
+        connection = await asyncpg.connect(dsn)
+        await connection.execute(f'SET search_path TO "{schema}"')
+        acceptance_pid["value"] = connection.get_server_pid()
+        connection_ready.set()
+        return connection
+
+    try:
+        await admin.execute(f'CREATE SCHEMA "{schema}"')
+        await admin.execute(
+            f"""            CREATE TABLE "{schema}".revision_image_builds (
+              id bigserial PRIMARY KEY,
+              status text NOT NULL
+            );
+            CREATE TABLE "{schema}".endpoint_deployments (id bigint);
+            CREATE TABLE "{schema}".managed_endpoint_containers (id bigint);
+            CREATE TABLE "{schema}".deployer_base_image_state (
+              deployment_id text PRIMARY KEY,
+              base_image_name text NOT NULL,
+              base_image_id text NOT NULL,
+              updated_at timestamptz NOT NULL
+            );
+            CREATE TABLE "{schema}".deployer_coordinator_heartbeats (id bigint);
+            INSERT INTO "{schema}".deployer_base_image_state (
+              deployment_id, base_image_name, base_image_id, updated_at
+            ) VALUES (
+              'deployment-a', 'dspy-trainer-backend:local', '{OTHER_IMAGE_ID}', now()
+            );
+            """
+        )
+        await enqueuer.execute(f'SET search_path TO "{schema}"')
+        table_oid = await admin.fetchval(
+            "select to_regclass($1)::oid",
+            f"{schema}.revision_image_builds",
+        )
+
+        enqueue_transaction = enqueuer.transaction()
+        await enqueue_transaction.start()
+        await enqueuer.execute(
+            "insert into revision_image_builds (status) values ('queued')"
+        )
+
+        acceptance_task = asyncio.create_task(
+            run_deployer_preflight(
+                settings(),
+                docker_client=FakeDocker(),
+                connect=connect_acceptance,
+                register_base_image=True,
+                accept_base_image_change=True,
+            )
+        )
+        await asyncio.wait_for(connection_ready.wait(), timeout=5)
+
+        waiting = False
+        for _ in range(200):
+            waiting = bool(
+                await admin.fetchval(
+                    """                    select exists (
+                      select 1
+                      from pg_locks
+                      where pid = $1
+                        and relation = $2
+                        and mode = 'ShareLock'
+                        and not granted
+                    )
+                    """,
+                    acceptance_pid["value"],
+                    table_oid,
+                )
+            )
+            if waiting:
+                break
+            await asyncio.sleep(0.01)
+        assert waiting, "acceptance did not wait behind the enqueue transaction"
+        assert not acceptance_task.done()
+
+        await enqueue_transaction.commit()
+        enqueue_transaction = None
+        blocked = await asyncio.wait_for(acceptance_task, timeout=5)
+        acceptance_task = None
+
+        blocked_check = next(
+            check for check in blocked.checks if check.name == "base_image_registration"
+        )
+        assert not blocked_check.ok
+        assert "1 build(s)" in blocked_check.detail
+        assert await admin.fetchval(f"""            select base_image_id
+            from "{schema}".deployer_base_image_state
+            where deployment_id = 'deployment-a'
+            """) == OTHER_IMAGE_ID
+
+        await admin.execute(f'DELETE FROM "{schema}".revision_image_builds')
+        accepted = await run_deployer_preflight(
+            settings(),
+            docker_client=FakeDocker(),
+            connect=connect_acceptance,
+            register_base_image=True,
+            accept_base_image_change=True,
+        )
+
+        accepted_check = next(
+            check
+            for check in accepted.checks
+            if check.name == "base_image_registration"
+        )
+        assert accepted_check.ok
+        assert await admin.fetchval(f"""            select base_image_id
+            from "{schema}".deployer_base_image_state
+            where deployment_id = 'deployment-a'
+            """) == IMAGE_ID
+    finally:
+        if acceptance_task is not None and not acceptance_task.done():
+            acceptance_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await acceptance_task
+        if enqueue_transaction is not None:
+            await enqueue_transaction.rollback()
+        await enqueuer.close()
+        await admin.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        await admin.close()
 
 
 @pytest.mark.asyncio

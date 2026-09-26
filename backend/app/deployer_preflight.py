@@ -220,7 +220,7 @@ async def run_deployer_preflight(
     try:
         conn = await connector(settings.postgres_dsn)
         db_transaction = conn.transaction(
-            isolation="repeatable_read",
+            isolation=("read_committed" if register_base_image else "repeatable_read"),
             readonly=not register_base_image,
         )
         await db_transaction.start()
