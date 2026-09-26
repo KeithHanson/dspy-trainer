@@ -299,6 +299,9 @@ def test_managed_routing_queues_pinned_build_and_revision():
         queue_name
         == "dspy-trainer:endpoint-queues:endpoint-1:build:build-1:revision:revision-1"
     )
+    assert queue_name != services._endpoint_queue_name(
+        "endpoint-1", build_id=None, revision_id=None
+    )
     payload = json.loads(raw_payload)
     assert payload["build_id"] == "build-1"
     assert payload["revision_id"] == "revision-1"

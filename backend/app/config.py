@@ -87,7 +87,7 @@ class DeployerSettings(Settings):
     deployer_endpoint_drain_timeout_seconds: float = Field(default=300.0)
     deployer_endpoint_reconcile_interval_seconds: float = Field(default=2.0)
     deployer_build_log_max_bytes: int = Field(default=MAX_BUILD_LOG_BYTES)
-    deployer_backend_base_image_id: str = Field(default="")
+    deployer_backend_base_image: str = Field(default="dspy-trainer-backend:local")
     deployer_image_repository: str = Field(default="dspy-trainer-revision")
     deployer_platform_version: str = Field(default="local")
     deployer_image_retention_count: int = Field(default=2)
@@ -139,13 +139,20 @@ class DeployerSettings(Settings):
             )
         return normalized
 
-    @field_validator("deployer_backend_base_image_id")
+    @field_validator("deployer_backend_base_image")
     @classmethod
-    def validate_base_image_id(cls, value: str) -> str:
-        normalized = value.strip().lower()
-        if not re.fullmatch(r"sha256:[0-9a-f]{64}", normalized):
+    def validate_base_image_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if (
+            normalized.startswith("sha256:")
+            or "@" in normalized
+            or not re.fullmatch(
+                r"[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}",
+                normalized,
+            )
+        ):
             raise ValueError(
-                "DSPY_TRAINER_DEPLOYER_BACKEND_BASE_IMAGE_ID must be an immutable sha256 image ID"
+                "DSPY_TRAINER_DEPLOYER_BACKEND_BASE_IMAGE must be an explicitly tagged local image name"
             )
         return normalized
 

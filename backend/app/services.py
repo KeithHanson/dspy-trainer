@@ -517,18 +517,15 @@ class AppServices:
         )
         self._revision_build_store = revision_build_store
         if self._revision_build_store is None:
-            base_image_id = str(
-                os.getenv("DSPY_TRAINER_DEPLOYER_BACKEND_BASE_IMAGE_ID") or ""
-            ).strip()
             deployment_id = str(
                 os.getenv("DSPY_TRAINER_DEPLOYMENT_ID") or ""
             ).strip()
-            if base_image_id and deployment_id:
+            if deployment_id:
                 self._revision_build_store = PostgresRevisionImageBuildStore(
                     postgres_dsn=settings.postgres_dsn,
                     instance_id=f"backend-{uuid4().hex[:12]}",
                     deployment_id=deployment_id,
-                    base_image_id=base_image_id,
+                    base_image_id=None,
                     image_repository=str(
                         os.getenv("DSPY_TRAINER_DEPLOYER_IMAGE_REPOSITORY")
                         or "dspy-trainer-revision"
@@ -2003,6 +2000,49 @@ class AppServices:
             await conn.execute("create index if not exists idx_bundle_endpoints_module_import_id on bundle_endpoints(module_import_id, created_at desc);")
             await conn.execute("alter table bundle_revisions add column if not exists source_snapshot_path text;")
             await conn.execute("alter table bundle_revisions add column if not exists source_content_digest text;")
+            await conn.execute(
+                """
+                create table if not exists deployer_base_image_state (
+                  deployment_id text primary key,
+                  base_image_name text not null,
+                  base_image_id text not null,
+                  updated_at timestamptz not null
+                );
+                """
+            )
+            await conn.execute(
+                """
+                do $$
+                begin
+                  if to_regclass('deployer_runtime_state') is not null then
+                    insert into deployer_base_image_state (
+                      deployment_id, base_image_name, base_image_id, updated_at
+                    )
+                    select deployment_id, base_image_name, base_image_id, updated_at
+                    from deployer_runtime_state
+                    on conflict (deployment_id) do nothing;
+                  end if;
+                end
+                $$;
+                drop table if exists deployer_runtime_state;
+                """
+            )
+            await conn.execute(
+                """
+                create table if not exists deployer_coordinator_heartbeats (
+                  deployment_id text not null references deployer_base_image_state(deployment_id) on delete cascade,
+                  instance_id text not null,
+                  coordinator text not null check (coordinator in ('build', 'endpoint')),
+                  started_at timestamptz not null,
+                  heartbeat_at timestamptz not null,
+                  is_leader boolean not null,
+                  primary key (deployment_id, instance_id, coordinator)
+                );
+                create index if not exists idx_deployer_coordinator_leaders
+                  on deployer_coordinator_heartbeats (deployment_id, coordinator, heartbeat_at desc)
+                  where is_leader;
+                """
+            )
             await conn.execute(
                 f"""
                 create table if not exists revision_image_builds (

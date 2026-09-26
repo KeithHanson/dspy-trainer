@@ -76,7 +76,7 @@ def test_bundle_install_concurrency_defaults_to_eight_and_must_be_positive():
 def _deployer_settings(**overrides):
     values = {
         "postgres_dsn": "postgresql://postgres:postgres@localhost:5432/dspy_trainer",
-        "deployer_backend_base_image_id": f"sha256:{'a' * 64}",
+        "deployer_backend_base_image": "dspy-trainer-backend:local",
         "deployment_id": "deployment-a",
         "compose_project_name": "dspy-trainer",
         "compose_network_name": "dspy-trainer-network",
@@ -109,8 +109,10 @@ def test_deployer_settings_have_bounded_positive_coordinator_defaults():
         _deployer_settings(deployer_build_log_max_bytes=MAX_BUILD_LOG_BYTES + 1)
 
 
-def test_deployer_settings_require_immutable_base_and_explicit_identity():
-    with pytest.raises(ValueError, match="immutable sha256 image ID"):
-        _deployer_settings(deployer_backend_base_image_id="backend:latest")
+def test_deployer_settings_require_tagged_local_base_and_explicit_identity():
+    with pytest.raises(ValueError, match="explicitly tagged local image name"):
+        _deployer_settings(deployer_backend_base_image="sha256:" + "a" * 64)
+    with pytest.raises(ValueError, match="explicitly tagged local image name"):
+        _deployer_settings(deployer_backend_base_image="backend")
     with pytest.raises(ValueError, match="must not be empty"):
         _deployer_settings(deployment_id=" ")

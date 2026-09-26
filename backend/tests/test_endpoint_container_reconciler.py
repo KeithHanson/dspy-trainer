@@ -12,7 +12,9 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import main as main_mod
+from app import revision_image_builder as image_contract
 from app.endpoint_container_reconciler import (
+    ContainerLaunchSpec,
     ContainerObservation,
     ContainerRecord,
     DeploymentIntent,
@@ -895,11 +897,15 @@ class _EndpointApiConnection:
                     "target_build_id": intent.target_build_id,
                     "target_revision_id": intent.target_revision_id,
                     "target_image_id": intent.target_image_id,
-                    "target_module_import_id": intent.module_id if intent.target_build_id else None,
+                    "target_module_import_id": (
+                        intent.module_id if intent.target_build_id else None
+                    ),
                     "previous_build_id": intent.previous_build_id,
                     "previous_revision_id": intent.previous_revision_id,
                     "previous_image_id": intent.previous_image_id,
-                    "previous_module_import_id": intent.module_id if intent.previous_build_id else None,
+                    "previous_module_import_id": (
+                        intent.module_id if intent.previous_build_id else None
+                    ),
                     "rollout_started_at": intent.rollout_started_at,
                 }
             ]
@@ -1015,7 +1021,12 @@ class _EndpointApiConnection:
         if normalized.startswith("with blocked as"):
             worker_id = params[0]
             for record in self.container_records.values():
-                if record["worker_id"] == worker_id and record["lifecycle"] in {"created", "starting", "ready", "busy"}:
+                if record["worker_id"] == worker_id and record["lifecycle"] in {
+                    "created",
+                    "starting",
+                    "ready",
+                    "busy",
+                }:
                     record["lifecycle"] = "draining"
                     record["drain_started_at"] = record["drain_started_at"] or NOW
             self.worker_claims_blocked = True
@@ -1451,3 +1462,88 @@ def test_atomic_registry_claim_is_visible_before_drain_and_never_requeues():
         assert services.redis.commands == []
 
     asyncio.run(scenario())
+
+
+def test_managed_container_launch_uses_only_immutable_image_and_compose_network():
+    image_id = f"sha256:{'d' * 64}"
+    image_labels = {key: "value" for key in image_contract.REQUIRED_IMAGE_LABELS}
+    image_labels.update(
+        {
+            image_contract.LABEL_PLATFORM_OWNER: image_contract.PLATFORM_OWNER,
+            image_contract.LABEL_OWNER: OWNER,
+            image_contract.LABEL_MANAGED_KIND: image_contract.MANAGED_IMAGE_KIND,
+            image_contract.LABEL_MODULE_ID: "module-1",
+            image_contract.LABEL_BUILD_ID: "build-1",
+            image_contract.LABEL_REVISION_ID: "revision-1",
+        }
+    )
+    launch_labels = _labels(
+        build="build-1",
+        revision="revision-1",
+        image=image_id,
+    )
+
+    class Container:
+        id = "container-1"
+        name = "managed-1"
+        status = "running"
+        attrs = {
+            "Id": id,
+            "Name": f"/{name}",
+            "Image": image_id,
+            "Config": {"Labels": launch_labels},
+            "State": {"Status": "running"},
+            "Created": NOW.isoformat(),
+        }
+
+        def reload(self):
+            return None
+
+    class Containers:
+        def __init__(self):
+            self.kwargs = None
+
+        def run(self, requested_image_id, **kwargs):
+            assert requested_image_id == image_id
+            self.kwargs = kwargs
+            return Container()
+
+    containers = Containers()
+    client = SimpleNamespace(
+        images=SimpleNamespace(
+            get=lambda requested: SimpleNamespace(
+                id=requested,
+                attrs={"Config": {"Labels": image_labels}},
+            )
+        ),
+        containers=containers,
+    )
+    adapter = DockerSdkEndpointAdapter(
+        deployment_id=OWNER,
+        compose_project=PROJECT,
+        label_namespace=NAMESPACE,
+    )
+    adapter._client = client
+    spec = ContainerLaunchSpec(
+        name="managed-1",
+        worker_id="worker-1",
+        image_id=image_id,
+        module_id="module-1",
+        endpoint_id="endpoint-1",
+        deployment_id="deployment-1",
+        build_id="build-1",
+        revision_id="revision-1",
+        slot=0,
+        rollout_generation=2,
+        network_id="network-id",
+        labels=launch_labels,
+        environment={"DSPY_TRAINER_REDIS_URL": "redis://redis:6379/0"},
+    )
+
+    observed = asyncio.run(adapter.start_container(spec))
+
+    assert observed.image_id == image_id
+    assert containers.kwargs["network"] == "network-id"
+    assert "volumes" not in containers.kwargs
+    assert "mounts" not in containers.kwargs
+    assert all("CHECKOUT" not in key for key in containers.kwargs["environment"])
