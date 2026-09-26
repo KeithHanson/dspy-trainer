@@ -446,8 +446,8 @@ function SavedBundlesPanel({ modulesUrl }) {
       if (!response.ok) {
         throw new Error(sanitizeBuildOutput(payload?.error || `Could not queue image build (${response.status})`));
       }
-      if (buildRequestGeneration.current !== requestGeneration) return;
       updateBundleBuild(bundle.id, payload);
+      if (buildRequestGeneration.current !== requestGeneration) return;
       setBuildModal((current) => current?.moduleId === bundle.id ? {
         ...current,
         build: payload,

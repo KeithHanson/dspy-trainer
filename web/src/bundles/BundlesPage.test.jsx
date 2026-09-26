@@ -783,6 +783,68 @@ describe("BundlesPage", () => {
     vi.unstubAllGlobals();
   }, 8_000);
 
+  it("keeps the module row live when the modal closes before enqueue resolves", async () => {
+    const postBuild = deferredResponse();
+    let moduleRequests = 0;
+    const baseModule = {
+      id: "mod-close",
+      bundle_name: "close-agent",
+      current_revision_id: "revision-close",
+      validation_status: "passed",
+      status: "validated",
+      image_build: { eligible: true, current_build: null },
+    };
+    const queuedBuild = {
+      id: "build-close",
+      revision_id: "revision-close",
+      generation: 1,
+      status: "queued",
+      updated_at: "2026-09-26T10:30:00Z",
+    };
+    const readyBuild = {
+      ...queuedBuild,
+      status: "ready",
+      finished_at: "2026-09-26T10:30:03Z",
+      updated_at: "2026-09-26T10:30:03Z",
+    };
+    const fetchMock = vi.fn((url, init) => {
+      const value = String(url);
+      if (value.includes("/agent-run-plans?")) {
+        return Promise.resolve({ ok: true, status: 200, json: vi.fn().mockResolvedValue([]) });
+      }
+      if (value.endsWith("/modules") && (!init || init.method === "GET")) {
+        moduleRequests += 1;
+        const module = moduleRequests === 1
+          ? baseModule
+          : { ...baseModule, image_build: { eligible: true, status: "ready", current_build: readyBuild } };
+        return Promise.resolve({ ok: true, status: 200, json: vi.fn().mockResolvedValue([module]) });
+      }
+      if (value.endsWith("/modules/mod-close/revision-image-builds") && init?.method === "POST") {
+        return postBuild.promise;
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderBundlesApp();
+
+    const row = (await screen.findByText("close-agent")).closest(".bundles-saved-row");
+    await userEvent.click(within(row).getByRole("button", { name: "Build" }));
+    await userEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    await act(async () => {
+      postBuild.resolve({ ok: true, status: 200, json: vi.fn().mockResolvedValue(queuedBuild) });
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(within(row).getByText("queued")).toBeInTheDocument());
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    await waitFor(() => expect(within(row).getByText("ready")).toBeInTheDocument(), { timeout: 3_500 });
+    expect(moduleRequests).toBeGreaterThanOrEqual(2);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    vi.unstubAllGlobals();
+  }, 5_000);
+
   it("renders failed build details and actionable ineligible errors in the immediate modal", async () => {
     const module = {
       id: "mod-failed",
