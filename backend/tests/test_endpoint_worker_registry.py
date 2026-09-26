@@ -40,22 +40,14 @@ class _RegistryConn:
             self.state["workers"][worker_id] = row
             return row
         if normalized.startswith(
-            "update endpoint_worker_registrations set runtime_instance_id = coalesce($2, runtime_instance_id)"
+            "update endpoint_worker_registrations set status = $3"
         ):
             worker_id = str(params[0])
             row = self.state["workers"].get(worker_id)
-            if row is None:
-                return None
-            runtime_instance_id = params[1]
-            if (
-                "where worker_id = $1 and runtime_instance_id = $2" in normalized
-                and row["runtime_instance_id"] != runtime_instance_id
-            ):
+            if row is None or row["runtime_instance_id"] != params[1]:
                 return None
             row.update(
                 {
-                    "runtime_instance_id": runtime_instance_id
-                    or row["runtime_instance_id"],
                     "status": params[2],
                     "task_id": params[3],
                     "last_seen_at": params[4],
@@ -460,6 +452,50 @@ def test_endpoint_worker_registry_register_heartbeat_and_stale_transition():
         assert workers[0]["raw_status"] == "stale"
         assert workers[0]["is_live"] is False
         assert workers[0]["is_stale"] is True
+
+    asyncio.run(scenario())
+
+def test_replaced_runtime_fences_stale_heartbeat_from_same_worker_id():
+    async def scenario() -> None:
+        services = _make_services()
+        now = datetime(2099, 1, 1, tzinfo=timezone.utc)
+        await services.register_endpoint_worker(
+            worker_id="endpoint-worker-1",
+            runtime_instance_id="runtime-a",
+            status="listening",
+            now=now,
+        )
+        await services.register_endpoint_worker(
+            worker_id="endpoint-worker-1",
+            runtime_instance_id="runtime-b",
+            status="preparing",
+            now=now + timedelta(seconds=1),
+        )
+
+        stale = await services.heartbeat_endpoint_worker(
+            "endpoint-worker-1",
+            runtime_instance_id="runtime-a",
+            status="failed",
+            last_error="stale runtime",
+            now=now + timedelta(seconds=2),
+        )
+        assert stale is None
+        current = services.postgres_pool.state["workers"]["endpoint-worker-1"]
+        assert current["runtime_instance_id"] == "runtime-b"
+        assert current["status"] == "preparing"
+        assert current["last_error"] is None
+
+        current_heartbeat = await services.heartbeat_endpoint_worker(
+            "endpoint-worker-1",
+            runtime_instance_id="runtime-b",
+            status="listening",
+            now=now + timedelta(seconds=3),
+        )
+        assert current_heartbeat is not None
+        assert current_heartbeat["runtime_instance_id"] == "runtime-b"
+        assert current_heartbeat["status"] == "listening"
+        update_query = " ".join(services.postgres_pool.conn.queries[-1].split())
+        assert "where worker_id = $1 and runtime_instance_id = $2" in update_query
 
     asyncio.run(scenario())
 

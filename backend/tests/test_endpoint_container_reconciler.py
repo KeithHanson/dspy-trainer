@@ -847,19 +847,22 @@ class _EndpointApiConnection:
                 {
                     "id": intent.deployment_id,
                     "endpoint_id": intent.endpoint_id,
-                    "module_import_id": intent.module_id,
+                    "endpoint_module_import_id": intent.module_id,
                     "phase": intent.phase,
                     "desired_replica_count": intent.desired_replica_count,
                     "rollout_generation": intent.rollout_generation,
                     "active_build_id": intent.active_build_id,
                     "active_revision_id": intent.active_revision_id,
                     "active_image_id": intent.active_image_id,
+                    "active_module_import_id": intent.module_id,
                     "target_build_id": intent.target_build_id,
                     "target_revision_id": intent.target_revision_id,
                     "target_image_id": intent.target_image_id,
+                    "target_module_import_id": intent.module_id if intent.target_build_id else None,
                     "previous_build_id": intent.previous_build_id,
                     "previous_revision_id": intent.previous_revision_id,
                     "previous_image_id": intent.previous_image_id,
+                    "previous_module_import_id": intent.module_id if intent.previous_build_id else None,
                     "rollout_started_at": intent.rollout_started_at,
                 }
             ]
@@ -920,10 +923,9 @@ class _EndpointApiConnection:
                 return None
             self.endpoint.update(
                 name=params[1],
-                module_import_id=params[2],
-                lm_profile_id=params[3],
-                pinned_worker_count=params[4],
-                updated_at=params[5],
+                lm_profile_id=params[2],
+                pinned_worker_count=params[3],
+                updated_at=params[4],
             )
             return dict(self.endpoint)
         if normalized.startswith("select e.id from bundle_endpoints e"):
@@ -972,6 +974,17 @@ class _EndpointApiConnection:
             "update managed_endpoint_containers set lifecycle = 'removed'"
         ):
             self.container_records[params[0]]["lifecycle"] = "removed"
+            return "UPDATE 1"
+        if normalized.startswith("with blocked as"):
+            worker_id = params[0]
+            for record in self.container_records.values():
+                if record["worker_id"] == worker_id and record["lifecycle"] in {"created", "starting", "ready", "busy"}:
+                    record["lifecycle"] = "draining"
+                    record["drain_started_at"] = record["drain_started_at"] or NOW
+            self.worker_claims_blocked = True
+            snapshot = self.registry.get(worker_id)
+            if snapshot is not None:
+                self.registry[worker_id] = replace(snapshot, assigned_endpoint_id=None)
             return "UPDATE 1"
         if normalized.startswith("update endpoint_worker_registrations"):
             self.worker_claims_blocked = True

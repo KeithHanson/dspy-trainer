@@ -112,6 +112,7 @@ class _ImageGateConnection:
                     params[2],
                     params[3],
                     params[4],
+                    params[5],
                 )
             )
             return "INSERT 1"
@@ -220,7 +221,7 @@ def test_endpoint_create_records_only_managed_target_intent(monkeypatch):
     assert response.json()["deployment"]["legacy_fallback"] is False
     assert [write[0] for write in connection.writes] == ["endpoint", "deployment"]
     deployment = connection.writes[1]
-    assert deployment[3:] == ("build-1", "revision-1", 2)
+    assert deployment[3:] == ("build-1", "revision-1", "module-1", 2)
 
 
 class _RolloutConnection:
@@ -245,11 +246,17 @@ def test_module_update_schedules_target_without_replacing_active_revision():
             "endpoint_id": "endpoint-1",
             "active_build_id": "build-old",
             "active_revision_id": "revision-old",
+            "active_module_import_id": "module-old",
             "target_build_id": None,
             "target_revision_id": None,
+            "target_module_import_id": None,
             "previous_build_id": None,
             "previous_revision_id": None,
+            "previous_module_import_id": None,
             "phase": "ready",
+            "failed_build_id": None,
+            "failed_revision_id": None,
+            "failed_module_import_id": None,
             "desired_replica_count": 1,
             "legacy_fallback": False,
             "rollout_generation": 4,
@@ -263,6 +270,7 @@ def test_module_update_schedules_target_without_replacing_active_revision():
             endpoint_id="endpoint-1",
             build_id="build-new",
             revision_id="revision-new",
+            target_module_import_id="module-new",
             desired_replica_count=2,
             now=NOW,
         )
@@ -271,15 +279,18 @@ def test_module_update_schedules_target_without_replacing_active_revision():
     assert changed is True
     query, params = connection.executions[0]
     assert query.startswith("insert into endpoint_deployments")
-    assert params[2:8] == (
+    assert params[2:11] == (
         "build-old",
         "revision-old",
+        "module-old",
         "build-new",
         "revision-new",
+        "module-new",
+        None,
         None,
         None,
     )
-    assert params[8:] == (2, 5, NOW)
+    assert params[11:] == (2, 5, NOW)
 
 
 class _SchedulerConnection:
@@ -328,10 +339,15 @@ def test_scheduler_automatically_starts_initial_legacy_migration(
             "active_build_id": None,
             "active_revision_id": None,
             "target_build_id": None,
+            "active_module_import_id": None,
             "target_revision_id": None,
             "previous_build_id": None,
+            "target_module_import_id": None,
             "previous_revision_id": None,
             "rollout_generation": 0,
+            "previous_module_import_id": None,
+            "failed_build_id": None,
+            "ready_module_import_id": "module-new",
             "ready_build_id": "build-new",
             "ready_revision_id": "revision-new",
         }
@@ -340,7 +356,7 @@ def test_scheduler_automatically_starts_initial_legacy_migration(
     assert asyncio.run(_postgres_store(connection).reconcile_deployment_targets()) == 1
     query, params = connection.executions[0]
     assert query.startswith("update endpoint_deployments")
-    assert params[1:] == ("build-new", "revision-new", 2)
+    assert params[1:] == ("build-new", "revision-new", "module-new", 2)
 
 
 def test_scheduler_automatically_starts_future_ready_revision_rollout():
@@ -353,28 +369,141 @@ def test_scheduler_automatically_starts_future_ready_revision_rollout():
             "legacy_fallback": False,
             "active_build_id": "build-old",
             "active_revision_id": "revision-old",
+            "active_module_import_id": "module-old",
             "target_build_id": None,
             "target_revision_id": None,
+            "target_module_import_id": None,
             "previous_build_id": "build-older",
             "previous_revision_id": "revision-older",
+            "previous_module_import_id": "module-older",
+            "failed_build_id": None,
             "rollout_generation": 7,
             "ready_build_id": "build-new",
             "ready_revision_id": "revision-new",
+            "ready_module_import_id": "module-new",
         }
     )
 
     assert asyncio.run(_postgres_store(connection).reconcile_deployment_targets()) == 1
     query, params = connection.executions[0]
     assert query.startswith("insert into endpoint_deployments")
-    assert params[2:8] == (
+    assert params[2:11] == (
         "build-old",
         "revision-old",
+        "module-old",
         "build-new",
         "revision-new",
+        "module-new",
         "build-older",
         "revision-older",
+        "module-older",
     )
-    assert params[8:] == (1, 8)
+    assert params[11:] == (1, 8)
+class _FailedRolloutStateConnection:
+    def __init__(self):
+        self.deployment = {
+            "id": "deployment-1",
+            "endpoint_id": "endpoint-1",
+            "replica_count": 1,
+            "phase": "rolling",
+            "legacy_fallback": False,
+            "active_build_id": "build-old",
+            "active_revision_id": "revision-old",
+            "active_module_import_id": "module-old",
+            "target_build_id": "build-failed",
+            "target_revision_id": "revision-failed",
+            "target_module_import_id": "module-new",
+            "previous_build_id": None,
+            "previous_revision_id": None,
+            "previous_module_import_id": None,
+            "failed_build_id": None,
+            "failed_revision_id": None,
+            "failed_module_import_id": None,
+            "rollout_generation": 1,
+        }
+        self.ready_builds = [
+            ("build-failed", "revision-failed", "module-new"),
+        ]
+        self.executions = []
+
+    def is_closed(self):
+        return False
+
+    def transaction(self):
+        return _Transaction()
+
+    async def fetchrow(self, query, *params):
+        del params
+        normalized = " ".join(query.strip().lower().split())
+        assert "ready.id is distinct from d.failed_build_id" in normalized
+        assert "coalesce(d.failed_module_import_id, e.module_import_id)" in normalized
+        assert "d.phase in ('legacy_static', 'ready', 'failed')" in normalized
+        if self.deployment["phase"] not in {"legacy_static", "ready", "failed"}:
+            return None
+        build_id, revision_id, module_id = self.ready_builds[-1]
+        if build_id in {
+            self.deployment["active_build_id"],
+            self.deployment["target_build_id"],
+            self.deployment["failed_build_id"],
+        }:
+            return None
+        return {
+            **self.deployment,
+            "ready_build_id": build_id,
+            "ready_revision_id": revision_id,
+            "ready_module_import_id": module_id,
+        }
+
+    async def execute(self, query, *params):
+        normalized = " ".join(query.strip().lower().split())
+        self.executions.append((normalized, params))
+        if normalized.startswith("update endpoint_deployments set failed_build_id"):
+            deployment = self.deployment
+            deployment["failed_build_id"] = deployment["target_build_id"]
+            deployment["failed_revision_id"] = deployment["target_revision_id"]
+            deployment["failed_module_import_id"] = deployment["target_module_import_id"]
+            deployment["phase"] = "rollback"
+            deployment["target_build_id"] = deployment["active_build_id"]
+            deployment["target_revision_id"] = deployment["active_revision_id"]
+            deployment["target_module_import_id"] = deployment["active_module_import_id"]
+            return "UPDATE 1"
+        if normalized.startswith("update endpoint_deployments set target_build_id = null"):
+            self.deployment.update(
+                phase="ready",
+                target_build_id=None,
+                target_revision_id=None,
+                target_module_import_id=None,
+            )
+            return "UPDATE 1"
+        if normalized.startswith("insert into endpoint_deployments"):
+            return "INSERT 1"
+        raise AssertionError(f"unexpected execute SQL: {normalized}")
+
+
+def test_failed_build_is_suppressed_across_cycles_and_store_restart_until_newer_build():
+    async def scenario():
+        connection = _FailedRolloutStateConnection()
+        store = _postgres_store(connection)
+        await store.fail_or_rollback_deployment("deployment-1", "readiness failed")
+        assert connection.deployment["failed_build_id"] == "build-failed"
+        assert connection.deployment["failed_revision_id"] == "revision-failed"
+        assert connection.deployment["failed_module_import_id"] == "module-new"
+        await store.complete_deployment("deployment-1", rolled_back=True)
+
+        assert await store.reconcile_deployment_targets() == 0
+        restarted_store = _postgres_store(connection)
+        assert await restarted_store.reconcile_deployment_targets() == 0
+        assert connection.deployment["failed_build_id"] == "build-failed"
+
+        connection.ready_builds.append(
+            ("build-newer", "revision-newer", "module-new")
+        )
+        assert await restarted_store.reconcile_deployment_targets() == 1
+        query, params = connection.executions[-1]
+        assert query.startswith("insert into endpoint_deployments")
+        assert params[5:8] == ("build-newer", "revision-newer", "module-new")
+
+    asyncio.run(scenario())
 
 
 def test_deployment_status_exposes_builds_slots_migration_and_rollback_reason():
@@ -390,10 +519,16 @@ def test_deployment_status_exposes_builds_slots_migration_and_rollback_reason():
             "rollout_generation": 3,
             "active_build_id": "build-old",
             "active_revision_id": "revision-old",
+            "active_module_import_id": "module-old",
             "target_build_id": "build-old",
             "target_revision_id": "revision-old",
+            "target_module_import_id": "module-old",
             "previous_build_id": "build-older",
             "previous_revision_id": "revision-older",
+            "previous_module_import_id": "module-older",
+            "failed_build_id": "build-new",
+            "failed_revision_id": "revision-new",
+            "failed_module_import_id": "module-new",
             "failure_reason": "replacement failed readiness",
             "rollout_started_at": NOW,
             "ready_at": None,
@@ -452,14 +587,286 @@ def test_deployment_status_exposes_builds_slots_migration_and_rollback_reason():
     assert result["active"] == {
         "build_id": "build-old",
         "revision_id": "revision-old",
+        "module_import_id": "module-old",
         "build_status": "ready",
         "failure_reason": None,
         "logs_url": "/revision-image-builds/build-old/logs",
     }
     assert result["previous"]["revision_id"] == "revision-older"
+    assert result["failed_target"]["build_id"] == "build-new"
+    assert result["failed_target"]["module_import_id"] == "module-new"
     assert result["rollback_reason"] == "replacement failed readiness"
     assert result["slots"][0]["draining"] is True
     assert result["slots"][0]["ready"] is False
+class _PatchCutoverConnection:
+    def __init__(self, *, legacy):
+        self.endpoint = {
+            "id": "endpoint-1",
+            "module_import_id": "module-old",
+            "lm_profile_id": None,
+            "pinned_worker_count": 1,
+            "name": "Endpoint",
+            "key_preview": "abc123",
+            "created_at": NOW,
+            "updated_at": NOW,
+            "module_bundle_name": "old-bundle",
+            "lm_profile_name": None,
+        }
+        self.deployment = {
+            "id": "deployment-old",
+            "endpoint_id": "endpoint-1",
+            "active_build_id": None if legacy else "build-old",
+            "active_revision_id": None if legacy else "revision-old",
+            "active_module_import_id": "module-old",
+            "target_build_id": None,
+            "target_revision_id": None,
+            "target_module_import_id": None,
+            "previous_build_id": None,
+            "previous_revision_id": None,
+            "previous_module_import_id": None,
+            "failed_build_id": None,
+            "failed_revision_id": None,
+            "failed_module_import_id": None,
+            "phase": "legacy_static" if legacy else "ready",
+            "desired_replica_count": 1,
+            "legacy_fallback": legacy,
+            "rollout_generation": 0,
+            "created_at": NOW,
+        }
+
+    def transaction(self):
+        return _Transaction()
+
+    async def fetchrow(self, query, *params):
+        normalized = " ".join(query.strip().lower().split())
+        if normalized.startswith("select m.id as module_id"):
+            assert params == ("module-new",)
+            return {
+                "module_id": "module-new",
+                "current_revision_id": "revision-new",
+                "validation_status": "passed",
+                "validation_revision_id": "revision-new",
+                "ready_build_id": "build-new",
+                "ready_generation": 2,
+                "ready_image_id": "sha256:new",
+                "latest_build_id": "build-new",
+                "latest_generation": 2,
+                "latest_build_status": "ready",
+                "latest_image_id": "sha256:new",
+                "latest_failure_reason": None,
+            }
+        if normalized.startswith("select id, generation, image_id"):
+            return {"id": "build-new", "generation": 2, "image_id": "sha256:new"}
+        if normalized.startswith("update bundle_endpoints"):
+            assert "module_import_id =" not in normalized
+            self.endpoint.update(
+                name=params[1],
+                lm_profile_id=params[2],
+                pinned_worker_count=params[3],
+                updated_at=params[4],
+            )
+            return dict(self.endpoint)
+        if "from endpoint_deployments" in normalized:
+            return dict(self.deployment)
+        if "from bundle_endpoints e" in normalized:
+            return dict(self.endpoint)
+        raise AssertionError(f"unexpected fetchrow SQL: {normalized}")
+
+    async def execute(self, query, *params):
+        normalized = " ".join(query.strip().lower().split())
+        if normalized.startswith("insert into endpoint_deployments"):
+            self.deployment.update(
+                id=params[0],
+                active_build_id=params[2],
+                active_revision_id=params[3],
+                active_module_import_id=params[4],
+                target_build_id=params[5],
+                target_revision_id=params[6],
+                target_module_import_id=params[7],
+                phase="pending",
+                legacy_fallback=False,
+                rollout_generation=params[12],
+            )
+            return "INSERT 1"
+        if normalized.startswith("update endpoint_deployments"):
+            self.deployment.update(
+                target_build_id=params[1],
+                target_revision_id=params[2],
+                target_module_import_id=params[3],
+                desired_replica_count=params[4],
+                phase="pending",
+            )
+            return "UPDATE 1"
+        raise AssertionError(f"unexpected execute SQL: {normalized}")
+
+
+@pytest.mark.parametrize("execution_mode", ["legacy_static", "managed_image"])
+def test_patch_keeps_old_module_routing_secrets_and_trace_until_cutover(
+    monkeypatch, execution_mode
+):
+    legacy = execution_mode == "legacy_static"
+    connection = _PatchCutoverConnection(legacy=legacy)
+    services = AppServices(
+        SimpleNamespace(endpoint_queue_prefix="endpoint", mlflow_tracking_uri="")
+    )
+    services.postgres_pool = _Pool(connection)
+    services.connect_backend = _no_op
+    services.disconnect = _no_op
+    services.reconcile_endpoint_worker_assignments = _no_op
+
+    async def deployment(endpoint_id):
+        assert endpoint_id == "endpoint-1"
+        return dict(connection.deployment)
+
+    async def deployment_status(endpoint_id):
+        return {
+            "endpoint_id": endpoint_id,
+            "phase": connection.deployment["phase"],
+            "active": {
+                "build_id": connection.deployment["active_build_id"],
+                "module_import_id": connection.deployment["active_module_import_id"],
+            },
+            "target": {
+                "build_id": connection.deployment["target_build_id"],
+                "module_import_id": connection.deployment["target_module_import_id"],
+            },
+        }
+
+    def worker(mode, build_id, revision_id):
+        return {
+            "worker_id": f"worker-{mode}-{build_id or revision_id}",
+            "assigned_endpoint_id": "endpoint-1",
+            "endpoint_id": "endpoint-1",
+            "is_live": True,
+            "status": "listening",
+            "execution_mode": mode,
+            "desired_build_id": build_id,
+            "warmed_build_id": build_id,
+            "desired_revision_id": revision_id,
+            "warmed_revision_id": revision_id,
+            "bundle_path": "/opt/dspy-bundle" if mode == "managed_image" else None,
+        }
+
+    async def workers():
+        old = (
+            worker("legacy_static", None, "revision-old")
+            if legacy
+            else worker("managed_image", "build-old", "revision-old")
+        )
+        return {"items": [old, worker("managed_image", "build-new", "revision-new")]}
+
+    async def execution_state(module_id, fallback_bundle_path=None):
+        del fallback_bundle_path
+        assert module_id == "module-old"
+        return {
+            "bundle_path": "/tmp/old-bundle",
+            "bundle_revision_id": "revision-old",
+            "commit_sha": "old-commit",
+        }
+
+    runtime_modules = []
+
+    async def runtime_environment(module_id):
+        runtime_modules.append(module_id)
+        return {"MODULE_SECRET": f"secret-for-{module_id}"}
+
+    async def registration(worker_id):
+        return {
+            "is_live": True,
+            "runtime_metadata": {
+                "worker_id": worker_id,
+                "endpoint_deployment_id": connection.deployment["id"],
+                "endpoint_slot": 0,
+                "endpoint_rollout_generation": connection.deployment["rollout_generation"],
+                "baked_build_id": "build-old",
+                "baked_revision_id": "revision-old",
+            },
+        }
+
+    async def validate(metadata, *, worker_id=None):
+        del metadata, worker_id
+        return {
+            "bundle_path": "/opt/dspy-bundle",
+            "build_id": "build-old",
+            "revision_id": "revision-old",
+        }
+
+    events = []
+
+    async def publish(invocation_id, event, payload):
+        events.append((invocation_id, event, payload))
+
+    services.get_endpoint_deployment = deployment
+    services.get_endpoint_deployment_status = deployment_status
+    services.list_endpoint_workers = workers
+    services.resolve_module_execution_state = execution_state
+    services.get_module_runtime_environment = runtime_environment
+    services.ensure_bundle_requirements_installed = _no_op
+    services._get_endpoint_worker_registration = registration
+    services.validate_managed_endpoint_worker_identity = validate
+    services.publish_endpoint_invocation_event = publish
+    monkeypatch.setattr(main_mod, "AppServices", lambda settings: services)
+    monkeypatch.setattr(main_mod, "get_settings", lambda: SimpleNamespace())
+
+    captured = {}
+
+    def invoke_bundle(bundle_path, input_payload, lm_profile, runtime_env):
+        del lm_profile
+        captured["bundle_path"] = bundle_path
+        captured["runtime_env"] = runtime_env
+        return {"answer": input_payload["question"]}
+
+    def traced(operation, *, tracking_uri, input_payload, attributes):
+        del tracking_uri, input_payload
+        captured["attributes"] = attributes
+        return operation(), "trace-old"
+
+    monkeypatch.setattr("app.executor.module_runner.invoke_bundle", invoke_bundle)
+    monkeypatch.setattr("app.services._run_endpoint_invocation_with_mlflow", traced)
+
+    with TestClient(main_mod.app) as client:
+        response = client.patch(
+            "/bundle-endpoints/endpoint-1",
+            json={"module_import_id": "module-new"},
+        )
+    assert response.status_code == 200
+    assert response.json()["module_import_id"] == "module-old"
+    assert connection.endpoint["module_import_id"] == "module-old"
+    assert connection.deployment["target_module_import_id"] == "module-new"
+
+    routing = asyncio.run(services.get_endpoint_routing_state("endpoint-1"))
+    assert routing["ready_targets"] == [
+        {
+            "execution_mode": execution_mode,
+            "build_id": None if legacy else "build-old",
+            "revision_id": "revision-old",
+            "bundle_path": None if legacy else "/opt/dspy-bundle",
+            "queue_name": services._endpoint_queue_name(
+                "endpoint-1",
+                build_id=None if legacy else "build-old",
+                revision_id=None if legacy else "revision-old",
+            ),
+        }
+    ]
+
+    asyncio.run(
+        services.run_endpoint_invocation_job(
+            "invocation-old",
+            "endpoint-1",
+            {"question": "still old"},
+            "worker-old",
+            stream=False,
+            execution_mode=execution_mode,
+            build_id=None if legacy else "build-old",
+            revision_id="revision-old",
+            bundle_path=None if legacy else "/opt/dspy-bundle",
+        )
+    )
+    assert runtime_modules == ["module-old"]
+    assert captured["runtime_env"] == {"MODULE_SECRET": "secret-for-module-old"}
+    assert captured["attributes"]["module_import_id"] == "module-old"
+    assert captured["attributes"]["bundle_revision_id"] == "revision-old"
+    assert events == [("invocation-old", "final", {"answer": "still old"})]
 
 
 def test_rollout_routes_invocations_only_to_active_revision_until_atomic_cutover():
@@ -594,3 +1001,122 @@ def test_managed_registration_requires_exact_observed_deployment_slot_identity()
                 stale, worker_id="worker-1"
             )
         )
+def test_blocked_container_cannot_reregister_or_regain_claim_eligibility():
+    class ClaimEligibilityConnection:
+        def __init__(self):
+            self.lifecycle = "ready"
+            self.assigned_endpoint_id = "endpoint-1"
+
+        def is_closed(self):
+            return False
+
+        async def fetchrow(self, query, *params):
+            normalized = " ".join(query.strip().lower().split())
+            if normalized.startswith("select c.container_id"):
+                assert "c.lifecycle = 'ready'" in normalized
+                return (
+                    {"container_id": "container-1"}
+                    if self.lifecycle == "ready"
+                    else None
+                )
+            raise AssertionError(f"unexpected fetchrow SQL: {normalized}")
+
+        async def execute(self, query, *params):
+            normalized = " ".join(query.strip().lower().split())
+            assert normalized.startswith("with blocked as")
+            assert params == ("worker-1",)
+            self.lifecycle = "draining"
+            self.assigned_endpoint_id = None
+            return "UPDATE 1"
+
+    connection = ClaimEligibilityConnection()
+    services = AppServices(SimpleNamespace(endpoint_worker_heartbeat_ttl_seconds=30))
+    services.postgres_pool = _Pool(connection)
+
+    async def deployment(self, endpoint_id):
+        return {
+            "id": "deployment-current",
+            "endpoint_id": endpoint_id,
+            "phase": "rolling",
+            "desired_replica_count": 1,
+            "rollout_generation": 4,
+            "active_build_id": "build-old",
+            "active_revision_id": "revision-old",
+            "target_build_id": "build-new",
+            "target_revision_id": "revision-new",
+            "previous_build_id": None,
+            "previous_revision_id": None,
+        }
+
+    async def build(self, build_id):
+        assert build_id == "build-old"
+        return {
+            "id": "build-old",
+            "revision_id": "revision-old",
+            "status": "ready",
+            "image_id": "sha256:old",
+        }
+
+    services.get_endpoint_deployment = MethodType(deployment, services)
+    services.get_revision_image_build = MethodType(build, services)
+    metadata = {
+        "execution_mode": "managed_image",
+        "endpoint_id": "endpoint-1",
+        "worker_id": "worker-1",
+        "endpoint_deployment_id": "deployment-old",
+        "endpoint_slot": 0,
+        "endpoint_rollout_generation": 3,
+        "desired_build_id": "build-old",
+        "desired_revision_id": "revision-old",
+        "baked_build_id": "build-old",
+        "baked_revision_id": "revision-old",
+        "bundle_path": "/opt/dspy-bundle",
+    }
+
+    accepted = asyncio.run(
+        services.validate_managed_endpoint_worker_identity(
+            metadata, worker_id="worker-1"
+        )
+    )
+    assert accepted["build_id"] == "build-old"
+
+    store = _postgres_store(connection)
+    asyncio.run(store.block_worker_claims("worker-1"))
+    assert connection.lifecycle == "draining"
+    assert connection.assigned_endpoint_id is None
+
+    with pytest.raises(ValueError, match="not an observed deployment slot"):
+        asyncio.run(
+            services.register_endpoint_worker(
+                worker_id="worker-1",
+                runtime_instance_id="runtime-restarted",
+                status="listening",
+                runtime_metadata=metadata,
+                now=NOW,
+            )
+        )
+    assert connection.assigned_endpoint_id is None
+def test_successful_cutover_promotes_build_and_module_in_one_statement():
+    class CutoverConnection:
+        def __init__(self):
+            self.query = None
+            self.params = None
+
+        def is_closed(self):
+            return False
+
+        async def execute(self, query, *params):
+            self.query = " ".join(query.strip().lower().split())
+            self.params = params
+            return "UPDATE 1"
+
+    connection = CutoverConnection()
+    asyncio.run(
+        _postgres_store(connection).complete_deployment(
+            "deployment-1", rolled_back=False
+        )
+    )
+    assert connection.params == ("deployment-1",)
+    assert connection.query.startswith("with promoted as")
+    assert "active_module_import_id = target_module_import_id" in connection.query
+    assert "update bundle_endpoints e set module_import_id = promoted.active_module_import_id" in connection.query

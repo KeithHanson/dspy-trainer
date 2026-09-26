@@ -1581,7 +1581,7 @@ class AppServices:
                     join endpoint_deployments d on d.id = c.deployment_id
                     where c.deployment_id = $1 and c.endpoint_id = $2 and c.slot = $3
                       and c.worker_id = $4 and c.build_id = $5 and c.revision_id = $6
-                      and d.rollout_generation = $7 and c.lifecycle <> 'removed'
+                      and d.rollout_generation = $7 and c.lifecycle = 'ready'
                     """,
                     exact_required["deployment_id"],
                     identity["endpoint_id"],
@@ -1633,12 +1633,13 @@ class AppServices:
             _clean_optional_text(normalized_runtime_metadata.get("execution_mode"))
             or "legacy_static"
         )
+        managed_identity: dict[str, Any] | None = None
         if execution_mode == "managed_image":
-            identity = await self.validate_managed_endpoint_worker_identity(
+            managed_identity = await self.validate_managed_endpoint_worker_identity(
                 normalized_runtime_metadata,
                 worker_id=effective_worker_id,
             )
-            assigned_endpoint_id = identity["endpoint_id"]
+            assigned_endpoint_id = managed_identity["endpoint_id"]
         elif execution_mode != "legacy_static":
             raise ValueError(
                 f"unsupported endpoint worker execution mode: {execution_mode}"
@@ -1661,7 +1662,16 @@ class AppServices:
                   created_at,
                   updated_at
                 )
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $12)
+                select $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $12
+                where $13::boolean or exists (
+                  select 1
+                  from managed_endpoint_containers c
+                  join endpoint_deployments d on d.id = c.deployment_id
+                  where c.deployment_id = $14 and c.endpoint_id = $15 and c.slot = $16
+                    and c.worker_id = $1 and c.build_id = $17 and c.revision_id = $18
+                    and d.rollout_generation = $19 and c.lifecycle = 'ready'
+                  for update of c
+                )
                 on conflict (worker_id) do update set
                   runtime_instance_id = excluded.runtime_instance_id,
                   assigned_endpoint_id = excluded.assigned_endpoint_id,
@@ -1689,7 +1699,16 @@ class AppServices:
                 json.dumps(normalized_runtime_metadata),
                 _clean_optional_text(last_error),
                 registration_time,
+                execution_mode != "managed_image",
+                managed_identity.get("deployment_id") if managed_identity else None,
+                managed_identity.get("endpoint_id") if managed_identity else None,
+                managed_identity.get("slot") if managed_identity else None,
+                managed_identity.get("build_id") if managed_identity else None,
+                managed_identity.get("revision_id") if managed_identity else None,
+                managed_identity.get("rollout_generation") if managed_identity else None,
             )
+        if row is None:
+            raise ValueError("managed endpoint worker is not claim-eligible")
         if execution_mode == "legacy_static":
             await self.reconcile_endpoint_worker_assignments()
         updated = await self._get_endpoint_worker_registration(
@@ -1730,7 +1749,7 @@ class AppServices:
                 return None
             existing_runtime_instance_id = _clean_optional_text(existing_row["runtime_instance_id"])
             requested_runtime_instance_id = _clean_optional_text(runtime_instance_id)
-            if requested_runtime_instance_id and requested_runtime_instance_id != existing_runtime_instance_id:
+            if not requested_runtime_instance_id or requested_runtime_instance_id != existing_runtime_instance_id:
                 return None
             merged_runtime_metadata = _merge_runtime_metadata(existing_row["runtime_metadata"], runtime_metadata or {})
             if str(merged_runtime_metadata.get("execution_mode") or "") == "managed_image":
@@ -1741,8 +1760,7 @@ class AppServices:
             row = await conn.fetchrow(
                 """
                 update endpoint_worker_registrations
-                set runtime_instance_id = coalesce($2, runtime_instance_id),
-                    status = $3,
+                set status = $3,
                     task_id = $4,
                     last_seen_at = $5,
                     heartbeat_expires_at = $6,
@@ -1751,7 +1769,7 @@ class AppServices:
                     runtime_metadata = $9::jsonb,
                     last_error = $10,
                     updated_at = $5
-                where worker_id = $1
+                where worker_id = $1 and runtime_instance_id = $2
                 returning worker_id, runtime_instance_id, status, assigned_endpoint_id, task_id, last_seen_at,
                           heartbeat_expires_at, hostname, pid, runtime_metadata, last_error, created_at, updated_at
                 """,
@@ -2083,10 +2101,16 @@ class AppServices:
                   endpoint_id text not null references bundle_endpoints(id) on delete cascade,
                   active_build_id text,
                   active_revision_id text,
+                  active_module_import_id text references module_imports(id) on delete restrict,
                   target_build_id text,
                   target_revision_id text,
+                  target_module_import_id text references module_imports(id) on delete restrict,
                   previous_build_id text,
                   previous_revision_id text,
+                  previous_module_import_id text references module_imports(id) on delete restrict,
+                  failed_build_id text,
+                  failed_revision_id text,
+                  failed_module_import_id text references module_imports(id) on delete restrict,
                   phase text not null check (phase in ('legacy_static', 'pending', 'rolling', 'ready', 'draining', 'rollback', 'failed')),
                   desired_replica_count int not null check (desired_replica_count >= 1),
                   legacy_fallback boolean not null default true,
@@ -2104,19 +2128,58 @@ class AppServices:
                   foreign key (target_build_id, target_revision_id)
                     references revision_image_builds(id, revision_id) match full on delete restrict,
                   foreign key (previous_build_id, previous_revision_id)
+                    references revision_image_builds(id, revision_id) match full on delete restrict,
+                  constraint endpoint_deployments_failed_build_revision_fk
+                    foreign key (failed_build_id, failed_revision_id)
                     references revision_image_builds(id, revision_id) match full on delete restrict
                 );
                 """)
             await conn.execute("""
                 alter table endpoint_deployments
                   add column if not exists legacy_fallback boolean;
+                alter table endpoint_deployments add column if not exists active_module_import_id text references module_imports(id) on delete restrict;
+                alter table endpoint_deployments add column if not exists target_module_import_id text references module_imports(id) on delete restrict;
+                alter table endpoint_deployments add column if not exists previous_module_import_id text references module_imports(id) on delete restrict;
+                alter table endpoint_deployments add column if not exists failed_build_id text;
+                alter table endpoint_deployments add column if not exists failed_revision_id text;
+                alter table endpoint_deployments add column if not exists failed_module_import_id text references module_imports(id) on delete restrict;
                 update endpoint_deployments
                 set legacy_fallback = (phase = 'legacy_static')
                 where legacy_fallback is null;
+                update endpoint_deployments d
+                set active_module_import_id = coalesce(
+                      d.active_module_import_id,
+                      (select r.module_import_id from bundle_revisions r where r.id = d.active_revision_id),
+                      (select e.module_import_id from bundle_endpoints e where e.id = d.endpoint_id)
+                    ),
+                    target_module_import_id = coalesce(
+                      d.target_module_import_id,
+                      (select r.module_import_id from bundle_revisions r where r.id = d.target_revision_id)
+                    ),
+                    previous_module_import_id = coalesce(
+                      d.previous_module_import_id,
+                      (select r.module_import_id from bundle_revisions r where r.id = d.previous_revision_id)
+                    );
                 alter table endpoint_deployments
                   alter column legacy_fallback set default true;
                 alter table endpoint_deployments
                   alter column legacy_fallback set not null;
+                """)
+            await conn.execute("""
+                do $$
+                begin
+                  if not exists (
+                    select 1 from pg_constraint
+                    where conrelid = 'endpoint_deployments'::regclass
+                      and conname = 'endpoint_deployments_failed_build_revision_fk'
+                  ) then
+                    alter table endpoint_deployments
+                      add constraint endpoint_deployments_failed_build_revision_fk
+                      foreign key (failed_build_id, failed_revision_id)
+                      references revision_image_builds(id, revision_id) match full on delete restrict;
+                  end if;
+                end
+                $$;
                 """)
             await conn.execute(
                 """
@@ -2139,6 +2202,9 @@ class AppServices:
             )
             await conn.execute(
                 "create index if not exists idx_endpoint_deployments_previous_build on endpoint_deployments(previous_build_id);"
+            )
+            await conn.execute(
+                "create index if not exists idx_endpoint_deployments_failed_build on endpoint_deployments(failed_build_id);"
             )
             await conn.execute(f"""
                 create table if not exists managed_endpoint_containers (
@@ -2204,9 +2270,9 @@ class AppServices:
             await conn.execute(
                 """
                 insert into endpoint_deployments (
-                  id, endpoint_id, phase, desired_replica_count, rollout_generation, created_at, updated_at
+                  id, endpoint_id, active_module_import_id, phase, desired_replica_count, rollout_generation, created_at, updated_at
                 )
-                select 'legacy-' || e.id, e.id, 'legacy_static', greatest(1, e.pinned_worker_count), 0,
+                select 'legacy-' || e.id, e.id, e.module_import_id, 'legacy_static', greatest(1, e.pinned_worker_count), 0,
                        e.created_at, e.updated_at
                 from bundle_endpoints e
                 where e.delete_requested_at is null
@@ -3917,15 +3983,17 @@ class AppServices:
         endpoint_id: str,
         build_id: str,
         revision_id: str,
+        target_module_import_id: str,
         desired_replica_count: int,
         now: datetime,
     ) -> bool:
         deployment = await conn.fetchrow(
             """
-            select id, endpoint_id, active_build_id, active_revision_id,
-                   target_build_id, target_revision_id, previous_build_id,
-                   previous_revision_id, phase, desired_replica_count,
-                   legacy_fallback, rollout_generation, created_at
+            select id, endpoint_id, active_build_id, active_revision_id, active_module_import_id,
+                   target_build_id, target_revision_id, target_module_import_id,
+                   previous_build_id, previous_revision_id, previous_module_import_id,
+                   failed_build_id, failed_revision_id, failed_module_import_id,
+                   phase, desired_replica_count, legacy_fallback, rollout_generation, created_at
             from endpoint_deployments
             where endpoint_id = $1
             order by rollout_generation desc
@@ -3955,21 +4023,25 @@ class AppServices:
             return False
         legacy_fallback = bool(deployment["legacy_fallback"])
         phase = str(deployment["phase"] or "")
-        if legacy_fallback or phase in {"pending", "rolling", "draining", "rollback"}:
+        if legacy_fallback or phase in {"pending", "rolling", "draining", "rollback", "failed"}:
             await conn.execute(
                 """
                 update endpoint_deployments
                 set target_build_id = $2, target_revision_id = $3,
-                    phase = 'pending', desired_replica_count = $4,
+                    target_module_import_id = $4,
+                    phase = 'pending', desired_replica_count = $5,
                     rollout_generation = rollout_generation + case
                       when target_build_id is null and phase = 'legacy_static' then 0 else 1 end,
-                    rollout_started_at = $5, ready_at = null, deadline_at = null,
-                    failure_reason = null, updated_at = $5
+                    failed_build_id = null, failed_revision_id = null,
+                    failed_module_import_id = null,
+                    rollout_started_at = $6, ready_at = null, deadline_at = null,
+                    failure_reason = null, updated_at = $6
                 where id = $1
                 """,
                 str(deployment["id"]),
                 build_id,
                 revision_id,
+                target_module_import_id,
                 desired_replica_count,
                 now,
             )
@@ -3978,22 +4050,25 @@ class AppServices:
         await conn.execute(
             """
             insert into endpoint_deployments (
-              id, endpoint_id, active_build_id, active_revision_id,
-              target_build_id, target_revision_id, previous_build_id,
-              previous_revision_id, phase, desired_replica_count,
-              legacy_fallback, rollout_generation, rollout_started_at,
-              created_at, updated_at
-            ) values ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9,
-                      false, $10, $11, $11, $11)
+              id, endpoint_id, active_build_id, active_revision_id, active_module_import_id,
+              target_build_id, target_revision_id, target_module_import_id,
+              previous_build_id, previous_revision_id, previous_module_import_id,
+              phase, desired_replica_count, legacy_fallback, rollout_generation,
+              rollout_started_at, created_at, updated_at
+            ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                      'pending', $12, false, $13, $14, $14, $14)
             """,
             f"rollout-{endpoint_id}-{next_generation}-{uuid4().hex[:12]}",
             endpoint_id,
             active_pair[0],
             active_pair[1],
+            _clean_optional_text(deployment["active_module_import_id"]),
             build_id,
             revision_id,
+            target_module_import_id,
             _clean_optional_text(deployment["previous_build_id"]),
             _clean_optional_text(deployment["previous_revision_id"]),
+            _clean_optional_text(deployment["previous_module_import_id"]),
             desired_replica_count,
             next_generation,
             now,
@@ -4012,9 +4087,9 @@ class AppServices:
         await conn.execute(
             """
             insert into endpoint_deployments (
-              id, endpoint_id, phase, desired_replica_count, rollout_generation, created_at, updated_at
+              id, endpoint_id, active_module_import_id, phase, desired_replica_count, rollout_generation, created_at, updated_at
             )
-            values ($1, $2, 'legacy_static', $3, 0, $4, $5)
+            values ($1, $2, (select module_import_id from bundle_endpoints where id = $2), 'legacy_static', $3, 0, $4, $5)
             on conflict (endpoint_id, rollout_generation) do nothing
             """,
             f"legacy-{endpoint_id}",
@@ -4205,8 +4280,10 @@ class AppServices:
         async with self.postgres_pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                select id, endpoint_id, active_build_id, active_revision_id, target_build_id,
-                       target_revision_id, previous_build_id, previous_revision_id, phase,
+                select id, endpoint_id, active_build_id, active_revision_id, active_module_import_id,
+                       target_build_id, target_revision_id, target_module_import_id,
+                       previous_build_id, previous_revision_id, previous_module_import_id,
+                       failed_build_id, failed_revision_id, failed_module_import_id, phase,
                        desired_replica_count, legacy_fallback, rollout_generation, deadline_at,
                        failure_reason, rollout_started_at, ready_at, created_at, updated_at
                 from endpoint_deployments
@@ -4266,6 +4343,7 @@ class AppServices:
             )
             return {
                 "build_id": build_id,
+                "module_import_id": _clean_optional_text(deployment.get(f"{role}_module_import_id")),
                 "revision_id": revision_id,
                 "build_status": (
                     str(build.get("status") or "unknown") if build else "missing"
@@ -4363,6 +4441,7 @@ class AppServices:
             "active": await build_ref("active"),
             "target": await build_ref("target"),
             "previous": await build_ref("previous"),
+            "failed_target": await build_ref("failed"),
             "slots": slots,
             "failure_reason": failure_reason,
             "rollout_reason": failure_reason if phase == "failed" else None,
@@ -4490,15 +4569,16 @@ class AppServices:
                 await conn.execute(
                     """
                     insert into endpoint_deployments (
-                      id, endpoint_id, target_build_id, target_revision_id, phase,
+                      id, endpoint_id, target_build_id, target_revision_id, target_module_import_id, phase,
                       desired_replica_count, legacy_fallback, rollout_generation,
                       rollout_started_at, created_at, updated_at
-                    ) values ($1, $2, $3, $4, 'pending', $5, false, 0, $6, $6, $6)
+                    ) values ($1, $2, $3, $4, $5, 'pending', $6, false, 0, $7, $7, $7)
                     """,
                     f"managed-{endpoint_id}-0",
                     endpoint_id,
                     image["build_id"],
                     image["revision_id"],
+                    module_id,
                     normalized_pinned_worker_count,
                     now,
                 )
@@ -4620,16 +4700,14 @@ class AppServices:
                     """
                     update bundle_endpoints
                     set name = $2,
-                        module_import_id = $3,
-                        lm_profile_id = $4,
-                        pinned_worker_count = $5,
-                        updated_at = $6
+                        lm_profile_id = $3,
+                        pinned_worker_count = $4,
+                        updated_at = $5
                     where id = $1
                     returning id, module_import_id, lm_profile_id, pinned_worker_count, name, key_preview, created_at, updated_at
                     """,
                     endpoint_id,
                     next_name,
-                    next_module_id,
                     normalized_lm_profile_id,
                     normalized_pinned_worker_count,
                     now,
@@ -4640,6 +4718,7 @@ class AppServices:
                         endpoint_id=endpoint_id,
                         build_id=str(image["build_id"]),
                         revision_id=str(image["revision_id"]),
+                        target_module_import_id=next_module_id,
                         desired_replica_count=normalized_pinned_worker_count,
                         now=now,
                     )
