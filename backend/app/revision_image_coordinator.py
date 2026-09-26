@@ -25,6 +25,7 @@ _REBUILD_ALL_ADVISORY_LOCK = 0x44535059494D4743
 _RECOVERY_LOG = "claim expired; requeued for recovery\n"
 _SHUTDOWN_LOG = "deployer stopped; requeued for recovery\n"
 _RETRY_LOG = "generation queued by operator retry\n"
+_MODULE_BUILD_LOG = "generation queued from module listing\n"
 
 
 class RevisionImageEnqueueError(ValueError):
@@ -107,6 +108,8 @@ class RevisionImageBuildStore(Protocol):
     ) -> bool: ...
 
     async def release_claim(self, claim: RevisionImageBuildClaim) -> bool: ...
+
+    async def enqueue_module_current(self, module_id: str) -> str: ...
 
     async def enqueue_retry(self, build_id: str) -> str: ...
 
@@ -811,6 +814,76 @@ class PostgresRevisionImageBuildStore:
             self._build_log_max_bytes,
         )
         return _affected_rows(result) == 1
+
+    async def enqueue_module_current(self, module_id: str) -> str:
+        async with self._operation_connection() as conn:
+            async with conn.transaction():
+                module = await conn.fetchrow(
+                    """
+                    select id, current_revision_id
+                    from module_imports
+                    where id = $1 and deleted_at is null
+                    for update
+                    """,
+                    module_id,
+                )
+                if module is None:
+                    raise RevisionImageEnqueueError(
+                        "module_not_found", "module was not found"
+                    )
+                revision_id = module["current_revision_id"]
+                if revision_id is None:
+                    raise RevisionImageEnqueueError(
+                        "not_eligible",
+                        "module has no current revision; sync and validate it before building",
+                    )
+                row = await conn.fetchrow(
+                    """
+                    select r.id as revision_id, r.module_import_id as module_id,
+                           r.commit_sha as source_commit, r.source_snapshot_path,
+                           r.source_content_digest,
+                           (m.sync_status = 'synced'
+                            and m.current_revision_id = r.id
+                            and rb.validation_status = 'passed'
+                            and rb.validation_revision_id = r.id
+                            and r.source_snapshot_path is not null
+                            and r.source_content_digest is not null) as eligible,
+                           (select b.id from revision_image_builds b
+                            where b.revision_id = r.id
+                              and b.status in ('queued', 'building')
+                            order by b.generation desc limit 1) as active_build_id,
+                           (select b.id from revision_image_builds b
+                            where b.revision_id = r.id
+                            order by b.generation desc limit 1) as retry_of_build_id
+                    from bundle_revisions r
+                    join module_imports m on m.id = r.module_import_id
+                    left join runtime_bundles rb on rb.module_import_id = m.id
+                    where r.id = $2 and r.module_import_id = $1
+                    for update of r
+                    """,
+                    module_id,
+                    revision_id,
+                )
+                if row is None or not row["eligible"]:
+                    raise RevisionImageEnqueueError(
+                        "not_eligible",
+                        "module current revision is not eligible; sync and validate it before building",
+                    )
+                if row["active_build_id"] is not None:
+                    return str(row["active_build_id"])
+                generation = int(
+                    await conn.fetchval(
+                        "select coalesce(max(generation), 0) + 1 from revision_image_builds where revision_id = $1",
+                        revision_id,
+                    )
+                )
+                return await self._insert_build(
+                    conn,
+                    row,
+                    generation=generation,
+                    retry_of_build_id=row["retry_of_build_id"],
+                    initial_log=_MODULE_BUILD_LOG,
+                )
 
     async def enqueue_retry(self, build_id: str) -> str:
         async with self._operation_connection() as conn:

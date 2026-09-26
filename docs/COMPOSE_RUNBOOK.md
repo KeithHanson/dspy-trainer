@@ -281,6 +281,10 @@ curl -fsS 'http://localhost:8000/revision-image-builds?limit=50&offset=0'
 curl -fsS 'http://localhost:8000/revision-image-builds/BUILD_ID'
 curl -fsS 'http://localhost:8000/revision-image-builds/BUILD_ID/logs?offset=0&limit=16384'
 
+# Queue the exact current eligible revision for one module. Repeated calls while
+# queued/building return the same active generation instead of duplicating work.
+curl -fsS -X POST 'http://localhost:8000/modules/MODULE_ID/revision-image-builds'
+
 # Queue a new generation for one eligible failed or ready build.
 curl -fsS -X POST 'http://localhost:8000/revision-image-builds/BUILD_ID/retry'
 
@@ -288,7 +292,9 @@ curl -fsS -X POST 'http://localhost:8000/revision-image-builds/BUILD_ID/retry'
 curl -fsS -X POST 'http://localhost:8000/revision-image-builds/rebuild-all'
 ```
 
-A `409` response with code `build_conflict` means an equivalent generation is already active or the requested build cannot be retried. `not_eligible` means the revision is no longer the current validated, synced source. A `503` with code `build_coordinator_unavailable` means the backend lacks the deployer identity/base-image configuration. Source validation and sync are independent of these build failures.
+A module-scoped enqueue returns its current queued/building generation when one already exists. A `409` response with code `build_conflict` from retry or rebuild-all means equivalent work is already active or the requested build cannot be retried. `not_eligible` means the module has no current validated, synced revision; `module_not_found` returns `404`. A `503` with code `build_coordinator_unavailable` means the backend lacks the deployer identity/base-image configuration. Source validation and sync are independent of these build failures.
+
+The Bundles page shows only the exact current revision’s image status in each module row. **Build** opens a live modal immediately, then polls bounded status and sanitized retained output until the generation is terminal. Closing or changing the selected module prevents late responses from replacing the current view. The revision image history initially keeps the latest current-revision generation and all queued/building generations visible; use **Show previous builds** to reveal older terminal history without deleting it.
 
 ## Managed Endpoint Deployment Operations
 

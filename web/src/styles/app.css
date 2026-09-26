@@ -360,8 +360,11 @@ button { font-family: inherit; }
 .bundles-saved-actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 10px;
 }
+.bundles-image-status { align-items: center; margin-top: 5px; }
 .bundles-sparkline-card {
   min-width: 0;
   width: min(260px, 100%);
@@ -500,6 +503,12 @@ button { font-family: inherit; }
   width: min(560px, 100%);
   background: var(--panel);
 }
+.bundles-build-modal {
+  width: min(760px, 100%);
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+}
+.bundles-build-modal-status { align-items: center; flex-wrap: wrap; margin-top: 16px; }
 .plans-generate-modal {
   max-height: calc(100vh - 32px);
   overflow: auto;
@@ -1138,6 +1147,7 @@ button { font-family: inherit; }
 .auth-feature-icon { color: var(--accent); margin-top: 2px; flex: none; }
 
 .image-builds-head, .endpoint-deployment-head { align-items: flex-start; gap: 16px; margin-bottom: 14px; }
+.image-build-history-toggle { margin-bottom: 12px; }
 .image-builds-list { display: grid; gap: 12px; }
 .image-build-card, .endpoint-deployment-ref, .endpoint-slot-card { border: 1px solid var(--border-soft); border-radius: 10px; padding: 14px; background: var(--panel); min-width: 0; }
 .image-build-card-head { align-items: flex-start; gap: 12px; }

@@ -233,6 +233,43 @@ class _StatefulPostgresConnection:
     async def fetchrow(self, sql, *args):
         query = " ".join(sql.lower().split())
 
+        if "select id, current_revision_id from module_imports" in query:
+            module = self.modules.get(args[0])
+            if module is None or module["deleted_at"] is not None:
+                return None
+            return {"id": args[0], "current_revision_id": module["current_revision_id"]}
+
+        if "where r.id = $2 and r.module_import_id = $1" in query:
+            module_id, revision_id = args
+            revision = self.revisions.get(revision_id)
+            if revision is None or revision["module_id"] != module_id:
+                return None
+            related = [
+                build
+                for build in self.builds.values()
+                if build["revision_id"] == revision_id
+            ]
+            latest = max(related, key=lambda build: build["generation"], default=None)
+            active = max(
+                (
+                    build
+                    for build in related
+                    if build["status"] in {"queued", "building"}
+                ),
+                key=lambda build: build["generation"],
+                default=None,
+            )
+            return {
+                "revision_id": revision_id,
+                "module_id": module_id,
+                "source_commit": revision["source_commit"],
+                "source_snapshot_path": revision["source_snapshot_path"],
+                "source_content_digest": revision["source_content_digest"],
+                "eligible": self._revision_eligible(revision_id),
+                "active_build_id": active["id"] if active else None,
+                "retry_of_build_id": latest["id"] if latest else None,
+            }
+
         if "with candidate as" in query:
             if any(build["status"] == "building" for build in self.builds.values()):
                 return None
@@ -628,6 +665,105 @@ def test_expired_claim_is_requeued_without_losing_attempt_history(tmp_path):
     assert build["claim_owner"] is None
     assert build["claim_expires_at"] is None
     assert "claim expired" in build["build_log"]
+
+
+def test_module_build_queues_first_generation_for_current_revision_only(tmp_path):
+    connection = _StatefulPostgresConnection()
+    _add_revision(
+        connection,
+        module_id="module-a",
+        revision_id="revision-old",
+        snapshot=_snapshot(tmp_path, "revision-old"),
+        created_at=1,
+        current=False,
+    )
+    _add_build(
+        connection,
+        build_id="old-ready",
+        revision_id="revision-old",
+        status="ready",
+    )
+    _add_revision(
+        connection,
+        module_id="module-a",
+        revision_id="revision-current",
+        snapshot=_snapshot(tmp_path, "revision-current"),
+        created_at=2,
+    )
+
+    build_id = asyncio.run(_store(connection).enqueue_module_current("module-a"))
+
+    build = connection.builds[build_id]
+    assert build["revision_id"] == "revision-current"
+    assert build["generation"] == 1
+    assert build["retry_of_build_id"] is None
+    assert connection.builds["old-ready"]["status"] == "ready"
+
+
+def test_module_build_advances_terminal_generation(tmp_path):
+    connection = _StatefulPostgresConnection()
+    _add_revision(
+        connection,
+        module_id="module-a",
+        revision_id="revision-a",
+        snapshot=_snapshot(tmp_path, "revision-a"),
+        created_at=1,
+    )
+    _add_build(
+        connection,
+        build_id="ready-build",
+        revision_id="revision-a",
+        status="ready",
+        generation=2,
+    )
+
+    build_id = asyncio.run(_store(connection).enqueue_module_current("module-a"))
+
+    build = connection.builds[build_id]
+    assert build["generation"] == 3
+    assert build["retry_of_build_id"] == "ready-build"
+
+
+def test_concurrent_module_build_requests_follow_one_active_generation(tmp_path):
+    connection = _StatefulPostgresConnection()
+    _add_revision(
+        connection,
+        module_id="module-a",
+        revision_id="revision-a",
+        snapshot=_snapshot(tmp_path, "revision-a"),
+        created_at=1,
+    )
+    store = _store(connection)
+
+    async def request_together():
+        return await asyncio.gather(
+            store.enqueue_module_current("module-a"),
+            store.enqueue_module_current("module-a"),
+        )
+
+    first, second = asyncio.run(request_together())
+
+    assert first == second
+    assert list(connection.builds) == [first]
+
+
+def test_module_build_rejects_ineligible_current_revision(tmp_path):
+    connection = _StatefulPostgresConnection()
+    _add_revision(
+        connection,
+        module_id="module-a",
+        revision_id="revision-a",
+        snapshot=_snapshot(tmp_path, "revision-a"),
+        created_at=1,
+        validation_status="failed",
+    )
+
+    with pytest.raises(RevisionImageEnqueueError) as error:
+        asyncio.run(_store(connection).enqueue_module_current("module-a"))
+
+    assert error.value.code == "not_eligible"
+    assert "sync and validate" in str(error.value)
+    assert connection.builds == {}
 
 
 def test_manual_retry_creates_next_generation_with_provenance(tmp_path):

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Button } from "../components/primitives/Button";
 import { Icon } from "../components/Icon";
@@ -6,7 +6,12 @@ import { EmptyState } from "../components/states/EmptyState";
 import { ErrorState } from "../components/states/ErrorState";
 import { LoadingState } from "../components/states/LoadingState";
 import { buildApiUrl } from "../api/base";
-import { RevisionImageBuildsPanel } from "./RevisionImageBuildsPanel";
+import {
+  BuildStatusPill,
+  isActiveBuildStatus,
+  RevisionImageBuildsPanel,
+  sanitizeBuildOutput,
+} from "./RevisionImageBuildsPanel";
 
 const VALIDATION_CHECKS = [
   {
@@ -352,7 +357,10 @@ function SavedBundlesPanel({ modulesUrl }) {
   const [runHistoryByModule, setRunHistoryByModule] = useState({});
   const [isLoadingBundles, setIsLoadingBundles] = useState(false);
   const [syncingBundleId, setSyncingBundleId] = useState("");
+  const [buildingBundleId, setBuildingBundleId] = useState("");
   const [syncNotice, setSyncNotice] = useState(null);
+  const [buildModal, setBuildModal] = useState(null);
+  const buildRequestGeneration = useRef(0);
 
   const loadBundles = async () => {
     setIsLoadingBundles(true);
@@ -361,9 +369,7 @@ function SavedBundlesPanel({ modulesUrl }) {
         fetch(modulesUrl, { method: "GET" }),
         fetch(buildApiUrl("/agent-run-plans?limit=200&offset=0"), { method: "GET" }),
       ]);
-      if (!bundlesResponse.ok) {
-        throw new Error("Could not load bundles");
-      }
+      if (!bundlesResponse.ok) throw new Error("Could not load bundles");
       const payload = await bundlesResponse.json();
       const bundles = Array.isArray(payload) ? payload : [];
       setSavedBundles(bundles);
@@ -381,21 +387,183 @@ function SavedBundlesPanel({ modulesUrl }) {
     }
   };
 
+  const updateBundleBuild = (moduleId, build) => {
+    setSavedBundles((current) => current.map((bundle) => {
+      if (bundle.id !== moduleId || (bundle.current_revision_id && build?.revision_id !== bundle.current_revision_id)) {
+        return bundle;
+      }
+      return {
+        ...bundle,
+        image_build: {
+          ...(bundle.image_build || {}),
+          status: build?.status || "no build",
+          current_build: build || null,
+        },
+      };
+    }));
+  };
+
+  const closeBuildModal = () => {
+    buildRequestGeneration.current += 1;
+    setBuildingBundleId("");
+    setBuildModal(null);
+  };
+
+  const openExistingBuild = (bundle) => {
+    const build = bundle?.image_build?.current_build;
+    if (!build?.id) return;
+    buildRequestGeneration.current += 1;
+    setBuildModal({
+      moduleId: bundle.id,
+      moduleName: bundle.bundle_name || bundle.github_repo_url || bundle.source_ref || bundle.id,
+      build,
+      log: null,
+      logError: "",
+      error: "",
+      isStarting: false,
+    });
+  };
+
+  const buildModule = async (bundle) => {
+    if (!bundle?.id) return;
+    const requestGeneration = buildRequestGeneration.current + 1;
+    buildRequestGeneration.current = requestGeneration;
+    setBuildingBundleId(bundle.id);
+    setBuildModal({
+      moduleId: bundle.id,
+      moduleName: bundle.bundle_name || bundle.github_repo_url || bundle.source_ref || bundle.id,
+      build: null,
+      log: null,
+      logError: "",
+      error: "",
+      isStarting: true,
+    });
+    try {
+      const response = await fetch(`${modulesUrl}/${encodeURIComponent(bundle.id)}/revision-image-builds`, {
+        method: "POST",
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(sanitizeBuildOutput(payload?.error || `Could not queue image build (${response.status})`));
+      }
+      if (buildRequestGeneration.current !== requestGeneration) return;
+      updateBundleBuild(bundle.id, payload);
+      setBuildModal((current) => current?.moduleId === bundle.id ? {
+        ...current,
+        build: payload,
+        isStarting: false,
+      } : current);
+    } catch (error) {
+      if (buildRequestGeneration.current !== requestGeneration) return;
+      setBuildModal((current) => current?.moduleId === bundle.id ? {
+        ...current,
+        error: error instanceof Error ? error.message : "Could not queue image build",
+        isStarting: false,
+      } : current);
+    } finally {
+      if (buildRequestGeneration.current === requestGeneration) setBuildingBundleId("");
+    }
+  };
+
+  useEffect(() => {
+    const buildId = buildModal?.build?.id;
+    if (!buildId) return undefined;
+    const moduleId = buildModal.moduleId;
+    const requestGeneration = buildRequestGeneration.current;
+    const controller = new AbortController();
+    let timer = null;
+    const poll = async () => {
+      try {
+        const [statusResponse, logResponse] = await Promise.all([
+          fetch(buildApiUrl(`/revision-image-builds/${encodeURIComponent(buildId)}`), {
+            method: "GET",
+            signal: controller.signal,
+          }),
+          fetch(buildApiUrl(`/revision-image-builds/${encodeURIComponent(buildId)}/logs?offset=0&limit=16384`), {
+            method: "GET",
+            signal: controller.signal,
+          }),
+        ]);
+        if (!statusResponse.ok) {
+          throw new Error(await parseError(statusResponse, `Could not refresh image build (${statusResponse.status})`));
+        }
+        const status = await statusResponse.json();
+        let log = null;
+        let logError = "";
+        if (logResponse.ok) {
+          const payload = await logResponse.json();
+          log = {
+            text: sanitizeBuildOutput(payload?.text),
+            totalBytes: Number(payload?.total_bytes || 0),
+            truncated: payload?.next_offset !== null && payload?.next_offset !== undefined,
+          };
+        } else {
+          logError = await parseError(logResponse, `Could not load build output (${logResponse.status})`);
+        }
+        if (controller.signal.aborted || buildRequestGeneration.current !== requestGeneration) return;
+        updateBundleBuild(moduleId, status);
+        setBuildModal((current) => current?.build?.id === buildId ? {
+          ...current,
+          build: status,
+          log,
+          logError: sanitizeBuildOutput(logError),
+          error: "",
+        } : current);
+        if (isActiveBuildStatus(status.status)) timer = window.setTimeout(poll, 2_000);
+      } catch (error) {
+        if (controller.signal.aborted || buildRequestGeneration.current !== requestGeneration) return;
+        setBuildModal((current) => current?.build?.id === buildId ? {
+          ...current,
+          error: sanitizeBuildOutput(error instanceof Error ? error.message : "Could not refresh image build"),
+        } : current);
+        timer = window.setTimeout(poll, 2_000);
+      }
+    };
+    poll();
+    return () => {
+      controller.abort();
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [buildModal?.build?.id]);
+
+  const hasActiveListingBuild = savedBundles.some((bundle) => (
+    isActiveBuildStatus(bundle?.image_build?.current_build?.status)
+  ));
+  useEffect(() => {
+    if (!hasActiveListingBuild) return undefined;
+    const controller = new AbortController();
+    let timer = null;
+    const poll = async () => {
+      try {
+        const response = await fetch(modulesUrl, { method: "GET", signal: controller.signal });
+        if (!response.ok) throw new Error("Could not refresh bundle image status");
+        const payload = await response.json();
+        if (controller.signal.aborted) return;
+        const bundles = Array.isArray(payload) ? payload : [];
+        setSavedBundles(bundles);
+        if (bundles.some((bundle) => isActiveBuildStatus(bundle?.image_build?.current_build?.status))) {
+          timer = window.setTimeout(poll, 2_000);
+        }
+      } catch (error) {
+        if (!controller.signal.aborted) timer = window.setTimeout(poll, 2_000);
+      }
+    };
+    timer = window.setTimeout(poll, 2_000);
+    return () => {
+      controller.abort();
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [hasActiveListingBuild, modulesUrl]);
+
   const deleteBundle = async (bundleId, bundleName) => {
-    if (!window.confirm(`Are you sure you want to delete "${bundleName || bundleId}"? This action cannot be undone.`)) {
-      return;
-    }
+    if (!window.confirm(`Are you sure you want to delete "${bundleName || bundleId}"? This action cannot be undone.`)) return;
     const response = await fetch(`${modulesUrl}/${bundleId}`, { method: "DELETE" });
-    if (!response.ok) {
-      return;
-    }
+    if (!response.ok) return;
     await loadBundles();
   };
 
   const syncBundle = async (bundle) => {
-    if (!bundle?.id) {
-      return;
-    }
+    if (!bundle?.id) return;
     setSyncingBundleId(bundle.id);
     setSyncNotice(null);
     try {
@@ -405,19 +573,11 @@ function SavedBundlesPanel({ modulesUrl }) {
         body: JSON.stringify({}),
       });
       const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(payload?.error || `Could not sync bundle (${response.status})`);
-      }
+      if (!response.ok) throw new Error(payload?.error || `Could not sync bundle (${response.status})`);
       await loadBundles();
-      setSyncNotice({
-        tone: "success",
-        message: `${bundle.bundle_name || bundle.id} synced successfully.`,
-      });
+      setSyncNotice({ tone: "success", message: `${bundle.bundle_name || bundle.id} synced successfully.` });
     } catch (error) {
-      setSyncNotice({
-        tone: "error",
-        message: error instanceof Error ? error.message : "Could not sync bundle",
-      });
+      setSyncNotice({ tone: "error", message: error instanceof Error ? error.message : "Could not sync bundle" });
     } finally {
       setSyncingBundleId("");
     }
@@ -439,35 +599,91 @@ function SavedBundlesPanel({ modulesUrl }) {
         <EmptyState title="No bundles saved yet" description="Import a GitHub repository to create your first tracked bundle." />
       ) : (
         <div className="col gap-2">
-          {savedBundles.map((bundle) => (
-            <div key={bundle.id} className="bundles-saved-row bundles-saved-row-bundle">
-              <div className="bundles-saved-icon center">
-                <Icon name="box" size={18} />
+          {savedBundles.map((bundle) => {
+            const currentBuild = bundle?.image_build?.current_build || null;
+            const imageStatus = currentBuild?.status || "no build";
+            return (
+              <div key={bundle.id} className="bundles-saved-row bundles-saved-row-bundle">
+                <div className="bundles-saved-icon center"><Icon name="box" size={18} /></div>
+                <div className="bundles-row-btn bundles-row-btn-bundle">
+                  <span className="t-sm">{bundle.bundle_name || bundle.github_repo_url || bundle.source_ref || bundle.id}</span>
+                  <span className="cap"><span className="mono">{bundle.validation_status}</span> · {bundle.status}</span>
+                  {bundle.bundle_version ? <span className="cap">v{bundle.bundle_version}</span> : null}
+                  {bundle.github_branch ? <span className="cap mono">Branch {bundle.github_branch}</span> : null}
+                  {bundle.github_subpath ? <span className="cap mono">Subfolder: {bundle.github_subpath}</span> : null}
+                  {bundle.current_commit_sha ? <span className="cap mono">Commit {bundle.current_commit_sha.slice(0, 8)}</span> : null}
+                  {bundle.created_at ? <span className="cap mono">Imported {formatDateTime(bundle.created_at)}</span> : null}
+                  <span className="row gap-1 bundles-image-status"><span className="cap">Image</span><BuildStatusPill status={imageStatus} /></span>
+                </div>
+                <BundleEvalSparkline bundle={bundle} history={runHistoryByModule[bundle.id] || []} />
+                <div className="bundles-saved-actions">
+                  <Button size="sm" variant="primary" onClick={() => buildModule(bundle)} disabled={buildingBundleId === bundle.id}>
+                    {buildingBundleId === bundle.id ? "Queuing..." : "Build"}
+                  </Button>
+                  {currentBuild ? <Button size="sm" onClick={() => openExistingBuild(bundle)}>View build</Button> : null}
+                  <Button size="sm" onClick={() => syncBundle(bundle)} disabled={syncingBundleId === bundle.id}>
+                    {syncingBundleId === bundle.id ? "Syncing..." : "Sync"}
+                  </Button>
+                  <Button size="sm" onClick={() => navigate(`/bundles/${bundle.id}`)}>Open</Button>
+                  <Button size="sm" className="bundles-delete-btn" onClick={() => deleteBundle(bundle.id, bundle.bundle_name)}>Delete</Button>
+                </div>
               </div>
-              <div className="bundles-row-btn bundles-row-btn-bundle">
-                <span className="t-sm">{bundle.bundle_name || bundle.github_repo_url || bundle.source_ref || bundle.id}</span>
-                <span className="cap"><span className="mono">{bundle.validation_status}</span> · {bundle.status}</span>
-                {bundle.bundle_version ? <span className="cap">v{bundle.bundle_version}</span> : null}
-                {bundle.github_branch ? <span className="cap mono">Branch {bundle.github_branch}</span> : null}
-                {bundle.github_subpath ? <span className="cap mono">Subfolder: {bundle.github_subpath}</span> : null}
-                {bundle.current_commit_sha ? <span className="cap mono">Commit {bundle.current_commit_sha.slice(0, 8)}</span> : null}
-                {bundle.created_at ? <span className="cap mono">Imported {formatDateTime(bundle.created_at)}</span> : null}
-              </div>
-              <BundleEvalSparkline bundle={bundle} history={runHistoryByModule[bundle.id] || []} />
-              <div className="bundles-saved-actions">
-                <Button size="sm" variant="primary" onClick={() => syncBundle(bundle)} disabled={syncingBundleId === bundle.id}>
-                  {syncingBundleId === bundle.id ? "Syncing..." : "Sync"}
-                </Button>
-                <Button size="sm" onClick={() => {
-                  navigate(`/bundles/${bundle.id}`);
-                }}>Open</Button>
-                <Button size="sm" className="bundles-delete-btn" onClick={() => deleteBundle(bundle.id, bundle.bundle_name)}>Delete</Button>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
+      {buildModal ? (
+        <div className="bundles-modal-backdrop" onClick={closeBuildModal}>
+          <div
+            className="bundles-modal bundles-build-modal panel card-pad"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="module-build-modal-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="row between image-build-card-head">
+              <div>
+                <h3 className="t-h2" id="module-build-modal-title">Image build · {buildModal.moduleName}</h3>
+                <p className="cap">Current revision image generation</p>
+              </div>
+              <Button size="sm" onClick={closeBuildModal}>Close</Button>
+            </div>
+            {buildModal.isStarting ? <LoadingState label="Queuing image build..." /> : null}
+            {buildModal.error ? <ErrorState title="Image build action failed" description={buildModal.error} /> : null}
+            {buildModal.build ? (
+              <>
+                <div className="row gap-2 bundles-build-modal-status">
+                  <BuildStatusPill status={buildModal.build.status} />
+                  <span>Generation {buildModal.build.generation}</span>
+                  <span className="mono cap">Build {buildModal.build.id}</span>
+                </div>
+                <dl className="image-build-meta">
+                  <div><dt>Queued</dt><dd>{buildModal.build.queued_at ? formatDateTime(buildModal.build.queued_at) : "unknown"}</dd></div>
+                  <div><dt>Started</dt><dd>{buildModal.build.started_at ? formatDateTime(buildModal.build.started_at) : "not started"}</dd></div>
+                  <div><dt>Finished</dt><dd>{buildModal.build.finished_at ? formatDateTime(buildModal.build.finished_at) : "not finished"}</dd></div>
+                  <div><dt>Updated</dt><dd>{buildModal.build.updated_at ? formatDateTime(buildModal.build.updated_at) : "unknown"}</dd></div>
+                </dl>
+                {buildModal.build.failure_reason ? (
+                  <div className="image-build-failure" role="alert">
+                    <strong>Failure reason</strong>
+                    <span>{sanitizeBuildOutput(buildModal.build.failure_reason)}</span>
+                  </div>
+                ) : null}
+                <div className="image-build-log-wrap">
+                  {buildModal.logError ? <ErrorState title="Build output unavailable" description={buildModal.logError} /> : null}
+                  {buildModal.log ? (
+                    <>
+                      <p className="cap">Showing bounded output ({buildModal.log.totalBytes} retained bytes){buildModal.log.truncated ? "; additional output is intentionally hidden." : "."}</p>
+                      <pre className="image-build-log" aria-label={`Build output for ${buildModal.build.id}`}>{buildModal.log.text || "No build output recorded."}</pre>
+                    </>
+                  ) : <p className="cap">Loading bounded build output...</p>}
+                </div>
+              </>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -906,7 +1122,7 @@ function BundleDetailPage({ moduleId, modulesUrl, onBack }) {
           </section>
         ) : null}
 
-        <RevisionImageBuildsPanel active={detailTab === "images"} moduleId={bundle.id} />
+        <RevisionImageBuildsPanel active={detailTab === "images"} moduleId={bundle.id} currentRevisionId={bundle.current_revision_id} />
 
       </div>
     </section>

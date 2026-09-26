@@ -7,7 +7,11 @@ import { LoadingState } from "../components/states/LoadingState";
 const ACTIVE_BUILD_STATUSES = new Set(["queued", "building"]);
 const MAX_VISIBLE_BUILD_LOG_CHARS = 16_384;
 
-function sanitizeBuildOutput(value) {
+export function isActiveBuildStatus(status) {
+  return ACTIVE_BUILD_STATUSES.has(String(status || "").toLowerCase());
+}
+
+export function sanitizeBuildOutput(value) {
   return String(value || "")
     .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, "$1[REDACTED]")
     .replace(/((?:password|secret|token|api[_-]?key|authorization|credential)[A-Za-z0-9_.-]*\s*[:=]\s*)[^\r\n]*/gi, "$1[REDACTED]")
@@ -28,21 +32,22 @@ async function parseError(response, fallback) {
   }
 }
 
-function BuildStatusPill({ status }) {
+export function BuildStatusPill({ status }) {
   const normalized = String(status || "unknown").toLowerCase();
   const tone = normalized === "ready"
     ? "runs-status-pill-pass"
     : normalized === "failed"
       ? "runs-status-pill-fail"
-      : ACTIVE_BUILD_STATUSES.has(normalized)
+      : isActiveBuildStatus(normalized)
         ? "runs-status-pill-run"
         : "runs-status-pill-neutral";
   return <span className={`plans-status ${tone}`}>{normalized}</span>;
 }
 
-export function RevisionImageBuildsPanel({ active, moduleId }) {
+export function RevisionImageBuildsPanel({ active, moduleId, currentRevisionId }) {
   const buildsUrl = useMemo(() => buildApiUrl("/revision-image-builds"), []);
   const [builds, setBuilds] = useState([]);
+  const [showPreviousBuilds, setShowPreviousBuilds] = useState(false);
   const [hasLoaded, setHasLoaded] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [actionBuildId, setActionBuildId] = useState("");
@@ -90,7 +95,7 @@ export function RevisionImageBuildsPanel({ active, moduleId }) {
     return () => controller.abort();
   }, [active, hasLoaded, moduleId, buildsUrl]);
 
-  const hasNonterminalBuild = builds.some((build) => ACTIVE_BUILD_STATUSES.has(String(build?.status || "")));
+  const hasNonterminalBuild = builds.some((build) => isActiveBuildStatus(build?.status));
   useEffect(() => {
     if (!hasNonterminalBuild) return undefined;
     let cancelled = false;
@@ -198,6 +203,20 @@ export function RevisionImageBuildsPanel({ active, moduleId }) {
 
   if (!active) return null;
   const actionInFlight = Boolean(actionBuildId) || isRebuildingAll;
+  const currentBuilds = currentRevisionId
+    ? builds.filter((build) => build.revision_id === currentRevisionId)
+    : builds;
+  const latestCurrentBuild = currentBuilds.reduce((latest, build) => (
+    !latest || Number(build.generation || 0) > Number(latest.generation || 0) ? build : latest
+  ), null);
+  const defaultBuildIds = new Set(
+    builds.filter((build) => isActiveBuildStatus(build.status)).map((build) => build.id),
+  );
+  if (latestCurrentBuild) defaultBuildIds.add(latestCurrentBuild.id);
+  const previousBuildCount = builds.filter((build) => !defaultBuildIds.has(build.id)).length;
+  const visibleBuilds = showPreviousBuilds
+    ? builds
+    : builds.filter((build) => defaultBuildIds.has(build.id));
   return (
     <section className="panel card-pad bundles-section" aria-label="Image generation status">
       <div className="row between image-builds-head">
@@ -212,8 +231,18 @@ export function RevisionImageBuildsPanel({ active, moduleId }) {
       {error ? <ErrorState title="Image build action failed" description={error} /> : null}
       {isLoading ? <LoadingState label="Loading image builds..." /> : null}
       {!isLoading && hasLoaded && !builds.length ? <p className="cap">No image builds recorded for this module yet.</p> : null}
+      {previousBuildCount ? (
+        <Button
+          size="sm"
+          className="image-build-history-toggle"
+          onClick={() => setShowPreviousBuilds((shown) => !shown)}
+          aria-expanded={showPreviousBuilds}
+        >
+          {showPreviousBuilds ? "Hide previous builds" : `Show previous builds (${previousBuildCount})`}
+        </Button>
+      ) : null}
       <div className="image-builds-list">
-        {builds.map((build) => (
+        {visibleBuilds.map((build) => (
           <article key={build.id} className="image-build-card">
             <div className="row between image-build-card-head">
               <div className="col gap-1">

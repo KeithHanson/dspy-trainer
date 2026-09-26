@@ -129,6 +129,32 @@ describe("RevisionImageBuildsPanel", () => {
     expect(fetchMock.mock.calls.filter(([url, init]) => String(url).endsWith("/rebuild-all") && init?.method === "POST")).toHaveLength(1);
   });
 
+  it("hides previous builds by default and reveals or hides them without hiding active work", async () => {
+    const builds = [
+      { ...FAILED_BUILD, id: "build-current", revision_id: "revision-current", generation: 4, status: "ready", failure_reason: null },
+      { ...FAILED_BUILD, id: "build-active-old", revision_id: "revision-old", generation: 3, status: "building", failure_reason: null },
+      { ...FAILED_BUILD, id: "build-previous", revision_id: "revision-current", generation: 2, status: "superseded", failure_reason: null },
+      { ...FAILED_BUILD, id: "build-stale", revision_id: "revision-old", generation: 1, status: "failed", failure_reason: null },
+    ];
+    vi.stubGlobal("fetch", vi.fn((url) => {
+      if (String(url).includes("module_id=module-1")) return Promise.resolve(buildList(builds));
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    }));
+
+    render(<RevisionImageBuildsPanel active moduleId="module-1" currentRevisionId="revision-current" />);
+
+    expect(await screen.findByText("Build build-current")).toBeInTheDocument();
+    expect(screen.getByText("Build build-active-old")).toBeInTheDocument();
+    expect(screen.queryByText("Build build-previous")).not.toBeInTheDocument();
+    expect(screen.queryByText("Build build-stale")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Show previous builds (2)" }));
+    expect(screen.getByText("Build build-previous")).toBeInTheDocument();
+    expect(screen.getByText("Build build-stale")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Hide previous builds" }));
+    expect(screen.queryByText("Build build-previous")).not.toBeInTheDocument();
+    expect(screen.getByText("Build build-active-old")).toBeInTheDocument();
+  });
+
   it("clears build A immediately when build B is selected and B fails", async () => {
     const buildA = { ...FAILED_BUILD, id: "build-a", generation: 2, failure_reason: null };
     const buildB = { ...FAILED_BUILD, id: "build-b", generation: 1, failure_reason: null };
@@ -146,6 +172,7 @@ describe("RevisionImageBuildsPanel", () => {
     vi.stubGlobal("fetch", fetchMock);
     render(<RevisionImageBuildsPanel active moduleId="module-1" />);
 
+    await userEvent.click(await screen.findByRole("button", { name: "Show previous builds (1)" }));
     const buildCards = await screen.findAllByText(/Build build-/);
     const cardA = buildCards.find((node) => node.textContent === "Build build-a").closest("article");
     const cardB = buildCards.find((node) => node.textContent === "Build build-b").closest("article");
@@ -176,6 +203,7 @@ describe("RevisionImageBuildsPanel", () => {
     vi.stubGlobal("fetch", fetchMock);
     render(<RevisionImageBuildsPanel active moduleId="module-1" />);
 
+    await userEvent.click(await screen.findByRole("button", { name: "Show previous builds (1)" }));
     const buildCards = await screen.findAllByText(/Build build-/);
     const cardA = buildCards.find((node) => node.textContent === "Build build-a").closest("article");
     const cardB = buildCards.find((node) => node.textContent === "Build build-b").closest("article");
