@@ -1623,7 +1623,12 @@ def test_managed_container_launch_uses_only_immutable_image_and_compose_network(
         rollout_generation=2,
         network_id="network-id",
         labels=launch_labels,
-        environment={"DSPY_TRAINER_REDIS_URL": "redis://redis:6379/0"},
+        environment={
+            "DSPY_TRAINER_REDIS_URL": "redis://redis:6379/0",
+            "DSPY_TRAINER_ENDPOINT_DEPLOYMENT_ID": "stale-deployment",
+            "DSPY_TRAINER_ENDPOINT_SLOT": "99",
+            "DSPY_TRAINER_ENDPOINT_ROLLOUT_GENERATION": "1",
+        },
     )
 
     observed = asyncio.run(adapter.start_container(spec))
@@ -1633,3 +1638,12 @@ def test_managed_container_launch_uses_only_immutable_image_and_compose_network(
     assert "volumes" not in containers.kwargs
     assert "mounts" not in containers.kwargs
     assert all("CHECKOUT" not in key for key in containers.kwargs["environment"])
+    assert containers.kwargs["environment"] == {
+        "DSPY_TRAINER_REDIS_URL": "redis://redis:6379/0",
+        "DSPY_TRAINER_ENDPOINT_WORKER_MODE": "managed_image",
+        "DSPY_TRAINER_ENDPOINT_ID": "endpoint-1",
+        "DSPY_TRAINER_WORKER_ID": "worker-1",
+        "DSPY_TRAINER_ENDPOINT_DEPLOYMENT_ID": "deployment-1",
+        "DSPY_TRAINER_ENDPOINT_SLOT": "0",
+        "DSPY_TRAINER_ENDPOINT_ROLLOUT_GENERATION": "2",
+    }

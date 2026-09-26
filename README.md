@@ -149,6 +149,7 @@ An **LM profile** configures direct provider runtime access:
 A **managed endpoint** exposes a validated bundle to external callers with a rotatable API key. Creation is accepted only when the module's exact current revision is validated and has a ready, non-pruned local image; otherwise the API returns `409` with a stable `endpoint_revision_not_ready` or `endpoint_image_not_ready` code and writes no endpoint or deployment intent. New endpoints begin as managed-image deployments and become invokable only after their exact container slots report ready.
 
 - Create, rename, delete, and rotate keys from the bundle detail page
+- The deployer derives each managed worker's deployment, rollout generation, and slot environment from the same replacement specification used for its Docker labels and durable container record; workers fail closed when that identity is missing
 - `POST /bundle-endpoints/{id}/invoke` returns one JSON output payload
 - `POST /bundle-endpoints/{id}/stream` returns an SSE stream of incremental `delta` events followed by a `final` event
 - Each invocation is traced in MLflow under the `dspy-trainer-managed-endpoints` experiment, tagged with its invocation, endpoint, worker, module, profile, and bundle revision identifiers

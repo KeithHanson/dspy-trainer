@@ -168,6 +168,19 @@ class ContainerLaunchSpec:
     labels: Mapping[str, str]
     environment: Mapping[str, str]
 
+    def managed_worker_environment(self) -> dict[str, str]:
+        return {
+            **self.environment,
+            "DSPY_TRAINER_ENDPOINT_WORKER_MODE": "managed_image",
+            "DSPY_TRAINER_ENDPOINT_ID": self.endpoint_id,
+            "DSPY_TRAINER_WORKER_ID": self.worker_id,
+            "DSPY_TRAINER_ENDPOINT_DEPLOYMENT_ID": self.deployment_id,
+            "DSPY_TRAINER_ENDPOINT_SLOT": str(self.slot),
+            "DSPY_TRAINER_ENDPOINT_ROLLOUT_GENERATION": str(
+                self.rollout_generation
+            ),
+        }
+
 
 @dataclass(frozen=True)
 class ImagePruneCandidate:
@@ -726,12 +739,6 @@ class EndpointContainerReconciler:
         }
         environment = {
             **self._runtime_environment,
-            "DSPY_TRAINER_ENDPOINT_WORKER_MODE": "managed_image",
-            "DSPY_TRAINER_ENDPOINT_ID": intent.endpoint_id,
-            "DSPY_TRAINER_WORKER_ID": worker_id,
-            "DSPY_TRAINER_ENDPOINT_DEPLOYMENT_ID": intent.deployment_id,
-            "DSPY_TRAINER_ENDPOINT_SLOT": str(slot),
-            "DSPY_TRAINER_ENDPOINT_ROLLOUT_GENERATION": str(intent.rollout_generation),
             "DSPY_TRAINER_DEPLOYMENT_ID": self._deployment_id,
         }
         return ContainerLaunchSpec(
@@ -1421,11 +1428,25 @@ class DockerSdkEndpointAdapter:
                 raise RuntimeError(
                     "managed endpoint image identity does not match deployment intent"
                 )
+            expected_rollout_labels = {
+                f"{self._label_namespace}.deployment-id": spec.deployment_id,
+                f"{self._label_namespace}.slot": str(spec.slot),
+                f"{self._label_namespace}.rollout-generation": str(
+                    spec.rollout_generation
+                ),
+            }
+            if any(
+                spec.labels.get(key) != expected
+                for key, expected in expected_rollout_labels.items()
+            ):
+                raise RuntimeError(
+                    "managed endpoint container labels do not match replacement identity"
+                )
             container = client.containers.run(
                 spec.image_id,
                 name=spec.name,
                 detach=True,
-                environment=dict(spec.environment),
+                environment=spec.managed_worker_environment(),
                 labels=dict(spec.labels),
                 network=spec.network_id,
                 restart_policy={"Name": "unless-stopped"},
