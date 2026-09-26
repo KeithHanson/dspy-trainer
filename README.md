@@ -794,10 +794,11 @@ Operator APIs:
 - `GET /revision-image-builds` lists builds; filter with `module_id`, `revision_id`, or `status`, and paginate with `limit`/`offset`.
 - `GET /revision-image-builds/{build_id}` returns build status and provenance without the build log.
 - `GET /revision-image-builds/{build_id}/logs?offset=0&limit=16384` returns a bounded byte window of retained logs.
+- `POST /modules/{module_id}/revision-image-builds` queues a generation for the module’s exact current validated, synced revision, or returns that revision’s existing queued/building generation.
 - `POST /revision-image-builds/{build_id}/retry` queues a new generation for an eligible failed or ready build.
 - `POST /revision-image-builds/rebuild-all` queues one current-base generation for every currently eligible revision.
 
-Retry and rebuild-all requests reject duplicate active work with a stable `409` `build_conflict`. A previously ready image remains available while a newer generation is queued, building, or failed.
+Retry and rebuild-all requests reject duplicate active work with a stable `409` `build_conflict`. A previously ready image remains available while a newer generation is queued, building, or failed. The Bundles page shows the current revision’s image status and a module-scoped Build action. Its live modal polls bounded status and sanitized retained output until terminal state; closing or switching modules cannot apply a late response. Image history shows the latest current-revision generation plus every queued/building generation by default, with older terminal builds available under **Show previous builds**.
 
 ## Resources
 

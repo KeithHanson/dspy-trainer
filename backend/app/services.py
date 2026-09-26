@@ -4340,6 +4340,15 @@ class AppServices:
             raise RuntimeError("revision image build coordinator is not configured")
         return self._revision_build_store
 
+    async def build_current_module_revision(self, module_id: str) -> dict[str, Any]:
+        build_id = await self._require_revision_build_store().enqueue_module_current(
+            module_id
+        )
+        build = await self.get_revision_image_build_status(build_id)
+        if build is None:
+            raise RuntimeError("queued revision image build was not persisted")
+        return build
+
     async def retry_revision_image_build(self, build_id: str) -> dict[str, Any]:
         queued_id = await self._require_revision_build_store().enqueue_retry(build_id)
         queued = await self.get_revision_image_build_status(queued_id)

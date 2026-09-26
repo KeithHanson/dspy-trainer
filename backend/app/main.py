@@ -113,7 +113,7 @@ def _revision_image_enqueue_error_response(
     if exc.build_id is not None:
         content["build_id"] = exc.build_id
     return JSONResponse(
-        status_code=404 if exc.code == "build_not_found" else 409,
+        status_code=404 if exc.code in {"build_not_found", "module_not_found"} else 409,
         content=content,
     )
 
@@ -535,6 +535,19 @@ async def list_module_revisions(module_id: str, request: Request):
     if current is None:
         return JSONResponse(status_code=404, content={"error": "module not found"})
     return await services.list_module_revisions(module_id)
+
+
+@app.post("/modules/{module_id}/revision-image-builds")
+async def build_current_module_revision(module_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    try:
+        return await services.build_current_module_revision(module_id)
+    except RevisionImageEnqueueError as exc:
+        return _revision_image_enqueue_error_response(exc)
+    except RuntimeError as exc:
+        return _revision_image_coordinator_unavailable_response(exc)
+
+
 @app.get("/revision-image-builds")
 async def list_revision_image_builds(
     request: Request,

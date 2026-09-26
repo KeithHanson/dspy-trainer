@@ -1126,6 +1126,10 @@ def test_revision_image_build_status_log_retry_and_rebuild_apis(monkeypatch):
         calls["retry"] = build_id
         return build
 
+    async def fake_module_build(self, module_id):
+        calls["module_build"] = module_id
+        return build
+
     async def fake_rebuild_all(self):
         return [build]
 
@@ -1133,6 +1137,7 @@ def test_revision_image_build_status_log_retry_and_rebuild_apis(monkeypatch):
     monkeypatch.setattr(main_mod.AppServices, "get_revision_image_build_status", fake_get)
     monkeypatch.setattr(main_mod.AppServices, "get_revision_image_build_logs", fake_logs)
     monkeypatch.setattr(main_mod.AppServices, "retry_revision_image_build", fake_retry)
+    monkeypatch.setattr(main_mod.AppServices, "build_current_module_revision", fake_module_build)
     monkeypatch.setattr(main_mod.AppServices, "rebuild_all_revision_images", fake_rebuild_all)
 
     with TestClient(main_mod.app) as client:
@@ -1140,6 +1145,7 @@ def test_revision_image_build_status_log_retry_and_rebuild_apis(monkeypatch):
         fetched = client.get("/revision-image-builds/build-1")
         logs = client.get("/revision-image-builds/build-1/logs", params={"offset": 4, "limit": 32})
         retried = client.post("/revision-image-builds/build-1/retry")
+        module_build = client.post("/modules/mod-1/revision-image-builds")
         rebuilt = client.post("/revision-image-builds/rebuild-all")
         missing = client.get("/revision-image-builds/missing")
 
@@ -1151,6 +1157,8 @@ def test_revision_image_build_status_log_retry_and_rebuild_apis(monkeypatch):
     assert calls["logs"] == {"build_id": "build-1", "offset": 4, "limit": 32}
     assert retried.json() == build
     assert calls["retry"] == "build-1"
+    assert module_build.json() == build
+    assert calls["module_build"] == "mod-1"
     assert rebuilt.json() == {"items": [build], "queued": 1}
     assert missing.status_code == 404
     assert missing.json()["code"] == "build_not_found"
@@ -1162,17 +1170,29 @@ def test_revision_image_operator_conflicts_are_stable(monkeypatch):
     async def fake_retry(self, build_id):
         raise RevisionImageEnqueueError("build_conflict", "retry already queued", build_id="existing-build")
 
+    async def fake_module_build(self, module_id):
+        raise RevisionImageEnqueueError(
+            "not_eligible", "module current revision must be synced and validated"
+        )
+
     async def fake_rebuild_all(self):
         raise RuntimeError("revision image build coordinator is not configured")
 
     monkeypatch.setattr(main_mod.AppServices, "retry_revision_image_build", fake_retry)
+    monkeypatch.setattr(main_mod.AppServices, "build_current_module_revision", fake_module_build)
     monkeypatch.setattr(main_mod.AppServices, "rebuild_all_revision_images", fake_rebuild_all)
 
     with TestClient(main_mod.app) as client:
         retry = client.post("/revision-image-builds/build-1/retry")
+        module_build = client.post("/modules/mod-1/revision-image-builds")
         rebuild = client.post("/revision-image-builds/rebuild-all")
 
     assert retry.status_code == 409
     assert retry.json() == {"error": "retry already queued", "code": "build_conflict", "build_id": "existing-build"}
+    assert module_build.status_code == 409
+    assert module_build.json() == {
+        "error": "module current revision must be synced and validated",
+        "code": "not_eligible",
+    }
     assert rebuild.status_code == 503
     assert rebuild.json()["code"] == "build_coordinator_unavailable"
