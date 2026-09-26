@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 import sys
 import tarfile
@@ -124,6 +125,53 @@ def _tar_members(payload: bytes) -> tuple[dict[str, tarfile.TarInfo], dict[str, 
             if extracted is not None:
                 contents[member.name] = extracted.read()
     return infos, contents
+
+
+def _run_generated_entrypoint(
+    tmp_path: Path, *, missing: str | None = None
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_python = fake_bin / "python"
+    fake_python.write_text(
+        '#!/bin/sh\n/usr/bin/env > "$2"\n',
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+
+    entrypoint = tmp_path / GENERATED_ENTRYPOINT_NAME
+    entrypoint.write_text(
+        builder_mod._generated_entrypoint(
+            build_id="build-entrypoint", revision_id="revision-entrypoint"
+        ),
+        encoding="utf-8",
+    )
+    entrypoint.chmod(0o755)
+    capture = tmp_path / "environment"
+    environment = {
+        "PATH": f"{fake_bin}:/usr/bin:/bin",
+        "HOME": str(tmp_path / "home"),
+        "LANG": "C.UTF-8",
+        "DSPY_TRAINER_ENDPOINT_ID": "endpoint-1",
+        "DSPY_TRAINER_WORKER_ID": "worker-1",
+        "DSPY_TRAINER_ENDPOINT_DEPLOYMENT_ID": "deployment-1",
+        "DSPY_TRAINER_ENDPOINT_ROLLOUT_GENERATION": "7",
+        "DSPY_TRAINER_ENDPOINT_SLOT": "3",
+        "DSPY_TRAINER_POSTGRES_DSN": "postgresql://postgres/db",
+        "DSPY_TRAINER_ENDPOINT_WORKER_MODE": "untrusted-mode",
+        "DSPY_TRAINER_DEPLOYER_IMAGE_REPOSITORY": "must-not-leak",
+        "GITHUB_PAT": "must-not-leak",
+    }
+    if missing is not None:
+        environment.pop(missing)
+    completed = subprocess.run(
+        [str(entrypoint), str(capture)],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return completed, capture
 
 
 class _FakeDocker:
@@ -253,6 +301,43 @@ def test_context_is_deterministic_complete_and_excludes_secrets_by_default(
     assert b"private-material" not in first.getvalue()
     assert b"host-runtime-secret" not in first.getvalue()
     assert b"declared fixture" in first.getvalue()
+
+
+def test_generated_entrypoint_forwards_rollout_identity_through_clean_environment(
+    tmp_path,
+):
+    completed, capture = _run_generated_entrypoint(tmp_path)
+
+    assert completed.returncode == 0, completed.stderr
+    forwarded = dict(
+        line.split("=", 1) for line in capture.read_text(encoding="utf-8").splitlines()
+    )
+    assert forwarded["DSPY_TRAINER_ENDPOINT_DEPLOYMENT_ID"] == "deployment-1"
+    assert forwarded["DSPY_TRAINER_ENDPOINT_ROLLOUT_GENERATION"] == "7"
+    assert forwarded["DSPY_TRAINER_ENDPOINT_SLOT"] == "3"
+    assert forwarded["DSPY_TRAINER_ENDPOINT_WORKER_MODE"] == "managed_image"
+    assert forwarded["DSPY_TRAINER_ENDPOINT_ID"] == "endpoint-1"
+    assert forwarded["DSPY_TRAINER_WORKER_ID"] == "worker-1"
+    assert forwarded["DSPY_TRAINER_BAKED_BUILD_ID"] == "build-entrypoint"
+    assert forwarded["DSPY_TRAINER_BAKED_REVISION_ID"] == "revision-entrypoint"
+    assert "DSPY_TRAINER_DEPLOYER_IMAGE_REPOSITORY" not in forwarded
+    assert "GITHUB_PAT" not in forwarded
+
+
+@pytest.mark.parametrize(
+    "missing",
+    (
+        "DSPY_TRAINER_ENDPOINT_DEPLOYMENT_ID",
+        "DSPY_TRAINER_ENDPOINT_ROLLOUT_GENERATION",
+        "DSPY_TRAINER_ENDPOINT_SLOT",
+    ),
+)
+def test_generated_entrypoint_requires_rollout_identity(tmp_path, missing):
+    completed, capture = _run_generated_entrypoint(tmp_path, missing=missing)
+
+    assert completed.returncode != 0
+    assert f"{missing} is required" in completed.stderr
+    assert not capture.exists()
 
 
 def test_all_dotenv_basenames_are_excluded_except_exact_metadata_override(tmp_path):

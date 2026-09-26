@@ -63,7 +63,7 @@ Managed endpoint worker note:
 Bundle runtime note:
 - Backend, general workers, and explicit `legacy_static` endpoint workers retain checkout-based dependency installation for migration compatibility.
 - Managed revision-image workers never resolve a checkout or install dependencies at startup or invocation time; source, system packages, and Python requirements are baked during image construction.
-- The generated managed entrypoint clears the inherited environment and passes only process basics, Postgres, Redis, MLflow, endpoint/worker/build/revision identity, queue settings, and the module-environment encryption key. Git, GitHub, deployer/build, and checkout configuration are not passed.
+- The generated managed entrypoint clears the inherited environment and passes only process basics, Postgres, Redis, MLflow, endpoint/worker/deployment/slot/rollout-generation/build/revision identity, queue settings, and the module-environment encryption key. Git, GitHub, deployer/build, and checkout configuration are not passed.
 
 Build the named backend image before the deployer image. On first startup the deployer preflight inspects the local name, records its immutable ID, and refuses to pull a substitute:
 
