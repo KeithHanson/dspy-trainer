@@ -196,6 +196,32 @@ class _Store:
         ]
 
 
+class _NameTrackingStore(_Store):
+    def __init__(self, intents):
+        super().__init__(intents)
+        self.names = {}
+
+    def _claim_name(self, container):
+        for container_id, name in self.names.items():
+            record = self.records.get(container_id)
+            if (
+                container_id != container.container_id
+                and name == container.name
+                and record is not None
+                and record.lifecycle != "removed"
+            ):
+                raise ValueError("active container name collision")
+        self.names[container.container_id] = container.name
+
+    async def observe_container(self, identity, container, *, now):
+        self._claim_name(container)
+        await super().observe_container(identity, container, now=now)
+
+    async def record_container_started(self, identity, container, *, now):
+        self._claim_name(container)
+        await super().record_container_started(identity, container, now=now)
+
+
 class _Docker:
     def __init__(self, clock):
         self.clock = clock
@@ -1137,6 +1163,66 @@ def test_endpoint_api_updates_managed_scale_and_tombstones_before_reconcile_dele
     assert docker.containers == []
     assert connection.deleted is True
     assert connection.finalized is True
+
+
+def test_removed_slot_name_is_reused_and_restart_converges():
+    async def scenario():
+        clock = _Clock()
+        store = _NameTrackingStore([_intent(phase="ready")])
+        docker = _Docker(clock)
+        historical_name = managed_container_name(
+            deployment_owner=OWNER,
+            endpoint_id="endpoint-1",
+            slot=0,
+            build_id="build-old",
+            rollout_generation=2,
+        )
+        store.records["container-old"] = ContainerRecord(
+            container_id="container-old",
+            lifecycle="ready",
+            started_at=NOW,
+        )
+        store.names["container-old"] = historical_name
+        foreign = replace(
+            _container("foreign"),
+            name=historical_name,
+            labels={f"{NAMESPACE}.owner": "someone-else"},
+        )
+        docker.containers.append(foreign)
+
+        reconciler = _reconciler(store, docker, clock)
+        assert await reconciler.run_cycle() is True
+        assert store.records["container-old"].lifecycle == "removed"
+        assert foreign in docker.containers
+
+        assert await reconciler.run_cycle() is True
+        replacement = next(
+            container
+            for container in docker.containers
+            if container.container_id != "foreign"
+        )
+        assert replacement.name == historical_name
+        assert replacement.container_id != "container-old"
+        store.registry[_ready(replacement).worker_id] = _ready(replacement)
+
+        restarted = _reconciler(store, docker, clock)
+        assert await restarted.run_cycle() is False
+        assert await restarted.run_cycle() is False
+        assert store.records["container-old"].lifecycle == "removed"
+        assert store.records[replacement.container_id].lifecycle != "removed"
+        assert (
+            sum(
+                record.lifecycle != "removed"
+                for container_id, record in store.records.items()
+                if store.names.get(container_id) == historical_name
+            )
+            == 1
+        )
+        assert sum(event[0] == "start" for event in docker.events) == 1
+        assert foreign in docker.containers
+        assert ("stop", "foreign") not in docker.events
+
+    asyncio.run(scenario())
 
 
 def _missing_container_restart_state():

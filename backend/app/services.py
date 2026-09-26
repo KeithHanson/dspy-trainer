@@ -496,6 +496,45 @@ def _normalize_budget(value: Any, *, default: str = "medium") -> str:
     raise ValueError("budget must be one of: light, medium, heavy")
 
 
+async def _migrate_managed_container_name_uniqueness(conn: Any) -> None:
+    await conn.execute(
+        """
+        do $$
+        declare
+          legacy_constraint text;
+        begin
+          for legacy_constraint in
+            select conname
+            from pg_constraint
+            where conrelid = 'managed_endpoint_containers'::regclass
+              and contype = 'u'
+              and conkey = array[
+                (
+                  select attnum
+                  from pg_attribute
+                  where attrelid = 'managed_endpoint_containers'::regclass
+                    and attname = 'container_name'
+                    and not attisdropped
+                )
+              ]
+          loop
+            execute format(
+              'alter table managed_endpoint_containers drop constraint %I',
+              legacy_constraint
+            );
+          end loop;
+        end
+        $$;
+
+        drop index if exists managed_endpoint_containers_container_name_key;
+
+        create unique index if not exists uq_managed_endpoint_containers_active_name
+        on managed_endpoint_containers(container_name)
+        where lifecycle <> 'removed';
+        """
+    )
+
+
 class AppServices:
     def __init__(
         self,
@@ -2267,7 +2306,7 @@ class AppServices:
             await conn.execute(f"""
                 create table if not exists managed_endpoint_containers (
                   container_id text primary key,
-                  container_name text not null unique,
+                  container_name text not null,
                   endpoint_id text not null references bundle_endpoints(id) on delete restrict,
                   deployment_id text not null,
                   build_id text not null,
@@ -2303,6 +2342,7 @@ class AppServices:
             await conn.execute(
                 "alter table managed_endpoint_containers add column if not exists container_log text not null default '';"
             )
+            await _migrate_managed_container_name_uniqueness(conn)
             await conn.execute(
                 """
                 create index if not exists idx_managed_endpoint_containers_endpoint_lifecycle
