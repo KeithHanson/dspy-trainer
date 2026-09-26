@@ -447,6 +447,43 @@ def test_active_drain_waits_then_records_force_stop_timeout():
     asyncio.run(scenario())
 
 
+def test_claimed_drain_stops_normally_after_worker_completion():
+    async def scenario():
+        clock = _Clock()
+        store = _Store([_intent()])
+        docker = _Docker(clock)
+        old = _container("old-0")
+        new = _container(
+            "new-0",
+            build="build-new",
+            revision="revision-new",
+            image="sha256:new",
+            generation=2,
+        )
+        docker.containers.extend([old, new])
+        store.registry[_ready(new).worker_id] = _ready(new)
+        old_snapshot = replace(_ready(old), status="running", task_id="task-1")
+        store.registry[old_snapshot.worker_id] = old_snapshot
+        reconciler = _reconciler(store, docker, clock, drain=10)
+
+        assert await reconciler.run_cycle() is True
+        assert ("completed", "deployment-1", False) in store.events
+        assert await reconciler.run_cycle() is True
+        assert old in docker.containers
+        assert ("blocked", old_snapshot.worker_id) in store.events
+
+        store.registry[old_snapshot.worker_id] = replace(
+            store.registry[old_snapshot.worker_id], status="listening", task_id=None
+        )
+        assert await reconciler.run_cycle() is True
+        assert old not in docker.containers
+        removed = next(event for event in store.events if event[0] == "removed")
+        assert removed[2] is False
+        assert docker.events[-1] == ("stop", "old-0")
+
+    asyncio.run(scenario())
+
+
 def test_partial_rollout_readiness_failure_restores_missing_old_slots():
     async def scenario():
         clock = _Clock()

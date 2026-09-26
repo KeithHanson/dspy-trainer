@@ -1479,6 +1479,7 @@ class AppServices:
         runtime_metadata: dict[str, Any],
         *,
         worker_id: str | None = None,
+        require_claim_eligible: bool = False,
     ) -> dict[str, Any]:
         required = {
             "endpoint_id": _clean_optional_text(runtime_metadata.get("endpoint_id")),
@@ -1576,12 +1577,13 @@ class AppServices:
             async with self.postgres_pool.acquire() as conn:
                 observed = await conn.fetchrow(
                     """
-                    select c.container_id
+                    select c.container_id, c.lifecycle
                     from managed_endpoint_containers c
                     join endpoint_deployments d on d.id = c.deployment_id
                     where c.deployment_id = $1 and c.endpoint_id = $2 and c.slot = $3
                       and c.worker_id = $4 and c.build_id = $5 and c.revision_id = $6
-                      and d.rollout_generation = $7 and c.lifecycle = 'ready'
+                      and d.rollout_generation = $7
+                      and (c.lifecycle = 'ready' or ($8::boolean and c.lifecycle = 'draining'))
                     """,
                     exact_required["deployment_id"],
                     identity["endpoint_id"],
@@ -1590,6 +1592,7 @@ class AppServices:
                     identity["build_id"],
                     identity["revision_id"],
                     rollout_generation,
+                    not require_claim_eligible,
                 )
             if observed is None:
                 raise ValueError(
@@ -1601,6 +1604,7 @@ class AppServices:
                     "deployment_id": exact_required["deployment_id"],
                     "slot": slot,
                     "rollout_generation": rollout_generation,
+                    "container_lifecycle": str(observed["lifecycle"]),
                 }
             )
         return identity
@@ -1638,6 +1642,7 @@ class AppServices:
             managed_identity = await self.validate_managed_endpoint_worker_identity(
                 normalized_runtime_metadata,
                 worker_id=effective_worker_id,
+                require_claim_eligible=True,
             )
             assigned_endpoint_id = managed_identity["endpoint_id"]
         elif execution_mode != "legacy_static":
@@ -1752,11 +1757,19 @@ class AppServices:
             if not requested_runtime_instance_id or requested_runtime_instance_id != existing_runtime_instance_id:
                 return None
             merged_runtime_metadata = _merge_runtime_metadata(existing_row["runtime_metadata"], runtime_metadata or {})
+            requested_status = str(status or "idle")
+            requested_task_id = _clean_optional_text(task_id)
+            existing_task_id = _clean_optional_text(existing_row["task_id"])
             if str(merged_runtime_metadata.get("execution_mode") or "") == "managed_image":
-                await self.validate_managed_endpoint_worker_identity(
+                managed_identity = await self.validate_managed_endpoint_worker_identity(
                     merged_runtime_metadata,
                     worker_id=str(worker_id),
                 )
+                if managed_identity.get("container_lifecycle") == "draining" and (
+                    (requested_task_id is not None and requested_task_id != existing_task_id)
+                    or (requested_task_id is not None and requested_status != "running")
+                ):
+                    return None
             row = await conn.fetchrow(
                 """
                 update endpoint_worker_registrations
@@ -1770,19 +1783,21 @@ class AppServices:
                     last_error = $10,
                     updated_at = $5
                 where worker_id = $1 and runtime_instance_id = $2
+                  and task_id is not distinct from $11
                 returning worker_id, runtime_instance_id, status, assigned_endpoint_id, task_id, last_seen_at,
                           heartbeat_expires_at, hostname, pid, runtime_metadata, last_error, created_at, updated_at
                 """,
                 str(worker_id),
                 requested_runtime_instance_id,
-                str(status or "idle"),
-                _clean_optional_text(task_id),
+                requested_status,
+                requested_task_id,
                 heartbeat_time,
                 self._endpoint_worker_heartbeat_expires_at(heartbeat_time),
                 _clean_optional_text(hostname),
                 pid,
                 json.dumps(merged_runtime_metadata),
                 _clean_optional_text(last_error),
+                existing_task_id,
             )
         if row is None:
             return None
@@ -5290,6 +5305,17 @@ class AppServices:
                     runtime_identity,
                     worker_id=worker_id,
                 )
+                if (
+                    identity.get("container_lifecycle") == "draining"
+                    and (
+                        str(registration.get("status") or "") != "running"
+                        or _clean_optional_text(registration.get("task_id"))
+                        != invocation_id
+                    )
+                ):
+                    raise RuntimeError(
+                        "draining managed endpoint worker may only finish its claimed invocation"
+                    )
                 resolved_bundle_path = identity["bundle_path"]
                 resolved_revision_id = identity["revision_id"]
                 resolved_build_id = identity["build_id"]

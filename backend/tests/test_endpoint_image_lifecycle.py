@@ -940,8 +940,9 @@ def test_managed_registration_requires_exact_observed_deployment_slot_identity()
                 "build-1",
                 "revision-1",
                 3,
+                True,
             )
-            return {"container_id": "container-1"} if params == expected else None
+            return {"container_id": "container-1", "lifecycle": "ready"} if params == expected else None
 
     services = AppServices(SimpleNamespace())
     services.postgres_pool = _Pool(ObservedSlotConnection())
@@ -1001,11 +1002,25 @@ def test_managed_registration_requires_exact_observed_deployment_slot_identity()
                 stale, worker_id="worker-1"
             )
         )
-def test_blocked_container_cannot_reregister_or_regain_claim_eligibility():
+def test_claimed_draining_worker_heartbeats_completes_but_cannot_reclaim_or_restart(monkeypatch):
     class ClaimEligibilityConnection:
         def __init__(self):
             self.lifecycle = "ready"
-            self.assigned_endpoint_id = "endpoint-1"
+            self.registration = {
+                "worker_id": "worker-1",
+                "runtime_instance_id": "runtime-original",
+                "status": "running",
+                "assigned_endpoint_id": "endpoint-1",
+                "task_id": "invocation-1",
+                "last_seen_at": NOW,
+                "heartbeat_expires_at": NOW.replace(year=2100),
+                "hostname": "host-1",
+                "pid": 101,
+                "runtime_metadata": dict(metadata),
+                "last_error": None,
+                "created_at": NOW,
+                "updated_at": NOW,
+            }
 
         def is_closed(self):
             return False
@@ -1013,12 +1028,46 @@ def test_blocked_container_cannot_reregister_or_regain_claim_eligibility():
         async def fetchrow(self, query, *params):
             normalized = " ".join(query.strip().lower().split())
             if normalized.startswith("select c.container_id"):
-                assert "c.lifecycle = 'ready'" in normalized
+                allow_draining = bool(params[7])
+                eligible = self.lifecycle == "ready" or (
+                    allow_draining and self.lifecycle == "draining"
+                )
                 return (
-                    {"container_id": "container-1"}
-                    if self.lifecycle == "ready"
+                    {"container_id": "container-1", "lifecycle": self.lifecycle}
+                    if eligible
                     else None
                 )
+            if normalized.startswith(
+                "select worker_id, runtime_instance_id, status, assigned_endpoint_id"
+            ):
+                return (
+                    dict(self.registration)
+                    if params[0] == self.registration["worker_id"]
+                    else None
+                )
+            if normalized.startswith("update endpoint_worker_registrations set status = $3"):
+                if (
+                    params[0] != self.registration["worker_id"]
+                    or params[1] != self.registration["runtime_instance_id"]
+                    or params[10] != self.registration["task_id"]
+                ):
+                    return None
+                self.registration.update(
+                    status=params[2],
+                    task_id=params[3],
+                    last_seen_at=params[4],
+                    heartbeat_expires_at=params[5],
+                    hostname=params[6],
+                    pid=params[7],
+                    runtime_metadata=__import__("json").loads(params[8]),
+                    last_error=params[9],
+                    updated_at=params[4],
+                )
+                return dict(self.registration)
+            if normalized.startswith(
+                "update endpoint_worker_registrations set status = 'running'"
+            ):
+                return None
             raise AssertionError(f"unexpected fetchrow SQL: {normalized}")
 
         async def execute(self, query, *params):
@@ -1026,11 +1075,29 @@ def test_blocked_container_cannot_reregister_or_regain_claim_eligibility():
             assert normalized.startswith("with blocked as")
             assert params == ("worker-1",)
             self.lifecycle = "draining"
-            self.assigned_endpoint_id = None
+            self.registration["assigned_endpoint_id"] = None
             return "UPDATE 1"
 
+    metadata = {
+        "execution_mode": "managed_image",
+        "endpoint_id": "endpoint-1",
+        "worker_id": "worker-1",
+        "endpoint_deployment_id": "deployment-old",
+        "endpoint_slot": 0,
+        "endpoint_rollout_generation": 3,
+        "desired_build_id": "build-old",
+        "desired_revision_id": "revision-old",
+        "baked_build_id": "build-old",
+        "baked_revision_id": "revision-old",
+        "bundle_path": "/opt/dspy-bundle",
+    }
     connection = ClaimEligibilityConnection()
-    services = AppServices(SimpleNamespace(endpoint_worker_heartbeat_ttl_seconds=30))
+    services = AppServices(
+        SimpleNamespace(
+            endpoint_worker_heartbeat_ttl_seconds=30,
+            mlflow_tracking_uri="",
+        )
+    )
     services.postgres_pool = _Pool(connection)
 
     async def deployment(self, endpoint_id):
@@ -1059,31 +1126,136 @@ def test_blocked_container_cannot_reregister_or_regain_claim_eligibility():
 
     services.get_endpoint_deployment = MethodType(deployment, services)
     services.get_revision_image_build = MethodType(build, services)
-    metadata = {
-        "execution_mode": "managed_image",
-        "endpoint_id": "endpoint-1",
-        "worker_id": "worker-1",
-        "endpoint_deployment_id": "deployment-old",
-        "endpoint_slot": 0,
-        "endpoint_rollout_generation": 3,
-        "desired_build_id": "build-old",
-        "desired_revision_id": "revision-old",
-        "baked_build_id": "build-old",
-        "baked_revision_id": "revision-old",
-        "bundle_path": "/opt/dspy-bundle",
-    }
 
+    async def endpoint(endpoint_id):
+        return {
+            "id": endpoint_id,
+            "module_import_id": "module-old",
+            "lm_profile_id": None,
+            "name": "Endpoint",
+        }
+
+    invocation_events = []
+
+    async def runtime_environment(module_id):
+        assert module_id == "module-old"
+        return {"MODULE_SECRET": "old-secret"}
+
+    async def publish(invocation_id, event, payload):
+        invocation_events.append((invocation_id, event, payload))
+
+    services.get_bundle_endpoint = endpoint
+    services.get_module_runtime_environment = runtime_environment
+    services.publish_endpoint_invocation_event = publish
+
+    def invoke_bundle(bundle_path, input_payload, lm_profile, runtime_env):
+        assert bundle_path == "/opt/dspy-bundle"
+        assert runtime_env == {"MODULE_SECRET": "old-secret"}
+        return {"answer": input_payload["question"]}
+
+    def traced(operation, **kwargs):
+        del kwargs
+        return operation(), "trace-draining"
+
+    monkeypatch.setattr("app.executor.module_runner.invoke_bundle", invoke_bundle)
+    monkeypatch.setattr("app.services._run_endpoint_invocation_with_mlflow", traced)
     accepted = asyncio.run(
         services.validate_managed_endpoint_worker_identity(
-            metadata, worker_id="worker-1"
+            metadata, worker_id="worker-1", require_claim_eligible=True
         )
     )
-    assert accepted["build_id"] == "build-old"
+    assert accepted["container_lifecycle"] == "ready"
 
     store = _postgres_store(connection)
     asyncio.run(store.block_worker_claims("worker-1"))
     assert connection.lifecycle == "draining"
-    assert connection.assigned_endpoint_id is None
+    assert connection.registration["assigned_endpoint_id"] is None
+
+    heartbeat = asyncio.run(
+        services.heartbeat_endpoint_worker(
+            "worker-1",
+            runtime_instance_id="runtime-original",
+            status="running",
+            task_id="invocation-1",
+            runtime_metadata=metadata,
+            now=NOW.replace(day=2),
+        )
+    )
+    assert heartbeat is not None
+    assert heartbeat["task_id"] == "invocation-1"
+    assert heartbeat["assigned_endpoint_id"] is None
+
+    asyncio.run(
+        services.run_endpoint_invocation_job(
+            "invocation-1",
+            "endpoint-1",
+            {"question": "finish"},
+            "worker-1",
+            stream=False,
+            execution_mode="managed_image",
+            build_id="build-old",
+            revision_id="revision-old",
+            bundle_path="/opt/dspy-bundle",
+        )
+    )
+    assert invocation_events == [
+        ("invocation-1", "final", {"answer": "finish"})
+    ]
+
+
+    asyncio.run(
+        services.run_endpoint_invocation_job(
+            "invocation-2",
+            "endpoint-1",
+            {"question": "must not start"},
+            "worker-1",
+            stream=False,
+            execution_mode="managed_image",
+            build_id="build-old",
+            revision_id="revision-old",
+            bundle_path="/opt/dspy-bundle",
+        )
+    )
+    assert invocation_events[-1][0:2] == ("invocation-2", "error")
+    assert "only finish its claimed invocation" in invocation_events[-1][2]["error"]
+    changed_task = asyncio.run(
+        services.heartbeat_endpoint_worker(
+            "worker-1",
+            runtime_instance_id="runtime-original",
+            status="running",
+            task_id="invocation-2",
+            runtime_metadata=metadata,
+            now=NOW.replace(day=3),
+        )
+    )
+    assert changed_task is None
+    assert connection.registration["task_id"] == "invocation-1"
+
+    stale = asyncio.run(
+        services.heartbeat_endpoint_worker(
+            "worker-1",
+            runtime_instance_id="runtime-restarted",
+            status="running",
+            task_id="invocation-2",
+            runtime_metadata=metadata,
+            now=NOW.replace(day=3),
+        )
+    )
+    assert stale is None
+    assert connection.registration["task_id"] == "invocation-1"
+
+    reclaimed = asyncio.run(
+        services.claim_endpoint_worker_task(
+            worker_id="worker-1",
+            endpoint_id="endpoint-1",
+            task_id="invocation-2",
+            execution_mode="managed_image",
+            build_id="build-old",
+            revision_id="revision-old",
+            bundle_path="/opt/dspy-bundle",
+        )
+    )
+    assert reclaimed is False
 
     with pytest.raises(ValueError, match="not an observed deployment slot"):
         asyncio.run(
@@ -1092,10 +1264,24 @@ def test_blocked_container_cannot_reregister_or_regain_claim_eligibility():
                 runtime_instance_id="runtime-restarted",
                 status="listening",
                 runtime_metadata=metadata,
-                now=NOW,
+                now=NOW.replace(day=3),
             )
         )
-    assert connection.assigned_endpoint_id is None
+
+    completed = asyncio.run(
+        services.heartbeat_endpoint_worker(
+            "worker-1",
+            runtime_instance_id="runtime-original",
+            status="listening",
+            task_id=None,
+            runtime_metadata=metadata,
+            now=NOW.replace(day=4),
+        )
+    )
+    assert completed is not None
+    assert completed["task_id"] is None
+    assert completed["assigned_endpoint_id"] is None
+
 def test_successful_cutover_promotes_build_and_module_in_one_statement():
     class CutoverConnection:
         def __init__(self):

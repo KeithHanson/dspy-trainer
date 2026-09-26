@@ -46,6 +46,11 @@ class _RegistryConn:
             row = self.state["workers"].get(worker_id)
             if row is None or row["runtime_instance_id"] != params[1]:
                 return None
+            if (
+                "task_id is not distinct from $11" in normalized
+                and row["task_id"] != params[10]
+            ):
+                return None
             row.update(
                 {
                     "status": params[2],
@@ -633,7 +638,8 @@ def test_endpoint_worker_heartbeat_sql_uses_contiguous_parameters_without_assign
         assert "task_id = $4" in update_query
         assert "updated_at = $5" in update_query
         assert "$10" in update_query
-        assert "$11" not in update_query
+        assert "task_id is not distinct from $11" in update_query
+        assert "$12" not in update_query
 
     asyncio.run(scenario())
 
