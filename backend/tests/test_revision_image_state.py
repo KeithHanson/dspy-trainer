@@ -84,6 +84,14 @@ def _service_module():
     yield module
 
 
+class _NoopTransaction:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
 class _SchemaConnection:
     def __init__(self) -> None:
         now = datetime(2026, 9, 25, tzinfo=timezone.utc)
@@ -98,6 +106,9 @@ class _SchemaConnection:
         self.revisions = {"revision-existing": {"id": "revision-existing"}}
         self.deployments: dict[tuple[str, int], dict] = {}
         self.queries: list[str] = []
+
+    def transaction(self):
+        return _NoopTransaction()
 
     async def execute(self, query, *params):
         normalized = " ".join(query.strip().lower().split())

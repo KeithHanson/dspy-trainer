@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -49,41 +50,51 @@ def _container(container_id: str) -> ObservedContainer:
     )
 
 
-@asynccontextmanager
-async def _postgres_store():
+def _test_dsn() -> str:
     dsn = os.environ.get("DSPY_TRAINER_TEST_POSTGRES_DSN")
     if not dsn:
         pytest.skip(
             "set DSPY_TRAINER_TEST_POSTGRES_DSN to run PostgreSQL store regressions"
         )
+    return dsn
 
+
+async def _create_legacy_schema(connection, schema: str) -> None:
+    await connection.execute(f'create schema "{schema}"')
+    await connection.execute(f'set search_path to "{schema}"')
+    await connection.execute("""
+        create table managed_endpoint_containers (
+          container_id text primary key,
+          container_name text not null unique,
+          endpoint_id text not null,
+          deployment_id text not null,
+          build_id text not null,
+          revision_id text not null,
+          slot int not null,
+          worker_id text,
+          lifecycle text not null,
+          last_observed_at timestamptz,
+          started_at timestamptz,
+          stopped_at timestamptz,
+          drain_started_at timestamptz,
+          drain_timed_out boolean not null default false,
+          failure_reason text,
+          container_log text not null default '',
+          created_at timestamptz not null,
+          updated_at timestamptz not null
+        );
+        create index unrelated_managed_endpoint_id_idx
+        on managed_endpoint_containers(endpoint_id);
+        """)
+
+
+@asynccontextmanager
+async def _postgres_store():
+    dsn = _test_dsn()
     schema = f"managed_name_{uuid.uuid4().hex}"
     connection = await asyncpg.connect(dsn)
     try:
-        await connection.execute(f'create schema "{schema}"')
-        await connection.execute(f'set search_path to "{schema}"')
-        await connection.execute("""
-            create table managed_endpoint_containers (
-              container_id text primary key,
-              container_name text not null unique,
-              endpoint_id text not null,
-              deployment_id text not null,
-              build_id text not null,
-              revision_id text not null,
-              slot int not null,
-              worker_id text,
-              lifecycle text not null,
-              last_observed_at timestamptz,
-              started_at timestamptz,
-              stopped_at timestamptz,
-              drain_started_at timestamptz,
-              drain_timed_out boolean not null default false,
-              failure_reason text,
-              container_log text not null default '',
-              created_at timestamptz not null,
-              updated_at timestamptz not null
-            )
-            """)
+        await _create_legacy_schema(connection, schema)
         await _migrate_managed_container_name_uniqueness(connection)
         await _migrate_managed_container_name_uniqueness(connection)
 
@@ -197,3 +208,97 @@ async def test_store_rejects_simultaneous_active_name_collision():
             )
             == 1
         )
+
+
+class _PausedMigrationConnection:
+    def __init__(
+        self, connection, lock_acquired: asyncio.Event, release: asyncio.Event
+    ):
+        self._connection = connection
+        self._lock_acquired = lock_acquired
+        self._release = release
+
+    def transaction(self):
+        return self._connection.transaction()
+
+    async def execute(self, query: str, *args):
+        result = await self._connection.execute(query, *args)
+        if "pg_advisory_xact_lock" in query:
+            self._lock_acquired.set()
+            await self._release.wait()
+        return result
+
+
+@pytest.mark.asyncio
+async def test_simultaneous_migrations_serialize_and_preserve_unrelated_index():
+    dsn = _test_dsn()
+    schema = f"managed_name_concurrent_{uuid.uuid4().hex}"
+    first = await asyncpg.connect(dsn)
+    second = await asyncpg.connect(dsn)
+    lock_acquired = asyncio.Event()
+    release = asyncio.Event()
+    first_task = None
+    second_task = None
+
+    try:
+        await _create_legacy_schema(first, schema)
+        await second.execute(f'set search_path to "{schema}"')
+        paused_first = _PausedMigrationConnection(first, lock_acquired, release)
+
+        first_task = asyncio.create_task(
+            _migrate_managed_container_name_uniqueness(paused_first)
+        )
+        await asyncio.wait_for(lock_acquired.wait(), timeout=5)
+        second_task = asyncio.create_task(
+            _migrate_managed_container_name_uniqueness(second)
+        )
+        await asyncio.sleep(0.1)
+        assert not second_task.done(), "second migration did not wait for serialization"
+
+        release.set()
+        await asyncio.wait_for(asyncio.gather(first_task, second_task), timeout=5)
+        first_task = None
+        second_task = None
+
+        indexes = await first.fetch("""
+            select cls.relname,
+                   idx.indisunique,
+                   pg_get_expr(idx.indpred, idx.indrelid) as predicate
+            from pg_index idx
+            join pg_class cls on cls.oid = idx.indexrelid
+            where idx.indrelid = 'managed_endpoint_containers'::regclass
+            order by cls.relname
+            """)
+        intended = [
+            row
+            for row in indexes
+            if row["relname"] == "uq_managed_endpoint_containers_active_name"
+        ]
+        assert len(intended) == 1
+        assert intended[0]["indisunique"] is True
+        assert "lifecycle" in intended[0]["predicate"]
+        assert "removed" in intended[0]["predicate"]
+        assert all(
+            row["relname"] != "managed_endpoint_containers_container_name_key"
+            for row in indexes
+        )
+        assert any(
+            row["relname"] == "unrelated_managed_endpoint_id_idx" for row in indexes
+        )
+        assert await first.fetchval("""
+                select count(*)
+                from pg_constraint
+                where conrelid = 'managed_endpoint_containers'::regclass
+                  and conname = 'managed_endpoint_containers_container_name_key'
+                """) == 0
+    finally:
+        release.set()
+        for task in (first_task, second_task):
+            if task is not None and not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+        await second.close()
+        await first.execute("set search_path to public")
+        await first.execute(f'drop schema if exists "{schema}" cascade')
+        await first.close()

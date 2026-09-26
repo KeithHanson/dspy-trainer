@@ -10,10 +10,21 @@ from app.config import Settings
 from app.services import AppServices
 
 
+class _NoopTransaction:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
 class _RegistryConn:
     def __init__(self, state):
         self.state = state
         self.queries: list[str] = []
+
+    def transaction(self):
+        return _NoopTransaction()
 
     async def fetchrow(self, query, *params):
         self.queries.append(query)

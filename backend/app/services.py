@@ -497,42 +497,26 @@ def _normalize_budget(value: Any, *, default: str = "medium") -> str:
 
 
 async def _migrate_managed_container_name_uniqueness(conn: Any) -> None:
-    await conn.execute(
-        """
-        do $$
-        declare
-          legacy_constraint text;
-        begin
-          for legacy_constraint in
-            select conname
-            from pg_constraint
-            where conrelid = 'managed_endpoint_containers'::regclass
-              and contype = 'u'
-              and conkey = array[
-                (
-                  select attnum
-                  from pg_attribute
-                  where attrelid = 'managed_endpoint_containers'::regclass
-                    and attname = 'container_name'
-                    and not attisdropped
-                )
-              ]
-          loop
-            execute format(
-              'alter table managed_endpoint_containers drop constraint %I',
-              legacy_constraint
-            );
-          end loop;
-        end
-        $$;
-
-        drop index if exists managed_endpoint_containers_container_name_key;
-
-        create unique index if not exists uq_managed_endpoint_containers_active_name
-        on managed_endpoint_containers(container_name)
-        where lifecycle <> 'removed';
-        """
-    )
+    async with conn.transaction():
+        await conn.execute(
+            "select pg_advisory_xact_lock(hashtextextended('dspy-trainer-managed-container-name-migration', 0))"
+        )
+        await conn.execute(
+            """
+            alter table managed_endpoint_containers
+            drop constraint if exists managed_endpoint_containers_container_name_key
+            """
+        )
+        await conn.execute(
+            "drop index if exists managed_endpoint_containers_container_name_key"
+        )
+        await conn.execute(
+            """
+            create unique index if not exists uq_managed_endpoint_containers_active_name
+            on managed_endpoint_containers(container_name)
+            where lifecycle <> 'removed'
+            """
+        )
 
 
 class AppServices:
