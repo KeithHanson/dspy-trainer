@@ -63,20 +63,21 @@ function buildStreamCurlCommand(apiBase, endpointId, apiKey) {
 
 function EndpointWorkerStatusPill({ status }) {
   const normalized = String(status || "").toLowerCase();
-  const toneClass = normalized === "listening" || normalized === "idle"
+  const toneClass = normalized === "listening"
     ? "runs-status-pill-pass"
     : normalized === "failed"
       ? "runs-status-pill-fail"
       : normalized === "running" || normalized === "preparing"
         ? "runs-status-pill-run"
         : "runs-status-pill-neutral";
-  return <span className={`plans-status ${toneClass}`}>{status || "unknown"}</span>;
+  const label = normalized === "idle" ? "unassigned" : (status || "unknown");
+  return <span className={`plans-status ${toneClass}`}>{label}</span>;
 }
 
 function describeEndpointWorkerState(status, taskId, endpointId, stateSummary) {
   if (stateSummary) return stateSummary;
   if (status === "listening") return endpointId ? "Ready for assigned endpoint traffic" : "Ready";
-  if (status === "idle") return "Waiting for an endpoint assignment";
+  if (status === "idle") return "No endpoint assignment";
   if (status === "preparing") return "Installing bundle dependencies";
   if (status === "stale") return "Heartbeat expired";
   if (status === "running") return taskId ? "Processing endpoint invocation" : "Busy";
@@ -100,17 +101,24 @@ function formatWorkerLastSeen(value) {
 }
 
 function EndpointWorkersSection({ endpointWorkers, endpoints }) {
+  const [showInactiveWorkers, setShowInactiveWorkers] = useState(false);
   const workersPayload = endpointWorkers && typeof endpointWorkers === "object" ? endpointWorkers : {};
   const workers = Array.isArray(workersPayload.items) ? workersPayload.items : [];
-  const totalWorkers = Number(workersPayload.total_workers ?? workers.length);
-  const readyWorkers = Number(workersPayload.ready_workers ?? workers.filter((worker) => worker?.deploy_state === "ready").length);
-  const liveWorkers = Number(workersPayload.live_workers ?? workers.filter((worker) => worker?.is_live).length);
-  const staleWorkers = Number(workersPayload.stale_workers ?? workers.filter((worker) => !worker?.is_live).length);
-  const assignedWorkers = Number(workersPayload.assigned_workers ?? workers.filter((worker) => worker?.assigned_endpoint_id).length);
-  const unassignedWorkers = Number(workersPayload.unassigned_workers ?? workers.filter((worker) => !worker?.assigned_endpoint_id).length);
-  const preparingWorkers = Number(workersPayload.warming_workers ?? workers.filter((worker) => worker?.status === "preparing").length);
-  const runningWorkers = Number(workersPayload.running_workers ?? workers.filter((worker) => worker?.status === "running").length);
-  const failedWorkers = Number(workersPayload.failed_workers ?? workers.filter((worker) => worker?.status === "failed").length);
+  const isInactiveWorker = (worker) => {
+    const status = String(worker?.status || "").toLowerCase();
+    const assignedEndpointId = worker?.assigned_endpoint_id || worker?.endpoint_id;
+    return status === "stale" || status === "idle" || worker?.is_live === false || !assignedEndpointId;
+  };
+  const inactiveWorkers = workers.filter(isInactiveWorker);
+  const inactiveWorkerIds = new Set(inactiveWorkers.map((worker) => worker.worker_id));
+  const activeWorkers = workers.filter((worker) => !inactiveWorkerIds.has(worker.worker_id));
+  const visibleWorkers = showInactiveWorkers ? workers : activeWorkers;
+  const readyWorkers = activeWorkers.filter((worker) => worker?.deploy_state === "ready").length;
+  const staleWorkers = workers.filter((worker) => String(worker?.status || "").toLowerCase() === "stale" || worker?.is_live === false).length;
+  const unassignedWorkers = Math.max(0, inactiveWorkers.length - staleWorkers);
+  const preparingWorkers = activeWorkers.filter((worker) => worker?.status === "preparing").length;
+  const runningWorkers = activeWorkers.filter((worker) => worker?.status === "running").length;
+  const failedWorkers = activeWorkers.filter((worker) => worker?.status === "failed").length;
   const endpointNameById = new Map((Array.isArray(endpoints) ? endpoints : []).map((endpoint) => [endpoint.id, endpoint.name || endpoint.id]));
 
   return (
@@ -119,22 +127,29 @@ function EndpointWorkersSection({ endpointWorkers, endpoints }) {
         <div>
           <h3 className="t-h2" style={{ marginBottom: 6 }}>Endpoint workers</h3>
           <p className="muted t-sm">
-            {readyWorkers} ready of {totalWorkers} total
-            {liveWorkers || staleWorkers ? ` · ${liveWorkers} live · ${staleWorkers} stale` : ""}
-            {assignedWorkers || unassignedWorkers ? ` · ${assignedWorkers} assigned · ${unassignedWorkers} unassigned` : ""}
+            {readyWorkers} ready of {activeWorkers.length} active
+            {staleWorkers ? ` · ${staleWorkers} stale ${showInactiveWorkers ? "shown" : "hidden"}` : ""}
+            {unassignedWorkers ? ` · ${unassignedWorkers} unassigned ${showInactiveWorkers ? "shown" : "hidden"}` : ""}
             {runningWorkers ? ` · ${runningWorkers} running` : ""}
             {preparingWorkers ? ` · ${preparingWorkers} warming` : ""}
             {failedWorkers ? ` · ${failedWorkers} failed` : ""}
           </p>
         </div>
+        {inactiveWorkers.length ? (
+          <Button size="sm" onClick={() => setShowInactiveWorkers((shown) => !shown)} aria-expanded={showInactiveWorkers}>
+            {showInactiveWorkers ? "Hide inactive workers" : `Show inactive workers (${inactiveWorkers.length})`}
+          </Button>
+        ) : null}
       </div>
       {!workers.length ? (
         <div className="dashboard-zero">No endpoint workers registered yet.</div>
+      ) : !visibleWorkers.length ? (
+        <div className="dashboard-zero">No active endpoint workers.</div>
       ) : (
         <div className="runs-workers-grid">
-          {workers.map((worker) => {
+          {visibleWorkers.map((worker) => {
             const assignedEndpointId = worker.assigned_endpoint_id || worker.endpoint_id || null;
-            const endpointLabel = assignedEndpointId ? (endpointNameById.get(assignedEndpointId) || assignedEndpointId) : "Unassigned";
+            const endpointLabel = assignedEndpointId ? (endpointNameById.get(assignedEndpointId) || assignedEndpointId) : "No endpoint";
             return (
               <article key={worker.worker_id} className="runs-worker-card">
                 <div className="row between" style={{ gap: 10, alignItems: "center" }}>
@@ -151,7 +166,7 @@ function EndpointWorkersSection({ endpointWorkers, endpoints }) {
                   </div>
                   <div>
                     <dt>Task</dt>
-                    <dd className="mono">{worker.task_id || "Idle"}</dd>
+                    <dd className="mono">{worker.task_id || "None"}</dd>
                   </div>
                   <div>
                     <dt>State</dt>
@@ -175,7 +190,7 @@ function EndpointWorkersSection({ endpointWorkers, endpoints }) {
                   </div>
                   <div>
                     <dt>Assignment</dt>
-                    <dd>{assignedEndpointId ? "Assigned" : "Unassigned"}</dd>
+                    <dd>{assignedEndpointId ? "Assigned" : "None"}</dd>
                   </div>
                 </dl>
               </article>
@@ -247,6 +262,7 @@ export function EndpointsPage() {
         throw new Error(await readApiError(response, `Could not delete endpoint (${response.status})`));
       }
       setEndpoints((current) => current.filter((endpoint) => endpoint.id !== endpointId));
+            await loadEndpointWorkers();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not delete endpoint");
     } finally {

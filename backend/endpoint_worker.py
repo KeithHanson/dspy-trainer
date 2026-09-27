@@ -603,12 +603,16 @@ async def run_endpoint_worker() -> None:
     await services.connect()
     explicit_worker_id = str(os.getenv("DSPY_TRAINER_WORKER_ID") or "").strip() or None
     runtime_identity = _build_runtime_identity(explicit_worker_id=explicit_worker_id)
+    managed_worker = (
+        str((runtime_identity.get("boot_identity") or {}).get("execution_mode") or "")
+        == "managed_image"
+    )
     worker_id = await _heartbeat(
         services,
         resolve_endpoint_worker_id(
             explicit_worker_id, hostname=socket.gethostname(), pid=os.getpid()
         ),
-        "idle",
+        "preparing" if managed_worker else "idle",
         runtime_identity=runtime_identity,
         registration=True,
     )
@@ -627,6 +631,12 @@ async def run_endpoint_worker() -> None:
             )
             if not endpoint_id:
                 warmed_target = None
+                if managed_worker:
+                    logger.info(
+                        "Managed endpoint worker assignment removed; stopping worker_id=%s",
+                        worker_id,
+                    )
+                    return
                 await _heartbeat(
                     services, worker_id, "idle", runtime_identity=runtime_identity
                 )

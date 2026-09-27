@@ -1400,7 +1400,11 @@ class AppServices:
     ) -> dict[str, Any]:
         as_of = now or datetime.now(timezone.utc)
         heartbeat_expires_at = row["heartbeat_expires_at"]
-        is_stale = heartbeat_expires_at is None or heartbeat_expires_at <= as_of
+        is_stale = (
+            str(row["status"] or "").lower() == "stale"
+            or heartbeat_expires_at is None
+            or heartbeat_expires_at <= as_of
+        )
         status = "stale" if is_stale else str(row["status"] or "unknown")
         assigned_endpoint_id = _clean_optional_text(row["assigned_endpoint_id"])
         runtime_metadata = _coerce_runtime_metadata(row["runtime_metadata"])
@@ -1472,7 +1476,7 @@ class AppServices:
         ready_workers = sum(
             1
             for item in workers
-            if item["is_live"] and item.get("deploy_state") in {"ready", "unassigned"}
+            if item["is_live"] and item.get("deploy_state") == "ready"
         )
         warming_workers = sum(
             1
@@ -1787,6 +1791,8 @@ class AppServices:
                 elif expected_current_task_id != requested_task_id:
                     return None
             if str(merged_runtime_metadata.get("execution_mode") or "") == "managed_image":
+                if _clean_optional_text(existing_row["status"]) == "stale":
+                    return None
                 await self.validate_managed_endpoint_worker_identity(
                     merged_runtime_metadata,
                     worker_id=str(worker_id),
@@ -4866,8 +4872,12 @@ class AppServices:
                     await conn.execute(
                         """
                         update endpoint_worker_registrations
-                        set assigned_endpoint_id = null, updated_at = $2
+                        set status = 'stale', assigned_endpoint_id = null,
+                            heartbeat_expires_at = $2,
+                            last_error = coalesce(last_error, 'endpoint deletion requested'),
+                            updated_at = $2
                         where assigned_endpoint_id = $1
+                           or runtime_metadata->>'endpoint_id' = $1
                         """,
                         endpoint_id,
                         now,
@@ -5100,6 +5110,7 @@ class AppServices:
             worker
             for worker in workers
             if worker.get("execution_mode") == "legacy_static"
+            and bool(worker.get("is_live"))
         ]
         desired_assignments: list[str] = []
         for endpoint in legacy_endpoints:

@@ -889,6 +889,7 @@ class _EndpointApiConnection:
         self.tombstoned = False
         self.deleted = False
         self.worker_claims_blocked = False
+        self.workers_marked_stale = False
         self.finalized = False
         self.prune_candidate = None
         self.pruned = False
@@ -1062,6 +1063,7 @@ class _EndpointApiConnection:
             return "UPDATE 1"
         if normalized.startswith("update endpoint_worker_registrations"):
             self.worker_claims_blocked = True
+            self.workers_marked_stale = "set status = 'stale'" in normalized
             return "UPDATE 1"
         if normalized.startswith("delete from managed_endpoint_containers"):
             self.container_records.clear()
@@ -1151,6 +1153,7 @@ def test_endpoint_api_updates_managed_scale_and_tombstones_before_reconcile_dele
     assert connection.deleted is False
     assert connection.deployment.phase == "draining"
     assert connection.worker_claims_blocked is True
+    assert connection.workers_marked_stale is True
 
     async def reconcile_deleted_endpoint():
         for _ in range(8):

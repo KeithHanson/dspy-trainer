@@ -521,6 +521,66 @@ def test_endpoint_worker_registry_register_heartbeat_and_stale_transition():
 
     asyncio.run(scenario())
 
+def test_explicitly_stopped_worker_is_stale_before_heartbeat_expiry():
+    async def scenario() -> None:
+        services = _make_services()
+        now = datetime(2099, 1, 1, tzinfo=timezone.utc)
+        await services.register_endpoint_worker(
+            worker_id="endpoint-worker-stopped",
+            runtime_instance_id="runtime-stopped",
+            status="listening",
+            assigned_endpoint_id="endpoint-1",
+            runtime_metadata={
+                "endpoint_id": "endpoint-1",
+                "execution_mode": "legacy_static",
+                "desired_revision_id": "revision-1",
+                "warmed_revision_id": "revision-1",
+            },
+            now=now,
+        )
+        services.postgres_pool.state["workers"]["endpoint-worker-stopped"]["status"] = "stale"
+
+        payload = await services.list_endpoint_workers(now=now + timedelta(seconds=1))
+
+        assert payload["items"][0]["status"] == "stale"
+        assert payload["items"][0]["is_stale"] is True
+        assert payload["items"][0]["is_live"] is False
+        assert payload["stale_workers"] == 1
+        assert payload["ready_workers"] == 0
+
+    asyncio.run(scenario())
+
+
+def test_stale_managed_worker_cannot_heartbeat_after_endpoint_removal():
+    async def scenario() -> None:
+        services = _make_services()
+        now = datetime(2099, 1, 1, tzinfo=timezone.utc)
+        await services.register_endpoint_worker(
+            worker_id="managed-worker-removed",
+            runtime_instance_id="runtime-managed",
+            status="listening",
+            assigned_endpoint_id="endpoint-1",
+            runtime_metadata={"execution_mode": "legacy_static"},
+            now=now,
+        )
+        registration = services.postgres_pool.state["workers"]["managed-worker-removed"]
+        registration["status"] = "stale"
+        registration["assigned_endpoint_id"] = None
+        registration["runtime_metadata"] = {"execution_mode": "managed_image"}
+
+        heartbeat = await services.heartbeat_endpoint_worker(
+            "managed-worker-removed",
+            runtime_instance_id="runtime-managed",
+            status="idle",
+            now=now + timedelta(seconds=1),
+        )
+
+        assert heartbeat is None
+        assert registration["status"] == "stale"
+
+    asyncio.run(scenario())
+
+
 def test_task_cas_rejects_late_same_runtime_heartbeats_after_next_claim():
     async def scenario() -> None:
         services = _make_services()
@@ -981,10 +1041,10 @@ def test_list_endpoint_workers_registry_summary_excludes_listening_revision_mism
 
         assert payload["total_workers"] == 2
         assert payload["reported_workers"] == 2
-        assert payload["available_workers"] == 1
-        assert payload["busy_workers"] == 1
-        assert payload["ready_workers"] == 1
-        assert payload["summary"]["ready_workers"] == 1
+        assert payload["available_workers"] == 0
+        assert payload["busy_workers"] == 2
+        assert payload["ready_workers"] == 0
+        assert payload["summary"]["ready_workers"] == 0
         assert payload["items"][0]["deploy_state"] == "revision_mismatch"
         assert payload["items"][0]["is_revision_ready"] is False
         assert payload["items"][1]["deploy_state"] == "unassigned"
@@ -1023,9 +1083,9 @@ def test_list_endpoint_workers_registry_marks_assigned_listening_workers_without
 
         payload = await services.list_endpoint_workers(now=now)
 
-        assert payload["available_workers"] == 1
-        assert payload["busy_workers"] == 1
-        assert payload["ready_workers"] == 1
+        assert payload["available_workers"] == 0
+        assert payload["busy_workers"] == 2
+        assert payload["ready_workers"] == 0
         assert payload["items"][0]["deploy_state"] == "revision_metadata_missing"
         assert (
             payload["items"][0]["state_summary"]

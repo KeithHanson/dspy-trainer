@@ -125,12 +125,12 @@ def test_list_endpoint_workers_exposes_revision_state(monkeypatch):
     monkeypatch.setattr(services, "list_endpoint_worker_registrations", fake_list_endpoint_worker_registrations)
     payload = asyncio.run(services.list_endpoint_workers())
 
-    assert payload["available_workers"] == 2
+    assert payload["available_workers"] == 1
     assert payload["live_workers"] == 4
     assert payload["stale_workers"] == 0
     assert payload["assigned_workers"] == 3
     assert payload["unassigned_workers"] == 1
-    assert payload["ready_workers"] == 2
+    assert payload["ready_workers"] == 1
     assert payload["warming_workers"] == 1
     assert payload["running_workers"] == 0
     assert payload["failed_workers"] == 0
@@ -193,13 +193,13 @@ def test_list_endpoint_workers_does_not_count_listening_revision_mismatch_as_ava
     monkeypatch.setattr(services, "list_endpoint_worker_registrations", fake_list_endpoint_worker_registrations)
     payload = asyncio.run(services.list_endpoint_workers())
 
-    assert payload["available_workers"] == 2
-    assert payload["busy_workers"] == 1
+    assert payload["available_workers"] == 1
+    assert payload["busy_workers"] == 2
     assert payload["live_workers"] == 3
     assert payload["stale_workers"] == 0
     assert payload["assigned_workers"] == 2
     assert payload["unassigned_workers"] == 1
-    assert payload["ready_workers"] == 2
+    assert payload["ready_workers"] == 1
     assert payload["items"][0]["deploy_state"] == "revision_mismatch"
     assert payload["items"][0]["is_revision_ready"] is False
     assert payload["items"][1]["deploy_state"] == "ready"

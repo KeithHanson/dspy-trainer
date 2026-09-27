@@ -39,22 +39,25 @@ describe("EndpointsPage", () => {
     expect(within(endpointCard).getByText(/Pinned workers 2/)).toBeInTheDocument();
     expect(within(endpointCard).getByRole("button", { name: "Copy curl" })).toBeInTheDocument();
     expect(screen.getByText("Endpoint workers")).toBeInTheDocument();
-    expect(screen.getByText(/1 ready of 3 total · 2 live · 1 stale · 2 assigned · 1 unassigned/)).toBeInTheDocument();
+    expect(screen.getByText(/1 ready of 1 active · 1 stale hidden · 1 unassigned hidden/)).toBeInTheDocument();
     expect(screen.getByText("endpoint-worker-1")).toBeInTheDocument();
+    expect(screen.queryByText("endpoint-worker-2")).not.toBeInTheDocument();
+    expect(screen.queryByText("endpoint-worker-3")).not.toBeInTheDocument();
+    expect(screen.getByText("Ready for traffic on revision rev-2222.")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Show inactive workers (2)" }));
+    expect(screen.getByText(/1 ready of 1 active · 1 stale shown · 1 unassigned shown/)).toBeInTheDocument();
     expect(screen.getByText("endpoint-worker-2")).toBeInTheDocument();
     expect(screen.getByText("endpoint-worker-3")).toBeInTheDocument();
-    expect(screen.getByText("Ready for traffic on revision rev-2222.")).toBeInTheDocument();
     expect(screen.getByText("Heartbeat expired. Assigned endpoint expects revision rev-2222; worker was last warmed on rev-1111.")).toBeInTheDocument();
     expect(screen.getByText("Waiting for an endpoint assignment.")).toBeInTheDocument();
     expect(screen.getByText("revision_mismatch")).toBeInTheDocument();
     expect(screen.getAllByText("Assigned").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Unassigned").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Live").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Stale").length).toBeGreaterThan(0);
     expect(screen.getAllByText("rev-2222").length).toBeGreaterThan(0);
     expect(screen.getAllByText("rev-1111").length).toBeGreaterThan(0);
     await userEvent.click(within(endpointCard).getByRole("button", { name: "Delete" }));
     expect(await screen.findByText("No endpoints yet")).toBeInTheDocument();
+    expect(fetchMock.mock.calls.filter(([url, init]) => String(url).endsWith("/endpoint-workers") && init?.method === "GET").length).toBeGreaterThanOrEqual(2);
   });
 
   it("does not count listening revision mismatches as ready in the worker summary", async () => {
@@ -81,7 +84,7 @@ describe("EndpointsPage", () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByText(/1 ready of 3 total · 3 live · 0 stale · 2 assigned · 1 unassigned/)).toBeInTheDocument();
+    expect(await screen.findByText(/1 ready of 2 active · 1 unassigned hidden/)).toBeInTheDocument();
     expect(screen.getByText("Heartbeat says listening, but desired revision rev-2222 does not match warmed revision rev-1111.")).toBeInTheDocument();
   });
 
@@ -108,7 +111,7 @@ describe("EndpointsPage", () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByText(/1 ready of 2 total · 2 live · 0 stale · 1 assigned · 1 unassigned/)).toBeInTheDocument();
+    expect(await screen.findByText(/0 ready of 1 active · 1 unassigned hidden/)).toBeInTheDocument();
     expect(screen.getByText("Listening for assigned endpoint traffic, but revision metadata has not been reported yet.")).toBeInTheDocument();
     expect(screen.getByText("revision_metadata_missing")).toBeInTheDocument();
   });
@@ -135,7 +138,7 @@ describe("EndpointsPage", () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByText(/0 ready of 1 total · 1 live · 0 stale · 1 assigned · 0 unassigned · 1 warming/)).toBeInTheDocument();
+    expect(await screen.findByText(/0 ready of 1 active · 1 warming/)).toBeInTheDocument();
     expect(screen.getByText("Installing dependencies for desired revision rev-2222 (currently warmed on rev-1111).")).toBeInTheDocument();
     expect(screen.queryAllByText("Stale")).toHaveLength(0);
   });
@@ -163,10 +166,13 @@ describe("EndpointsPage", () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByText(/1 ready of 2 total · 1 live · 1 stale · 2 assigned · 0 unassigned/)).toBeInTheDocument();
+    expect(await screen.findByText(/1 ready of 1 active · 1 stale hidden/)).toBeInTheDocument();
     expect(screen.getByText("endpoint-worker-1")).toBeInTheDocument();
-    expect(screen.getByText("endpoint-worker-2")).toBeInTheDocument();
+    expect(screen.queryByText("endpoint-worker-2")).not.toBeInTheDocument();
     expect(screen.queryByText("ephemeral-worker-99")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Show inactive workers (1)" }));
+    expect(screen.getByText(/1 ready of 1 active · 1 stale shown/)).toBeInTheDocument();
+    expect(screen.getByText("endpoint-worker-2")).toBeInTheDocument();
     expect(screen.getByText("Heartbeat expired. Assigned endpoint expects revision rev-3333; worker was last warmed on rev-1111.")).toBeInTheDocument();
     expect(screen.getAllByText("Stale").length).toBeGreaterThan(0);
   });
