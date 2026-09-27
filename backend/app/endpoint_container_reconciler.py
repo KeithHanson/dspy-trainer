@@ -1154,10 +1154,23 @@ class PostgresEndpointContainerStore:
         conn = await self._conn()
         await conn.execute(
             """
-            update managed_endpoint_containers
-            set lifecycle = 'removed', stopped_at = $2, drain_timed_out = $3,
-                failure_reason = $4, container_log = $5, updated_at = $2
-            where container_id = $1
+            with removed as (
+              update managed_endpoint_containers
+              set lifecycle = 'removed', stopped_at = $2, drain_timed_out = $3,
+                  failure_reason = $4, container_log = $5, updated_at = $2
+              where container_id = $1
+              returning worker_id
+            )
+            delete from endpoint_worker_registrations registry
+            using removed
+            where registry.worker_id = removed.worker_id
+              and not exists (
+                select 1
+                from managed_endpoint_containers active
+                where active.worker_id = removed.worker_id
+                  and active.container_id <> $1
+                  and active.lifecycle <> 'removed'
+              )
             """,
             container_id,
             now,

@@ -9,6 +9,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.config import Settings
 from app.services import AppServices
 
+def _execution_mode(row):
+    metadata = row["runtime_metadata"]
+    if isinstance(metadata, str):
+        metadata = json.loads(metadata)
+    return metadata.get("execution_mode")
+
 
 class _NoopTransaction:
     async def __aenter__(self):
@@ -116,15 +122,16 @@ class _RegistryConn:
         del params
         self.queries.append(query)
         normalized = " ".join(query.strip().lower().split())
-        if normalized.startswith(
-            "select worker_id, runtime_instance_id, status, assigned_endpoint_id, task_id, last_seen_at,"
-        ):
+        if "from endpoint_worker_registrations" in normalized:
             return [
                 dict(row)
-                for _, row in sorted(
+                for worker_id, row in sorted(
                     self.state["workers"].items(),
                     key=lambda item: (item[1]["created_at"], item[0]),
                 )
+                if "managed_endpoint_containers" not in normalized
+                or _execution_mode(row) != "managed_image"
+                or worker_id in self.state.get("active_managed_worker_ids", set())
             ]
         return []
 
@@ -518,6 +525,35 @@ def test_endpoint_worker_registry_register_heartbeat_and_stale_transition():
         assert workers[0]["raw_status"] == "stale"
         assert workers[0]["is_live"] is False
         assert workers[0]["is_stale"] is True
+
+    asyncio.run(scenario())
+
+def test_endpoint_worker_list_omits_managed_workers_without_active_containers():
+    async def scenario() -> None:
+        services = _make_services()
+        now = datetime(2099, 1, 1, tzinfo=timezone.utc)
+        for worker_id in ("managed-active", "managed-removed"):
+            await services.register_endpoint_worker(
+                worker_id=worker_id,
+                runtime_instance_id=f"runtime-{worker_id}",
+                status="listening",
+                assigned_endpoint_id="endpoint-1",
+                runtime_metadata={"execution_mode": "legacy_static"},
+                now=now,
+            )
+            services.postgres_pool.state["workers"][worker_id]["runtime_metadata"] = {
+                "execution_mode": "managed_image"
+            }
+        services.postgres_pool.state["active_managed_worker_ids"] = {
+            "managed-active"
+        }
+
+        payload = await services.list_endpoint_workers(now=now)
+
+        assert [worker["worker_id"] for worker in payload["items"]] == [
+            "managed-active"
+        ]
+        assert payload["reported_workers"] == 1
 
     asyncio.run(scenario())
 

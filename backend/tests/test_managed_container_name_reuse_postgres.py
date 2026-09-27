@@ -85,6 +85,9 @@ async def _create_legacy_schema(connection, schema: str) -> None:
         );
         create index unrelated_managed_endpoint_id_idx
         on managed_endpoint_containers(endpoint_id);
+        create table endpoint_worker_registrations (
+          worker_id text primary key
+        );
         """)
 
 
@@ -138,12 +141,20 @@ async def test_store_reuses_removed_name_and_preserves_history():
             _container("container-old"),
             now=NOW,
         )
+        await connection.execute(
+            "insert into endpoint_worker_registrations (worker_id) values ($1)",
+            "worker-old",
+        )
         await store.record_container_removed(
             "container-old",
             now=NOW,
             timed_out=False,
             reason="replacement requested",
             logs="old logs",
+        )
+        assert not await connection.fetchval(
+            "select exists(select 1 from endpoint_worker_registrations where worker_id = $1)",
+            "worker-old",
         )
         await store.observe_container(
             _identity(worker_id="worker-new"),

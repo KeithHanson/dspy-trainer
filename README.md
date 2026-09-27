@@ -150,6 +150,7 @@ A **managed endpoint** exposes a validated bundle to external callers with a rot
 
 - Create, rename, delete, and rotate keys from the bundle detail page
 - The deployer derives each managed worker's deployment, rollout generation, and slot environment from the same replacement specification used for its Docker labels and durable container record; workers fail closed when that identity is missing
+- Managed-image worker rosters include only registrations backed by an active managed container; removal deletes the runtime registration while preserving deployment history
 - `POST /bundle-endpoints/{id}/invoke` returns one JSON output payload
 - `POST /bundle-endpoints/{id}/stream` returns an SSE stream of incremental `delta` events followed by a `final` event
 - Each invocation is traced in MLflow under the `dspy-trainer-managed-endpoints` experiment, tagged with its invocation, endpoint, worker, module, profile, and bundle revision identifiers

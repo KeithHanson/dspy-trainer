@@ -1041,11 +1041,18 @@ class _EndpointApiConnection:
             record["lifecycle"] = "draining"
             record["drain_started_at"] = record["drain_started_at"] or params[1]
             return "UPDATE 1"
-        if normalized.startswith(
-            "update managed_endpoint_containers set lifecycle = 'removed'"
-        ):
-            self.container_records[params[0]]["lifecycle"] = "removed"
-            return "UPDATE 1"
+        if normalized.startswith("with removed as"):
+            record = self.container_records[params[0]]
+            worker_id = record.get("worker_id")
+            record["lifecycle"] = "removed"
+            worker_still_managed = any(
+                candidate.get("worker_id") == worker_id
+                and candidate["lifecycle"] != "removed"
+                for candidate in self.container_records.values()
+            )
+            if worker_id and not worker_still_managed:
+                self.registry.pop(worker_id, None)
+            return "DELETE 1"
         if normalized.startswith("with blocked as"):
             worker_id = params[0]
             for record in self.container_records.values():
@@ -1165,6 +1172,7 @@ def test_endpoint_api_updates_managed_scale_and_tombstones_before_reconcile_dele
 
     asyncio.run(reconcile_deleted_endpoint())
     assert docker.containers == []
+    assert connection.registry == {}
     assert connection.deleted is True
     assert connection.finalized is True
 

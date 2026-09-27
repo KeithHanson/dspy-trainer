@@ -1885,10 +1885,20 @@ class AppServices:
         async with self.postgres_pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                select worker_id, runtime_instance_id, status, assigned_endpoint_id, task_id, last_seen_at,
-                       heartbeat_expires_at, hostname, pid, runtime_metadata, last_error, created_at, updated_at
-                from endpoint_worker_registrations
-                order by created_at asc, worker_id asc
+                select registry.worker_id, registry.runtime_instance_id, registry.status,
+                       registry.assigned_endpoint_id, registry.task_id, registry.last_seen_at,
+                       registry.heartbeat_expires_at, registry.hostname, registry.pid,
+                       registry.runtime_metadata, registry.last_error, registry.created_at,
+                       registry.updated_at
+                from endpoint_worker_registrations registry
+                where coalesce(registry.runtime_metadata ->> 'execution_mode', 'legacy_static') <> 'managed_image'
+                   or exists (
+                     select 1
+                     from managed_endpoint_containers container
+                     where container.worker_id = registry.worker_id
+                       and container.lifecycle <> 'removed'
+                   )
+                order by registry.created_at asc, registry.worker_id asc
                 """
             )
         return [self._build_endpoint_worker_registry_payload(row, now=as_of) for row in rows]
