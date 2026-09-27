@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { vi } from "vitest";
@@ -13,6 +13,16 @@ function renderBundlesApp(initialEntries = ["/bundles"]) {
       </Routes>
     </MemoryRouter>,
   );
+}
+
+function deferredResponse() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
 }
 
 describe("BundlesPage", () => {
@@ -682,6 +692,326 @@ describe("BundlesPage", () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/modules\/mod-sync-list\/sync$/), expect.objectContaining({ method: "POST" })));
     expect(await screen.findByText("agentic-chat synced successfully.")).toBeInTheDocument();
 
+    vi.unstubAllGlobals();
+  });
+
+  it("builds from the listing, streams sanitized output to ready, and reopens the current build", async () => {
+    const postBuild = deferredResponse();
+    let statusRequests = 0;
+    const baseModule = {
+      id: "mod-build",
+      bundle_name: "image-agent",
+      current_revision_id: "revision-current",
+      validation_status: "passed",
+      status: "validated",
+      image_build: { eligible: true, status: "enqueue_failed", current_build: null },
+    };
+    const queuedBuild = {
+      id: "build-1",
+      revision_id: "revision-current",
+      generation: 1,
+      status: "queued",
+      queued_at: "2026-09-26T10:00:00Z",
+      updated_at: "2026-09-26T10:00:00Z",
+    };
+    const fetchMock = vi.fn((url, init) => {
+      const value = String(url);
+      if (value.includes("/agent-run-plans?")) {
+        return Promise.resolve({ ok: true, status: 200, json: vi.fn().mockResolvedValue([]) });
+      }
+      if (value.endsWith("/modules") && (!init || init.method === "GET")) {
+        return Promise.resolve({ ok: true, status: 200, json: vi.fn().mockResolvedValue([baseModule]) });
+      }
+      if (value.endsWith("/modules/mod-build/revision-image-builds") && init?.method === "POST") {
+        return postBuild.promise;
+      }
+      if (value.includes("/revision-image-builds/build-1/logs?")) {
+        const text = statusRequests >= 2
+          ? "TOKEN=final-secret\nimage ready"
+          : "Authorization: Bearer live-secret\nbuilding layer";
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: vi.fn().mockResolvedValue({ text, total_bytes: text.length, next_offset: null }),
+        });
+      }
+      if (value.endsWith("/revision-image-builds/build-1") && (!init || init.method === "GET")) {
+        statusRequests += 1;
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: vi.fn().mockResolvedValue({
+            ...queuedBuild,
+            status: statusRequests === 1 ? "building" : "ready",
+            started_at: "2026-09-26T10:00:01Z",
+            finished_at: statusRequests === 1 ? null : "2026-09-26T10:00:03Z",
+            updated_at: `2026-09-26T10:00:0${statusRequests}Z`,
+          }),
+        });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderBundlesApp();
+
+    expect(await screen.findByText("no build")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Build" }));
+    expect(screen.getByRole("dialog", { name: "Image build · image-agent" })).toBeInTheDocument();
+    expect(screen.getByText("Queuing image build...")).toBeInTheDocument();
+
+    await act(async () => {
+      postBuild.resolve({ ok: true, status: 200, json: vi.fn().mockResolvedValue(queuedBuild) });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(screen.getAllByText("building").length).toBeGreaterThan(0));
+    const liveOutput = await screen.findByLabelText("Build output for build-1");
+    expect(liveOutput).toHaveTextContent("Authorization: [REDACTED]");
+    expect(liveOutput).not.toHaveTextContent("live-secret");
+
+    await waitFor(() => expect(screen.getAllByText("ready").length).toBeGreaterThanOrEqual(2), { timeout: 3_500 });
+    const finalOutput = screen.getByLabelText("Build output for build-1");
+    expect(finalOutput).toHaveTextContent("TOKEN=[REDACTED]");
+    expect(finalOutput).toHaveTextContent("image ready");
+    expect(finalOutput).not.toHaveTextContent("final-secret");
+
+    await userEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "View build" }));
+    expect(await screen.findByRole("dialog", { name: "Image build · image-agent" })).toBeInTheDocument();
+    expect(await screen.findByText("Generation 1")).toBeInTheDocument();
+    vi.unstubAllGlobals();
+  }, 8_000);
+
+  it("loads every retained modal log page and follows the output tail", async () => {
+    const firstPage = `start\n${"x".repeat(65_530)}`;
+    const secondPage = "tail marker";
+    const totalBytes = firstPage.length + secondPage.length;
+    const currentBuild = {
+      id: "build-complete-log",
+      revision_id: "revision-complete-log",
+      generation: 3,
+      status: "ready",
+      queued_at: "2026-09-26T10:00:00Z",
+      finished_at: "2026-09-26T10:00:03Z",
+      updated_at: "2026-09-26T10:00:03Z",
+    };
+    const module = {
+      id: "mod-complete-log",
+      bundle_name: "complete-log-agent",
+      current_revision_id: "revision-complete-log",
+      validation_status: "passed",
+      status: "validated",
+      image_build: { eligible: true, status: "ready", current_build: currentBuild },
+    };
+    const scrollHeight = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(480);
+    const fetchMock = vi.fn((url, init) => {
+      const value = String(url);
+      if (value.includes("/agent-run-plans?")) {
+        return Promise.resolve({ ok: true, status: 200, json: vi.fn().mockResolvedValue([]) });
+      }
+      if (value.endsWith("/modules") && (!init || init.method === "GET")) {
+        return Promise.resolve({ ok: true, status: 200, json: vi.fn().mockResolvedValue([module]) });
+      }
+      if (value.endsWith("/revision-image-builds/build-complete-log")) {
+        return Promise.resolve({ ok: true, status: 200, json: vi.fn().mockResolvedValue(currentBuild) });
+      }
+      if (value.includes("/revision-image-builds/build-complete-log/logs?offset=0&limit=65536")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: vi.fn().mockResolvedValue({ text: firstPage, total_bytes: totalBytes, next_offset: 65_536 }),
+        });
+      }
+      if (value.includes("/revision-image-builds/build-complete-log/logs?offset=65536&limit=65536")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: vi.fn().mockResolvedValue({ text: secondPage, total_bytes: totalBytes, next_offset: null }),
+        });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderBundlesApp();
+
+    await userEvent.click(await screen.findByRole("button", { name: "View build" }));
+    const output = await screen.findByLabelText("Build output for build-complete-log");
+    expect(output).toHaveTextContent("start");
+    expect(output).toHaveTextContent("tail marker");
+    expect(output.textContent).toHaveLength(totalBytes);
+    expect(screen.getByText(`Showing all retained output (${totalBytes} bytes).`)).toBeInTheDocument();
+    expect(screen.queryByText(/additional output is intentionally hidden/)).not.toBeInTheDocument();
+    await waitFor(() => expect(output.scrollTop).toBe(480));
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/logs?offset=65536&limit=65536"),
+      expect.objectContaining({ method: "GET" }),
+    );
+
+    scrollHeight.mockRestore();
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps the module row live when the modal closes before enqueue resolves", async () => {
+    const postBuild = deferredResponse();
+    let moduleRequests = 0;
+    const baseModule = {
+      id: "mod-close",
+      bundle_name: "close-agent",
+      current_revision_id: "revision-close",
+      validation_status: "passed",
+      status: "validated",
+      image_build: { eligible: true, current_build: null },
+    };
+    const queuedBuild = {
+      id: "build-close",
+      revision_id: "revision-close",
+      generation: 1,
+      status: "queued",
+      updated_at: "2026-09-26T10:30:00Z",
+    };
+    const readyBuild = {
+      ...queuedBuild,
+      status: "ready",
+      finished_at: "2026-09-26T10:30:03Z",
+      updated_at: "2026-09-26T10:30:03Z",
+    };
+    const fetchMock = vi.fn((url, init) => {
+      const value = String(url);
+      if (value.includes("/agent-run-plans?")) {
+        return Promise.resolve({ ok: true, status: 200, json: vi.fn().mockResolvedValue([]) });
+      }
+      if (value.endsWith("/modules") && (!init || init.method === "GET")) {
+        moduleRequests += 1;
+        const module = moduleRequests === 1
+          ? baseModule
+          : { ...baseModule, image_build: { eligible: true, status: "ready", current_build: readyBuild } };
+        return Promise.resolve({ ok: true, status: 200, json: vi.fn().mockResolvedValue([module]) });
+      }
+      if (value.endsWith("/modules/mod-close/revision-image-builds") && init?.method === "POST") {
+        return postBuild.promise;
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderBundlesApp();
+
+    const row = (await screen.findByText("close-agent")).closest(".bundles-saved-row");
+    await userEvent.click(within(row).getByRole("button", { name: "Build" }));
+    await userEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    await act(async () => {
+      postBuild.resolve({ ok: true, status: 200, json: vi.fn().mockResolvedValue(queuedBuild) });
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(within(row).getByText("queued")).toBeInTheDocument());
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    await waitFor(() => expect(within(row).getByText("ready")).toBeInTheDocument(), { timeout: 3_500 });
+    expect(moduleRequests).toBeGreaterThanOrEqual(2);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    vi.unstubAllGlobals();
+  }, 5_000);
+
+  it("renders failed build details and actionable ineligible errors in the immediate modal", async () => {
+    const module = {
+      id: "mod-failed",
+      bundle_name: "failure-agent",
+      current_revision_id: "revision-failed",
+      validation_status: "passed",
+      status: "validated",
+      image_build: { eligible: true, current_build: null },
+    };
+    let postCount = 0;
+    const failedBuild = {
+      id: "build-failed",
+      revision_id: "revision-failed",
+      generation: 2,
+      status: "failed",
+      queued_at: "2026-09-26T11:00:00Z",
+      finished_at: "2026-09-26T11:00:04Z",
+      updated_at: "2026-09-26T11:00:04Z",
+      failure_reason: "API_KEY=do-not-render\nDocker build failed",
+    };
+    const fetchMock = vi.fn((url, init) => {
+      const value = String(url);
+      if (value.includes("/agent-run-plans?")) return Promise.resolve({ ok: true, status: 200, json: vi.fn().mockResolvedValue([]) });
+      if (value.endsWith("/modules") && (!init || init.method === "GET")) return Promise.resolve({ ok: true, status: 200, json: vi.fn().mockResolvedValue([module]) });
+      if (value.endsWith("/modules/mod-failed/revision-image-builds") && init?.method === "POST") {
+        postCount += 1;
+        return postCount === 1
+          ? Promise.resolve({ ok: true, status: 200, json: vi.fn().mockResolvedValue(failedBuild) })
+          : Promise.resolve({ ok: false, status: 409, json: vi.fn().mockResolvedValue({ error: "Sync and validate the current revision before building" }) });
+      }
+      if (value.endsWith("/revision-image-builds/build-failed")) return Promise.resolve({ ok: true, status: 200, json: vi.fn().mockResolvedValue(failedBuild) });
+      if (value.includes("/revision-image-builds/build-failed/logs?")) return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: vi.fn().mockResolvedValue({ text: "TOKEN=hidden\nfailed command", total_bytes: 30, next_offset: null }),
+      });
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderBundlesApp();
+
+    await userEvent.click(await screen.findByRole("button", { name: "Build" }));
+    expect(await screen.findByText(/Docker build failed/)).toBeInTheDocument();
+    expect(screen.queryByText(/do-not-render/)).not.toBeInTheDocument();
+    const output = await screen.findByLabelText("Build output for build-failed");
+    expect(output).toHaveTextContent("TOKEN=[REDACTED]");
+    expect(output).not.toHaveTextContent("hidden");
+
+    await userEvent.click(screen.getByRole("button", { name: "Close" }));
+    await userEvent.click(screen.getByRole("button", { name: "Build" }));
+    expect(screen.getByRole("dialog", { name: "Image build · failure-agent" })).toBeInTheDocument();
+    expect(await screen.findByText("Sync and validate the current revision before building")).toBeInTheDocument();
+    vi.unstubAllGlobals();
+  });
+
+  it("ignores late build responses after selecting another module or closing the modal", async () => {
+    const firstPost = deferredResponse();
+    const secondStatus = deferredResponse();
+    const modules = [
+      { id: "mod-a", bundle_name: "agent-a", current_revision_id: "revision-a", validation_status: "passed", status: "validated", image_build: { current_build: null } },
+      { id: "mod-b", bundle_name: "agent-b", current_revision_id: "revision-b", validation_status: "passed", status: "validated", image_build: { current_build: null } },
+    ];
+    const buildB = { id: "build-b", revision_id: "revision-b", generation: 1, status: "queued", updated_at: "2026-09-26T12:00:00Z" };
+    const fetchMock = vi.fn((url, init) => {
+      const value = String(url);
+      if (value.includes("/agent-run-plans?")) return Promise.resolve({ ok: true, status: 200, json: vi.fn().mockResolvedValue([]) });
+      if (value.endsWith("/modules") && (!init || init.method === "GET")) return Promise.resolve({ ok: true, status: 200, json: vi.fn().mockResolvedValue(modules) });
+      if (value.endsWith("/modules/mod-a/revision-image-builds") && init?.method === "POST") return firstPost.promise;
+      if (value.endsWith("/modules/mod-b/revision-image-builds") && init?.method === "POST") return Promise.resolve({ ok: true, status: 200, json: vi.fn().mockResolvedValue(buildB) });
+      if (value.endsWith("/revision-image-builds/build-b")) return secondStatus.promise;
+      if (value.includes("/revision-image-builds/build-b/logs?")) return Promise.resolve({ ok: true, status: 200, json: vi.fn().mockResolvedValue({ text: "late B output", total_bytes: 13, next_offset: null }) });
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderBundlesApp();
+
+    const firstRow = (await screen.findByText("agent-a")).closest(".bundles-saved-row");
+    const secondRow = screen.getByText("agent-b").closest(".bundles-saved-row");
+    await userEvent.click(within(firstRow).getByRole("button", { name: "Build" }));
+    expect(screen.getByRole("dialog", { name: "Image build · agent-a" })).toBeInTheDocument();
+    await userEvent.click(within(secondRow).getByRole("button", { name: "Build" }));
+    expect(await screen.findByRole("dialog", { name: "Image build · agent-b" })).toBeInTheDocument();
+
+    await act(async () => {
+      firstPost.resolve({ ok: true, status: 200, json: vi.fn().mockResolvedValue({ id: "build-a", revision_id: "revision-a", generation: 1, status: "queued" }) });
+      await Promise.resolve();
+    });
+    expect(screen.getByRole("dialog", { name: "Image build · agent-b" })).toBeInTheDocument();
+    expect(screen.queryByText("Build build-a")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Close" }));
+    await act(async () => {
+      secondStatus.resolve({ ok: true, status: 200, json: vi.fn().mockResolvedValue({ ...buildB, status: "ready" }) });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.queryByText("late B output")).not.toBeInTheDocument();
     vi.unstubAllGlobals();
   });
 });

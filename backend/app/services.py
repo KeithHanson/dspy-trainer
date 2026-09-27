@@ -30,8 +30,24 @@ import httpx
 import redis.asyncio as redis
 
 from app.config import Settings
+from app.revision_image_builder import BUNDLE_IMAGE_PATH, BuildContextError, FrozenRevisionSource, freeze_revision_source
+from app.revision_image_coordinator import (
+    PostgresRevisionImageBuildStore,
+    RevisionImageBuildStore,
+    RevisionImageEnqueueError,
+)
+from app.revision_images import (
+    MAX_BUILD_LOG_BYTES,
+    MAX_FAILURE_REASON_CHARS,
+    build_endpoint_deployment_payload,
+    build_managed_container_payload,
+    build_revision_image_payload,
+    build_revision_image_summary_payload,
+    validate_endpoint_deployment_transition,
+    validate_managed_container_transition,
+    validate_revision_image_build_transition,
+)
 from app.validator import read_bundle_metadata, validate_bundle
-
 
 logger = logging.getLogger(__name__)
 _BUNDLE_INSTALL_ADVISORY_LOCK_NAMESPACE = 0x44535059
@@ -46,6 +62,23 @@ class ModuleSyncError(RuntimeError):
     def __init__(self, message: str, *, sync_state: dict[str, Any] | None = None) -> None:
         super().__init__(message)
         self.sync_state = sync_state or {}
+
+
+class EndpointImageNotReadyError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str,
+        revision_id: str | None,
+        build_status: str,
+        build: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = str(code)
+        self.revision_id = _clean_optional_text(revision_id)
+        self.build_status = str(build_status)
+        self.build = dict(build) if build is not None else None
 
 
 class EndpointUnavailableError(RuntimeError):
@@ -463,14 +496,78 @@ def _normalize_budget(value: Any, *, default: str = "medium") -> str:
     raise ValueError("budget must be one of: light, medium, heavy")
 
 
+async def _migrate_managed_container_name_uniqueness(conn: Any) -> None:
+    async with conn.transaction():
+        await conn.execute(
+            "select pg_advisory_xact_lock(hashtextextended('dspy-trainer-managed-container-name-migration', 0))"
+        )
+        await conn.execute(
+            """
+            alter table managed_endpoint_containers
+            drop constraint if exists managed_endpoint_containers_container_name_key
+            """
+        )
+        await conn.execute(
+            "drop index if exists managed_endpoint_containers_container_name_key"
+        )
+        await conn.execute(
+            """
+            create unique index if not exists uq_managed_endpoint_containers_active_name
+            on managed_endpoint_containers(container_name)
+            where lifecycle <> 'removed'
+            """
+        )
+
+
 class AppServices:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        revision_build_store: RevisionImageBuildStore | None = None,
+    ) -> None:
         self.settings = settings
         self.redis: redis.Redis | None = None
         self.postgres_pool: asyncpg.Pool | None = None
         self.http_client: httpx.AsyncClient | None = None
         self._installed_bundle_requirements: dict[str, str] = {}
         self._bundle_requirements_lock = asyncio.Lock()
+        self._revision_snapshot_store = (
+            Path(getattr(settings, "checkout_root", "/tmp/dspy-trainer/checkouts"))
+            .expanduser()
+            .resolve()
+            / ".revision-image-snapshots"
+        )
+        self._revision_build_store = revision_build_store
+        if self._revision_build_store is None:
+            deployment_id = str(
+                os.getenv("DSPY_TRAINER_DEPLOYMENT_ID") or ""
+            ).strip()
+            if deployment_id:
+                self._revision_build_store = PostgresRevisionImageBuildStore(
+                    postgres_dsn=settings.postgres_dsn,
+                    instance_id=f"backend-{uuid4().hex[:12]}",
+                    deployment_id=deployment_id,
+                    base_image_id=None,
+                    image_repository=str(
+                        os.getenv("DSPY_TRAINER_DEPLOYER_IMAGE_REPOSITORY")
+                        or "dspy-trainer-revision"
+                    ).strip(),
+                    platform_version=str(
+                        os.getenv("DSPY_TRAINER_DEPLOYER_PLATFORM_VERSION") or "local"
+                    ).strip(),
+                    build_log_max_bytes=min(
+                        MAX_BUILD_LOG_BYTES,
+                        max(
+                            1,
+                            int(
+                                os.getenv("DSPY_TRAINER_DEPLOYER_BUILD_LOG_MAX_BYTES")
+                                or MAX_BUILD_LOG_BYTES
+                            ),
+                        ),
+                    ),
+                    leader_timeout_seconds=15.0,
+                )
 
     def _get_module_env_fernet(self) -> Fernet:
         key = str(self.settings.module_env_encryption_key or "").strip()
@@ -935,6 +1032,8 @@ class AppServices:
     async def connect(self) -> None:
         self.redis = redis.Redis.from_url(self.settings.redis_url, decode_responses=True)
         self.postgres_pool = await asyncpg.create_pool(dsn=self.settings.postgres_dsn, min_size=1, max_size=3)
+        if isinstance(self._revision_build_store, PostgresRevisionImageBuildStore):
+            self._revision_build_store.set_operation_pool(self.postgres_pool)
         self.http_client = httpx.AsyncClient(timeout=5.0)
         await self.init_db()
 
@@ -942,12 +1041,37 @@ class AppServices:
         await self.connect()
         if self.postgres_pool is None:
             return
-        cleared_registrations = await self.clear_endpoint_worker_registrations()
-        logger.info("Cleared %s endpoint worker registrations during backend startup", cleared_registrations)
+        expired_registrations = await self.mark_stale_endpoint_workers()
+        logger.info(
+            "Expired %s endpoint worker registrations during backend startup",
+            expired_registrations,
+        )
+        await self._reconcile_revision_builds(trigger="startup")
+
+    async def _reconcile_revision_builds(self, *, trigger: str) -> int:
+        if self._revision_build_store is None:
+            logger.warning(
+                "revision_image_enqueue_skipped trigger=%s reason=build_store_not_configured",
+                trigger,
+            )
+            return 0
+        try:
+            inserted = await self._revision_build_store.reconcile_eligible_revisions()
+        except Exception:
+            logger.exception("revision_image_enqueue_failed trigger=%s", trigger)
+            return 0
+        logger.info(
+            "revision_image_enqueue_reconciled trigger=%s inserted=%s",
+            trigger,
+            inserted,
+        )
+        return inserted
 
     async def disconnect(self) -> None:
         if self.http_client is not None:
             await self.http_client.aclose()
+        if self._revision_build_store is not None:
+            await self._revision_build_store.disconnect()
         if self.postgres_pool is not None:
             await self.postgres_pool.close()
         if self.redis is not None:
@@ -1035,13 +1159,30 @@ class AppServices:
     def _describe_endpoint_worker_visibility(cls, worker: dict[str, Any]) -> dict[str, Any]:
         status = str(worker.get("status") or "unknown").strip().lower() or "unknown"
         assigned_endpoint_id = str(worker.get("assigned_endpoint_id") or "").strip() or None
-        endpoint_id = str(worker.get("endpoint_id") or "").strip() or assigned_endpoint_id
+        reported_endpoint_id = str(worker.get("endpoint_id") or "").strip() or None
+        endpoint_id = reported_endpoint_id or assigned_endpoint_id
+        execution_mode = str(worker.get("execution_mode") or "legacy_static").strip()
+        managed_image = execution_mode == "managed_image"
+        endpoint_matches = (
+            bool(reported_endpoint_id and reported_endpoint_id == assigned_endpoint_id)
+            if managed_image
+            else bool(endpoint_id)
+        )
+        desired_build_id = str(worker.get("desired_build_id") or "").strip() or None
+        warmed_build_id = str(worker.get("warmed_build_id") or "").strip() or None
         desired_revision_id = str(worker.get("desired_revision_id") or "").strip() or None
         warmed_revision_id = str(worker.get("warmed_revision_id") or "").strip() or None
         task_id = str(worker.get("task_id") or "").strip() or None
-        last_seen = str(worker.get("last_seen") or "").strip() or None
-        revision_matches = bool(desired_revision_id and warmed_revision_id and desired_revision_id == warmed_revision_id)
-
+        revision_matches = bool(
+            desired_revision_id
+            and warmed_revision_id
+            and desired_revision_id == warmed_revision_id
+        )
+        build_matches = bool(
+            desired_build_id and warmed_build_id and desired_build_id == warmed_build_id
+        )
+        provenance_matches = revision_matches and (not managed_image or build_matches)
+        ready = endpoint_matches and provenance_matches
         if status == "idle":
             return {
                 "operator_state": "idle",
@@ -1051,7 +1192,9 @@ class AppServices:
                 "is_revision_ready": False,
             }
         if status == "preparing":
-            if warmed_revision_id:
+            if managed_image:
+                summary = "Waiting for the assigned baked endpoint image to become ready."
+            elif warmed_revision_id:
                 summary = (
                     f"Installing dependencies for desired revision {cls._format_revision_label(desired_revision_id)} "
                     f"(currently warmed on {cls._format_revision_label(warmed_revision_id)})."
@@ -1066,19 +1209,25 @@ class AppServices:
                 "is_revision_ready": False,
             }
         if status == "stale":
-            warmed_text = cls._format_revision_label(warmed_revision_id) if warmed_revision_id else "none"
-            if endpoint_id and desired_revision_id and desired_revision_id != warmed_revision_id:
+            if endpoint_id and not endpoint_matches:
+                deploy_state = "endpoint_mismatch"
+                summary = "Heartbeat expired after reporting an endpoint other than its control-plane assignment."
+            elif endpoint_id and desired_revision_id != warmed_revision_id:
                 deploy_state = "revision_mismatch"
                 summary = (
                     f"Heartbeat expired. Assigned endpoint expects revision {cls._format_revision_label(desired_revision_id)}; "
-                    f"worker was last warmed on {warmed_text}."
+                    f"worker was last warmed on {cls._format_revision_label(warmed_revision_id)}."
                 )
-            elif endpoint_id:
-                deploy_state = "offline"
-                summary = "Heartbeat expired for an assigned endpoint worker."
+            elif managed_image and desired_build_id != warmed_build_id:
+                deploy_state = "build_mismatch"
+                summary = "Heartbeat expired with desired and warmed image builds mismatched."
             else:
                 deploy_state = "offline"
-                summary = "Heartbeat expired while waiting for an endpoint assignment."
+                summary = (
+                    "Heartbeat expired for an assigned endpoint worker."
+                    if endpoint_id
+                    else "Heartbeat expired while waiting for an endpoint assignment."
+                )
             return {
                 "operator_state": "stale",
                 "state_label": "Stale",
@@ -1087,43 +1236,62 @@ class AppServices:
                 "is_revision_ready": False,
             }
         if status == "listening":
-            if endpoint_id and revision_matches:
+            if ready:
                 summary = f"Ready for traffic on revision {cls._format_revision_label(desired_revision_id)}."
+                if managed_image:
+                    summary = f"{summary} Image build {desired_build_id}."
                 deploy_state = "ready"
-            elif endpoint_id and desired_revision_id and warmed_revision_id:
+            elif endpoint_id and not endpoint_matches:
+                summary = "Listening worker endpoint identity does not match its control-plane assignment."
+                deploy_state = "endpoint_mismatch"
+            elif desired_revision_id and warmed_revision_id and not revision_matches:
                 summary = (
                     f"Heartbeat says listening, but desired revision {cls._format_revision_label(desired_revision_id)} "
                     f"does not match warmed revision {cls._format_revision_label(warmed_revision_id)}."
                 )
                 deploy_state = "revision_mismatch"
+            elif managed_image and desired_build_id and warmed_build_id and not build_matches:
+                summary = "Heartbeat says listening, but desired and warmed image builds do not match."
+                deploy_state = "build_mismatch"
+            elif managed_image and (not desired_build_id or not warmed_build_id):
+                summary = "Listening managed worker is missing desired or warmed image build metadata."
+                deploy_state = "build_metadata_missing"
             elif endpoint_id:
                 if desired_revision_id:
                     summary = (
-                        f"Listening for assigned endpoint traffic, but warmed revision metadata is missing for desired revision "
-                        f"{cls._format_revision_label(desired_revision_id)}."
+                        "Listening for assigned endpoint traffic, but warmed revision metadata is missing for desired "
+                        f"revision {cls._format_revision_label(desired_revision_id)}."
                     )
                 elif warmed_revision_id:
                     summary = (
-                        f"Listening for assigned endpoint traffic, but desired revision metadata is missing "
+                        "Listening for assigned endpoint traffic, but desired revision metadata is missing "
                         f"(worker last warmed on {cls._format_revision_label(warmed_revision_id)})."
                     )
                 else:
-                    summary = "Listening for assigned endpoint traffic, but revision metadata has not been reported yet."
+                    summary = (
+                        "Listening for assigned endpoint traffic, but revision metadata has not been reported yet."
+                    )
                 deploy_state = "revision_metadata_missing"
             else:
-                summary = "Ready, but no endpoint revision is currently assigned."
-                deploy_state = "ready"
+                summary = "Listening worker has no endpoint assignment."
+                deploy_state = "unassigned"
             return {
                 "operator_state": "listening",
                 "state_label": "Listening",
                 "deploy_state": deploy_state,
                 "state_summary": summary,
-                "is_revision_ready": bool(endpoint_id and revision_matches),
+                "is_revision_ready": ready,
             }
         if status == "running":
-            if revision_matches:
+            if ready:
                 summary = f"Serving an invocation on revision {cls._format_revision_label(desired_revision_id)}."
                 deploy_state = "serving"
+            elif endpoint_id and not endpoint_matches:
+                summary = "Serving while reported endpoint identity differs from the control-plane assignment."
+                deploy_state = "serving_endpoint_mismatch"
+            elif managed_image and not build_matches:
+                summary = "Serving while desired and warmed image builds differ or are missing."
+                deploy_state = "serving_stale_build"
             elif desired_revision_id or warmed_revision_id:
                 summary = (
                     f"Serving an invocation while desired revision {cls._format_revision_label(desired_revision_id)} "
@@ -1131,8 +1299,8 @@ class AppServices:
                 )
                 deploy_state = "serving_stale_revision"
             else:
-                summary = "Serving an invocation."
-                deploy_state = "serving"
+                summary = "Serving an invocation without complete revision metadata."
+                deploy_state = "serving_unpinned"
             if task_id:
                 summary = f"{summary} Task {task_id}."
             return {
@@ -1140,7 +1308,7 @@ class AppServices:
                 "state_label": "Running",
                 "deploy_state": deploy_state,
                 "state_summary": summary,
-                "is_revision_ready": revision_matches,
+                "is_revision_ready": ready,
             }
         if status == "failed":
             summary = "Warmup or invocation failed."
@@ -1213,20 +1381,37 @@ class AppServices:
             return []
         workers = await self.list_endpoint_worker_registrations(now=now)
         ranked_workers = sorted(workers, key=self._endpoint_worker_assignment_rank)
-        return [str(item.get("worker_id") or "").strip() for item in ranked_workers if str(item.get("worker_id") or "").strip()]
+        return [
+            str(item.get("worker_id") or "").strip()
+            for item in ranked_workers
+            if str(item.get("worker_id") or "").strip()
+        ]
 
-    def _endpoint_worker_heartbeat_expires_at(self, now: datetime | None = None) -> datetime:
+    def _endpoint_worker_heartbeat_expires_at(
+        self, now: datetime | None = None
+    ) -> datetime:
         base = now or datetime.now(timezone.utc)
-        return base + timedelta(seconds=max(1, int(self.settings.endpoint_worker_heartbeat_ttl_seconds)))
+        return base + timedelta(
+            seconds=max(1, int(self.settings.endpoint_worker_heartbeat_ttl_seconds))
+        )
 
-    def _build_endpoint_worker_registry_payload(self, row: Any, *, now: datetime | None = None) -> dict[str, Any]:
+    def _build_endpoint_worker_registry_payload(
+        self, row: Any, *, now: datetime | None = None
+    ) -> dict[str, Any]:
         as_of = now or datetime.now(timezone.utc)
         heartbeat_expires_at = row["heartbeat_expires_at"]
-        is_stale = heartbeat_expires_at is None or heartbeat_expires_at <= as_of
+        is_stale = (
+            str(row["status"] or "").lower() == "stale"
+            or heartbeat_expires_at is None
+            or heartbeat_expires_at <= as_of
+        )
         status = "stale" if is_stale else str(row["status"] or "unknown")
         assigned_endpoint_id = _clean_optional_text(row["assigned_endpoint_id"])
         runtime_metadata = _coerce_runtime_metadata(row["runtime_metadata"])
-        endpoint_id = _clean_optional_text(runtime_metadata.get("endpoint_id")) or assigned_endpoint_id
+        endpoint_id = (
+            _clean_optional_text(runtime_metadata.get("endpoint_id"))
+            or assigned_endpoint_id
+        )
         payload = {
             "worker_id": str(row["worker_id"]),
             "runtime_instance_id": str(row["runtime_instance_id"]),
@@ -1235,15 +1420,43 @@ class AppServices:
             "task_id": row["task_id"],
             "endpoint_id": endpoint_id,
             "assigned_endpoint_id": assigned_endpoint_id,
-            "last_seen": row["last_seen_at"].isoformat() if row["last_seen_at"] else None,
-            "last_seen_at": row["last_seen_at"].isoformat() if row["last_seen_at"] else None,
-            "heartbeat_expires_at": heartbeat_expires_at.isoformat() if heartbeat_expires_at else None,
+            "last_seen": (
+                row["last_seen_at"].isoformat() if row["last_seen_at"] else None
+            ),
+            "last_seen_at": (
+                row["last_seen_at"].isoformat() if row["last_seen_at"] else None
+            ),
+            "heartbeat_expires_at": (
+                heartbeat_expires_at.isoformat() if heartbeat_expires_at else None
+            ),
             "hostname": row["hostname"],
             "pid": row["pid"],
             "runtime_metadata": runtime_metadata,
             "last_error": row["last_error"],
-            "desired_revision_id": _clean_optional_text(runtime_metadata.get("desired_revision_id")),
-            "warmed_revision_id": _clean_optional_text(runtime_metadata.get("warmed_revision_id")),
+            "execution_mode": _clean_optional_text(
+                runtime_metadata.get("execution_mode")
+            )
+            or "legacy_static",
+            "desired_build_id": _clean_optional_text(
+                runtime_metadata.get("desired_build_id")
+            ),
+            "warmed_build_id": _clean_optional_text(
+                runtime_metadata.get("warmed_build_id")
+            ),
+            "desired_revision_id": _clean_optional_text(
+                runtime_metadata.get("desired_revision_id")
+            ),
+            "warmed_revision_id": _clean_optional_text(
+                runtime_metadata.get("warmed_revision_id")
+            ),
+            "bundle_path": _clean_optional_text(runtime_metadata.get("bundle_path")),
+            "endpoint_deployment_id": _clean_optional_text(
+                runtime_metadata.get("endpoint_deployment_id")
+            ),
+            "endpoint_slot": runtime_metadata.get("endpoint_slot"),
+            "endpoint_rollout_generation": runtime_metadata.get(
+                "endpoint_rollout_generation"
+            ),
             "kind": "endpoint",
             "is_stale": is_stale,
             "is_live": not is_stale,
@@ -1251,16 +1464,28 @@ class AppServices:
         payload.update(self._describe_endpoint_worker_visibility(payload))
         return payload
 
-    def _summarize_endpoint_workers(self, workers: list[dict[str, Any]]) -> dict[str, int]:
+    def _summarize_endpoint_workers(
+        self, workers: list[dict[str, Any]]
+    ) -> dict[str, int]:
         live_workers = sum(1 for item in workers if item["is_live"])
         stale_workers = len(workers) - live_workers
-        assigned_workers = sum(1 for item in workers if item.get("assigned_endpoint_id"))
+        assigned_workers = sum(
+            1 for item in workers if item.get("assigned_endpoint_id")
+        )
         unassigned_workers = len(workers) - assigned_workers
         ready_workers = sum(
-            1 for item in workers if item["is_live"] and item.get("deploy_state") in {"ready", "unassigned"}
+            1
+            for item in workers
+            if item["is_live"] and item.get("deploy_state") == "ready"
         )
-        warming_workers = sum(1 for item in workers if item["is_live"] and item["raw_status"] == "preparing")
-        running_workers = sum(1 for item in workers if item["is_live"] and item["raw_status"] == "running")
+        warming_workers = sum(
+            1
+            for item in workers
+            if item["is_live"] and item["raw_status"] == "preparing"
+        )
+        running_workers = sum(
+            1 for item in workers if item["is_live"] and item["raw_status"] == "running"
+        )
         failed_workers = sum(1 for item in workers if item["raw_status"] == "failed")
         return {
             "live_workers": live_workers,
@@ -1272,6 +1497,141 @@ class AppServices:
             "running_workers": running_workers,
             "failed_workers": failed_workers,
         }
+
+    async def validate_managed_endpoint_worker_identity(
+        self,
+        runtime_metadata: dict[str, Any],
+        *,
+        worker_id: str | None = None,
+        require_claim_eligible: bool = False,
+    ) -> dict[str, Any]:
+        required = {
+            "endpoint_id": _clean_optional_text(runtime_metadata.get("endpoint_id")),
+            "build_id": _clean_optional_text(runtime_metadata.get("desired_build_id")),
+            "revision_id": _clean_optional_text(
+                runtime_metadata.get("desired_revision_id")
+            ),
+            "baked_build_id": _clean_optional_text(
+                runtime_metadata.get("baked_build_id")
+            ),
+            "baked_revision_id": _clean_optional_text(
+                runtime_metadata.get("baked_revision_id")
+            ),
+            "bundle_path": _clean_optional_text(runtime_metadata.get("bundle_path")),
+        }
+        missing = sorted(name for name, value in required.items() if value is None)
+        if missing:
+            raise ValueError(
+                f"managed endpoint worker identity is missing: {', '.join(missing)}"
+            )
+        identity: dict[str, Any] = {
+            name: str(value) for name, value in required.items()
+        }
+        if (
+            identity["build_id"] != identity["baked_build_id"]
+            or identity["revision_id"] != identity["baked_revision_id"]
+        ):
+            raise ValueError(
+                "managed endpoint worker identity does not match baked image identity"
+            )
+        if Path(identity["bundle_path"]).as_posix() != BUNDLE_IMAGE_PATH:
+            raise ValueError(
+                f"managed endpoint worker bundle path must be {BUNDLE_IMAGE_PATH}"
+            )
+
+        deployment = await self.get_endpoint_deployment(identity["endpoint_id"])
+        if deployment is None or str(deployment.get("phase") or "") == "legacy_static":
+            raise ValueError("endpoint is not assigned to managed image execution")
+        assigned_pairs = {
+            (
+                _clean_optional_text(deployment.get(f"{role}_build_id")),
+                _clean_optional_text(deployment.get(f"{role}_revision_id")),
+            )
+            for role in ("active", "target", "previous")
+        }
+        if (identity["build_id"], identity["revision_id"]) not in assigned_pairs:
+            raise ValueError(
+                "managed endpoint worker image is not assigned to the endpoint deployment"
+            )
+        build = await self.get_revision_image_build(identity["build_id"])
+        if (
+            build is None
+            or str(build.get("status") or "") != "ready"
+            or not _clean_optional_text(build.get("image_id"))
+        ):
+            raise ValueError("managed endpoint worker image build is not ready locally")
+        if str(build.get("revision_id") or "") != identity["revision_id"]:
+            raise ValueError("managed endpoint worker image build revision mismatch")
+
+        effective_worker_id = _clean_optional_text(worker_id)
+        if effective_worker_id is not None:
+            exact_required = {
+                "worker_id": _clean_optional_text(runtime_metadata.get("worker_id")),
+                "deployment_id": _clean_optional_text(
+                    runtime_metadata.get("endpoint_deployment_id")
+                ),
+            }
+            exact_missing = sorted(
+                name for name, value in exact_required.items() if value is None
+            )
+            try:
+                slot = int(runtime_metadata.get("endpoint_slot"))
+                rollout_generation = int(
+                    runtime_metadata.get("endpoint_rollout_generation")
+                )
+            except (TypeError, ValueError):
+                exact_missing.extend(["slot", "rollout_generation"])
+                slot = -1
+                rollout_generation = -1
+            if exact_missing:
+                raise ValueError(
+                    "managed endpoint worker identity is missing: "
+                    + ", ".join(sorted(set(exact_missing)))
+                )
+            if exact_required["worker_id"] != effective_worker_id:
+                raise ValueError(
+                    "managed endpoint worker id does not match registration"
+                )
+            if slot < 0 or slot >= int(deployment.get("desired_replica_count") or 0):
+                raise ValueError(
+                    "managed endpoint worker slot is outside the deployment"
+                )
+            if self.postgres_pool is None:
+                raise RuntimeError("database not initialized")
+            async with self.postgres_pool.acquire() as conn:
+                observed = await conn.fetchrow(
+                    """
+                    select c.container_id, c.lifecycle
+                    from managed_endpoint_containers c
+                    join endpoint_deployments d on d.id = c.deployment_id
+                    where c.deployment_id = $1 and c.endpoint_id = $2 and c.slot = $3
+                      and c.worker_id = $4 and c.build_id = $5 and c.revision_id = $6
+                      and d.rollout_generation = $7
+                      and (c.lifecycle = 'ready' or ($8::boolean and c.lifecycle = 'draining'))
+                    """,
+                    exact_required["deployment_id"],
+                    identity["endpoint_id"],
+                    slot,
+                    effective_worker_id,
+                    identity["build_id"],
+                    identity["revision_id"],
+                    rollout_generation,
+                    not require_claim_eligible,
+                )
+            if observed is None:
+                raise ValueError(
+                    "managed endpoint worker is not an observed deployment slot"
+                )
+            identity.update(
+                {
+                    "worker_id": effective_worker_id,
+                    "deployment_id": exact_required["deployment_id"],
+                    "slot": slot,
+                    "rollout_generation": rollout_generation,
+                    "container_lifecycle": str(observed["lifecycle"]),
+                }
+            )
+        return identity
 
     async def register_endpoint_worker(
         self,
@@ -1290,10 +1650,29 @@ class AppServices:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
         registration_time = now or datetime.now(timezone.utc)
-        effective_worker_id = _clean_optional_text(worker_id) or f"endpoint-worker-{uuid4()}"
+        effective_worker_id = (
+            _clean_optional_text(worker_id) or f"endpoint-worker-{uuid4()}"
+        )
         runtime_id = _clean_optional_text(runtime_instance_id)
         if not runtime_id:
             raise ValueError("runtime_instance_id is required")
+        normalized_runtime_metadata = dict(runtime_metadata or {})
+        execution_mode = (
+            _clean_optional_text(normalized_runtime_metadata.get("execution_mode"))
+            or "legacy_static"
+        )
+        managed_identity: dict[str, Any] | None = None
+        if execution_mode == "managed_image":
+            managed_identity = await self.validate_managed_endpoint_worker_identity(
+                normalized_runtime_metadata,
+                worker_id=effective_worker_id,
+                require_claim_eligible=True,
+            )
+            assigned_endpoint_id = managed_identity["endpoint_id"]
+        elif execution_mode != "legacy_static":
+            raise ValueError(
+                f"unsupported endpoint worker execution mode: {execution_mode}"
+            )
         async with self.postgres_pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
@@ -1312,9 +1691,19 @@ class AppServices:
                   created_at,
                   updated_at
                 )
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $12)
+                select $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $12
+                where $13::boolean or exists (
+                  select 1
+                  from managed_endpoint_containers c
+                  join endpoint_deployments d on d.id = c.deployment_id
+                  where c.deployment_id = $14 and c.endpoint_id = $15 and c.slot = $16
+                    and c.worker_id = $1 and c.build_id = $17 and c.revision_id = $18
+                    and d.rollout_generation = $19 and c.lifecycle = 'ready'
+                  for update of c
+                )
                 on conflict (worker_id) do update set
                   runtime_instance_id = excluded.runtime_instance_id,
+                  assigned_endpoint_id = excluded.assigned_endpoint_id,
                   status = excluded.status,
                   task_id = excluded.task_id,
                   last_seen_at = excluded.last_seen_at,
@@ -1336,13 +1725,27 @@ class AppServices:
                 self._endpoint_worker_heartbeat_expires_at(registration_time),
                 _clean_optional_text(hostname),
                 pid,
-                json.dumps(runtime_metadata or {}),
+                json.dumps(normalized_runtime_metadata),
                 _clean_optional_text(last_error),
                 registration_time,
+                execution_mode != "managed_image",
+                managed_identity.get("deployment_id") if managed_identity else None,
+                managed_identity.get("endpoint_id") if managed_identity else None,
+                managed_identity.get("slot") if managed_identity else None,
+                managed_identity.get("build_id") if managed_identity else None,
+                managed_identity.get("revision_id") if managed_identity else None,
+                managed_identity.get("rollout_generation") if managed_identity else None,
             )
-        await self.reconcile_endpoint_worker_assignments()
-        updated = await self._get_endpoint_worker_registration(effective_worker_id, now=registration_time)
-        return updated or self._build_endpoint_worker_registry_payload(row, now=registration_time)
+        if row is None:
+            raise ValueError("managed endpoint worker is not claim-eligible")
+        if execution_mode == "legacy_static":
+            await self.reconcile_endpoint_worker_assignments()
+        updated = await self._get_endpoint_worker_registration(
+            effective_worker_id, now=registration_time
+        )
+        return updated or self._build_endpoint_worker_registry_payload(
+            row, now=registration_time
+        )
 
     async def heartbeat_endpoint_worker(
         self,
@@ -1352,6 +1755,7 @@ class AppServices:
         status: str,
         assigned_endpoint_id: str | None = None,
         task_id: str | None = None,
+        expected_task_id: str | None = None,
         hostname: str | None = None,
         pid: int | None = None,
         runtime_metadata: dict[str, Any] | None = None,
@@ -1375,14 +1779,30 @@ class AppServices:
                 return None
             existing_runtime_instance_id = _clean_optional_text(existing_row["runtime_instance_id"])
             requested_runtime_instance_id = _clean_optional_text(runtime_instance_id)
-            if requested_runtime_instance_id and requested_runtime_instance_id != existing_runtime_instance_id:
+            if not requested_runtime_instance_id or requested_runtime_instance_id != existing_runtime_instance_id:
                 return None
             merged_runtime_metadata = _merge_runtime_metadata(existing_row["runtime_metadata"], runtime_metadata or {})
+            requested_status = str(status or "idle")
+            requested_task_id = _clean_optional_text(task_id)
+            expected_current_task_id = _clean_optional_text(expected_task_id)
+            if requested_task_id is not None:
+                if expected_current_task_id is None:
+                    expected_current_task_id = requested_task_id
+                elif expected_current_task_id != requested_task_id:
+                    return None
+            if str(merged_runtime_metadata.get("execution_mode") or "") == "managed_image":
+                if _clean_optional_text(existing_row["status"]) == "stale":
+                    return None
+                await self.validate_managed_endpoint_worker_identity(
+                    merged_runtime_metadata,
+                    worker_id=str(worker_id),
+                )
+                if requested_task_id is not None and requested_status != "running":
+                    return None
             row = await conn.fetchrow(
                 """
                 update endpoint_worker_registrations
-                set runtime_instance_id = coalesce($2, runtime_instance_id),
-                    status = $3,
+                set status = $3,
                     task_id = $4,
                     last_seen_at = $5,
                     heartbeat_expires_at = $6,
@@ -1391,20 +1811,22 @@ class AppServices:
                     runtime_metadata = $9::jsonb,
                     last_error = $10,
                     updated_at = $5
-                where worker_id = $1
+                where worker_id = $1 and runtime_instance_id = $2
+                  and task_id is not distinct from $11
                 returning worker_id, runtime_instance_id, status, assigned_endpoint_id, task_id, last_seen_at,
                           heartbeat_expires_at, hostname, pid, runtime_metadata, last_error, created_at, updated_at
                 """,
                 str(worker_id),
                 requested_runtime_instance_id,
-                str(status or "idle"),
-                _clean_optional_text(task_id),
+                requested_status,
+                requested_task_id,
                 heartbeat_time,
                 self._endpoint_worker_heartbeat_expires_at(heartbeat_time),
                 _clean_optional_text(hostname),
                 pid,
                 json.dumps(merged_runtime_metadata),
                 _clean_optional_text(last_error),
+                expected_current_task_id,
             )
         if row is None:
             return None
@@ -1463,10 +1885,20 @@ class AppServices:
         async with self.postgres_pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                select worker_id, runtime_instance_id, status, assigned_endpoint_id, task_id, last_seen_at,
-                       heartbeat_expires_at, hostname, pid, runtime_metadata, last_error, created_at, updated_at
-                from endpoint_worker_registrations
-                order by created_at asc, worker_id asc
+                select registry.worker_id, registry.runtime_instance_id, registry.status,
+                       registry.assigned_endpoint_id, registry.task_id, registry.last_seen_at,
+                       registry.heartbeat_expires_at, registry.hostname, registry.pid,
+                       registry.runtime_metadata, registry.last_error, registry.created_at,
+                       registry.updated_at
+                from endpoint_worker_registrations registry
+                where coalesce(registry.runtime_metadata ->> 'execution_mode', 'legacy_static') <> 'managed_image'
+                   or exists (
+                     select 1
+                     from managed_endpoint_containers container
+                     where container.worker_id = registry.worker_id
+                       and container.lifecycle <> 'removed'
+                   )
+                order by registry.created_at asc, registry.worker_id asc
                 """
             )
         return [self._build_endpoint_worker_registry_payload(row, now=as_of) for row in rows]
@@ -1596,13 +2028,355 @@ class AppServices:
                   key_hash text not null,
                   key_preview text not null,
                   created_at timestamptz not null,
-                  updated_at timestamptz not null
+                  updated_at timestamptz not null,
+                  delete_requested_at timestamptz
                 );
                 """
             )
             await conn.execute("alter table bundle_endpoints add column if not exists lm_profile_id text references lm_profiles(id) on delete set null;")
             await conn.execute("alter table bundle_endpoints add column if not exists pinned_worker_count int not null default 1;")
+            await conn.execute("alter table bundle_endpoints add column if not exists delete_requested_at timestamptz;")
             await conn.execute("create index if not exists idx_bundle_endpoints_module_import_id on bundle_endpoints(module_import_id, created_at desc);")
+            await conn.execute("alter table bundle_revisions add column if not exists source_snapshot_path text;")
+            await conn.execute("alter table bundle_revisions add column if not exists source_content_digest text;")
+            await conn.execute(
+                """
+                create table if not exists deployer_base_image_state (
+                  deployment_id text primary key,
+                  base_image_name text not null,
+                  base_image_id text not null,
+                  updated_at timestamptz not null
+                );
+                """
+            )
+            await conn.execute(
+                """
+                do $$
+                begin
+                  if to_regclass('deployer_runtime_state') is not null then
+                    insert into deployer_base_image_state (
+                      deployment_id, base_image_name, base_image_id, updated_at
+                    )
+                    select deployment_id, base_image_name, base_image_id, updated_at
+                    from deployer_runtime_state
+                    on conflict (deployment_id) do nothing;
+                  end if;
+                end
+                $$;
+                drop table if exists deployer_runtime_state;
+                """
+            )
+            await conn.execute(
+                """
+                create table if not exists deployer_coordinator_heartbeats (
+                  deployment_id text not null references deployer_base_image_state(deployment_id) on delete cascade,
+                  instance_id text not null,
+                  coordinator text not null check (coordinator in ('build', 'endpoint')),
+                  started_at timestamptz not null,
+                  heartbeat_at timestamptz not null,
+                  is_leader boolean not null,
+                  primary key (deployment_id, instance_id, coordinator)
+                );
+                create index if not exists idx_deployer_coordinator_leaders
+                  on deployer_coordinator_heartbeats (deployment_id, coordinator, heartbeat_at desc)
+                  where is_leader;
+                """
+            )
+            await conn.execute(
+                f"""
+                create table if not exists revision_image_builds (
+                  id text primary key,
+                  revision_id text not null references bundle_revisions(id) on delete restrict,
+                  generation bigint not null check (generation >= 1),
+                  source_commit text,
+                  source_snapshot_path text not null,
+                  source_content_digest text not null,
+                  local_tag text not null unique,
+                  image_id text,
+                  image_digest text,
+                  base_image_id text not null,
+                  status text not null check (status in ('queued', 'building', 'ready', 'failed', 'superseded', 'pruned')),
+                  attempt int not null default 0 check (attempt >= 0),
+                  available_at timestamptz not null,
+                  claim_owner text,
+                  claim_expires_at timestamptz,
+                  build_log text not null default '' check (octet_length(build_log) <= {MAX_BUILD_LOG_BYTES}),
+                  failure_reason text check (failure_reason is null or char_length(failure_reason) <= {MAX_FAILURE_REASON_CHARS}),
+                  retry_of_build_id text,
+                  queued_at timestamptz not null,
+                  started_at timestamptz,
+                  finished_at timestamptz,
+                  created_at timestamptz not null,
+                  updated_at timestamptz not null,
+                  unique (revision_id, generation),
+                  unique (id, revision_id),
+                  foreign key (retry_of_build_id, revision_id)
+                    references revision_image_builds(id, revision_id) on delete restrict,
+                  check (
+                    (status = 'building' and claim_owner is not null and claim_expires_at is not null)
+                    or (status <> 'building' and claim_owner is null and claim_expires_at is null)
+                  ),
+                  check (status <> 'ready' or (image_id is not null or image_digest is not null))
+                );
+                """
+            )
+            await conn.execute(
+                """
+                create unique index if not exists uq_revision_image_builds_active_revision
+                on revision_image_builds(revision_id)
+                where status in ('queued', 'building');
+                """
+            )
+            await conn.execute(
+                """
+                create index if not exists idx_revision_image_builds_fifo
+                on revision_image_builds(available_at asc, queued_at asc, id asc)
+                where status = 'queued';
+                """
+            )
+            await conn.execute(
+                """
+                create index if not exists idx_revision_image_builds_claim_recovery
+                on revision_image_builds(claim_expires_at asc, id asc)
+                where status = 'building';
+                """
+            )
+            await conn.execute(
+                """
+                create index if not exists idx_revision_image_builds_revision_history
+                on revision_image_builds(revision_id, generation desc);
+                """
+            )
+            await conn.execute(
+                """
+                create or replace function enforce_revision_image_build_contract()
+                returns trigger as $$
+                begin
+                  if (old.status = 'queued' and new.status not in ('queued', 'building', 'failed', 'pruned'))
+                     or (old.status = 'building' and new.status not in ('building', 'queued', 'ready', 'failed'))
+                     or (old.status = 'ready' and new.status not in ('ready', 'superseded', 'pruned'))
+                     or (old.status = 'failed' and new.status not in ('failed', 'pruned'))
+                     or (old.status = 'superseded' and new.status not in ('superseded', 'pruned'))
+                     or (old.status = 'pruned' and new.status <> 'pruned') then
+                    raise exception 'invalid revision image build transition: % -> %', old.status, new.status;
+                  end if;
+                  if new.id is distinct from old.id
+                     or new.revision_id is distinct from old.revision_id
+                     or new.generation is distinct from old.generation
+                     or new.source_commit is distinct from old.source_commit
+                     or new.source_snapshot_path is distinct from old.source_snapshot_path
+                     or new.source_content_digest is distinct from old.source_content_digest
+                     or new.local_tag is distinct from old.local_tag
+                     or new.base_image_id is distinct from old.base_image_id
+                     or new.retry_of_build_id is distinct from old.retry_of_build_id
+                     or new.queued_at is distinct from old.queued_at
+                     or new.created_at is distinct from old.created_at then
+                    raise exception 'revision image build identity is immutable';
+                  end if;
+                  if old.status in ('ready', 'superseded', 'pruned') and (
+                    new.image_id is distinct from old.image_id
+                    or new.image_digest is distinct from old.image_digest
+                  ) then
+                    raise exception 'ready revision image build result is immutable';
+                  end if;
+                  return new;
+                end;
+                $$ language plpgsql;
+                """
+            )
+            await conn.execute("drop trigger if exists trg_revision_image_build_contract on revision_image_builds;")
+            await conn.execute(
+                """
+                create trigger trg_revision_image_build_contract
+                before update on revision_image_builds
+                for each row execute function enforce_revision_image_build_contract();
+                """
+            )
+            await conn.execute(f"""
+                create table if not exists endpoint_deployments (
+                  id text primary key,
+                  endpoint_id text not null references bundle_endpoints(id) on delete cascade,
+                  active_build_id text,
+                  active_revision_id text,
+                  active_module_import_id text references module_imports(id) on delete restrict,
+                  target_build_id text,
+                  target_revision_id text,
+                  target_module_import_id text references module_imports(id) on delete restrict,
+                  previous_build_id text,
+                  previous_revision_id text,
+                  previous_module_import_id text references module_imports(id) on delete restrict,
+                  failed_build_id text,
+                  failed_revision_id text,
+                  failed_module_import_id text references module_imports(id) on delete restrict,
+                  phase text not null check (phase in ('legacy_static', 'pending', 'rolling', 'ready', 'draining', 'rollback', 'failed')),
+                  desired_replica_count int not null check (desired_replica_count >= 1),
+                  legacy_fallback boolean not null default true,
+                  rollout_generation bigint not null check (rollout_generation >= 0),
+                  deadline_at timestamptz,
+                  failure_reason text check (failure_reason is null or char_length(failure_reason) <= {MAX_FAILURE_REASON_CHARS}),
+                  rollout_started_at timestamptz,
+                  ready_at timestamptz,
+                  created_at timestamptz not null,
+                  updated_at timestamptz not null,
+                  unique (endpoint_id, rollout_generation),
+                  unique (id, endpoint_id),
+                  foreign key (active_build_id, active_revision_id)
+                    references revision_image_builds(id, revision_id) match full on delete restrict,
+                  foreign key (target_build_id, target_revision_id)
+                    references revision_image_builds(id, revision_id) match full on delete restrict,
+                  foreign key (previous_build_id, previous_revision_id)
+                    references revision_image_builds(id, revision_id) match full on delete restrict,
+                  constraint endpoint_deployments_failed_build_revision_fk
+                    foreign key (failed_build_id, failed_revision_id)
+                    references revision_image_builds(id, revision_id) match full on delete restrict
+                );
+                """)
+            await conn.execute("""
+                alter table endpoint_deployments
+                  add column if not exists legacy_fallback boolean;
+                alter table endpoint_deployments add column if not exists active_module_import_id text references module_imports(id) on delete restrict;
+                alter table endpoint_deployments add column if not exists target_module_import_id text references module_imports(id) on delete restrict;
+                alter table endpoint_deployments add column if not exists previous_module_import_id text references module_imports(id) on delete restrict;
+                alter table endpoint_deployments add column if not exists failed_build_id text;
+                alter table endpoint_deployments add column if not exists failed_revision_id text;
+                alter table endpoint_deployments add column if not exists failed_module_import_id text references module_imports(id) on delete restrict;
+                update endpoint_deployments
+                set legacy_fallback = (phase = 'legacy_static')
+                where legacy_fallback is null;
+                update endpoint_deployments d
+                set active_module_import_id = coalesce(
+                      d.active_module_import_id,
+                      (select r.module_import_id from bundle_revisions r where r.id = d.active_revision_id),
+                      (select e.module_import_id from bundle_endpoints e where e.id = d.endpoint_id)
+                    ),
+                    target_module_import_id = coalesce(
+                      d.target_module_import_id,
+                      (select r.module_import_id from bundle_revisions r where r.id = d.target_revision_id)
+                    ),
+                    previous_module_import_id = coalesce(
+                      d.previous_module_import_id,
+                      (select r.module_import_id from bundle_revisions r where r.id = d.previous_revision_id)
+                    );
+                alter table endpoint_deployments
+                  alter column legacy_fallback set default true;
+                alter table endpoint_deployments
+                  alter column legacy_fallback set not null;
+                """)
+            await conn.execute("""
+                do $$
+                begin
+                  if not exists (
+                    select 1 from pg_constraint
+                    where conrelid = 'endpoint_deployments'::regclass
+                      and conname = 'endpoint_deployments_failed_build_revision_fk'
+                  ) then
+                    alter table endpoint_deployments
+                      add constraint endpoint_deployments_failed_build_revision_fk
+                      foreign key (failed_build_id, failed_revision_id)
+                      references revision_image_builds(id, revision_id) match full on delete restrict;
+                  end if;
+                end
+                $$;
+                """)
+            await conn.execute(
+                """
+                create unique index if not exists uq_endpoint_deployments_active_rollout
+                on endpoint_deployments(endpoint_id)
+                where phase in ('pending', 'rolling', 'draining', 'rollback');
+                """
+            )
+            await conn.execute(
+                """
+                create index if not exists idx_endpoint_deployments_history
+                on endpoint_deployments(endpoint_id, rollout_generation desc);
+                """
+            )
+            await conn.execute(
+                "create index if not exists idx_endpoint_deployments_active_build on endpoint_deployments(active_build_id);"
+            )
+            await conn.execute(
+                "create index if not exists idx_endpoint_deployments_target_build on endpoint_deployments(target_build_id);"
+            )
+            await conn.execute(
+                "create index if not exists idx_endpoint_deployments_previous_build on endpoint_deployments(previous_build_id);"
+            )
+            await conn.execute(
+                "create index if not exists idx_endpoint_deployments_failed_build on endpoint_deployments(failed_build_id);"
+            )
+            await conn.execute(f"""
+                create table if not exists managed_endpoint_containers (
+                  container_id text primary key,
+                  container_name text not null,
+                  endpoint_id text not null references bundle_endpoints(id) on delete restrict,
+                  deployment_id text not null,
+                  build_id text not null,
+                  revision_id text not null,
+                  slot int not null check (slot >= 0),
+                  worker_id text,
+                  lifecycle text not null check (lifecycle in ('created', 'starting', 'ready', 'busy', 'draining', 'stopped', 'failed', 'missing', 'removed')),
+                  last_observed_at timestamptz,
+                  last_heartbeat_at timestamptz,
+                  started_at timestamptz,
+                  drain_started_at timestamptz,
+                  stopped_at timestamptz,
+                  drain_timed_out boolean not null default false,
+                  failure_reason text check (failure_reason is null or char_length(failure_reason) <= {MAX_FAILURE_REASON_CHARS}),
+                  container_log text not null default '',
+                  created_at timestamptz not null,
+                  updated_at timestamptz not null,
+                  foreign key (deployment_id, endpoint_id)
+                    references endpoint_deployments(id, endpoint_id) match full on delete restrict,
+                  foreign key (build_id, revision_id)
+                    references revision_image_builds(id, revision_id) match full on delete restrict
+                );
+                """)
+            await conn.execute(
+                "alter table managed_endpoint_containers add column if not exists worker_id text;"
+            )
+            await conn.execute(
+                "alter table managed_endpoint_containers add column if not exists drain_started_at timestamptz;"
+            )
+            await conn.execute(
+                "alter table managed_endpoint_containers add column if not exists drain_timed_out boolean not null default false;"
+            )
+            await conn.execute(
+                "alter table managed_endpoint_containers add column if not exists container_log text not null default '';"
+            )
+            await _migrate_managed_container_name_uniqueness(conn)
+            await conn.execute(
+                """
+                create index if not exists idx_managed_endpoint_containers_endpoint_lifecycle
+                on managed_endpoint_containers(endpoint_id, lifecycle, slot);
+                """
+            )
+            await conn.execute(
+                """
+                create index if not exists idx_managed_endpoint_containers_deployment_slot
+                on managed_endpoint_containers(deployment_id, slot);
+                """
+            )
+            await conn.execute(
+                "create index if not exists idx_managed_endpoint_containers_build on managed_endpoint_containers(build_id);"
+            )
+            await conn.execute(
+                """
+                create index if not exists idx_managed_endpoint_containers_heartbeat
+                on managed_endpoint_containers(last_heartbeat_at asc)
+                where lifecycle in ('starting', 'ready', 'busy', 'draining');
+                """
+            )
+            await conn.execute(
+                """
+                insert into endpoint_deployments (
+                  id, endpoint_id, active_module_import_id, phase, desired_replica_count, rollout_generation, created_at, updated_at
+                )
+                select 'legacy-' || e.id, e.id, e.module_import_id, 'legacy_static', greatest(1, e.pinned_worker_count), 0,
+                       e.created_at, e.updated_at
+                from bundle_endpoints e
+                where e.delete_requested_at is null
+                on conflict (endpoint_id, rollout_generation) do nothing;
+                """
+            )
             await conn.execute(
                 """
                 create table if not exists endpoint_worker_registrations (
@@ -1852,7 +2626,57 @@ class AppServices:
         bundle_name: str | None,
         bundle_version: str | None,
         source_event: str,
+        source_snapshot_path: str | None = None,
+        source_content_digest: str | None = None,
     ) -> str:
+        normalized_snapshot_path = _clean_optional_text(source_snapshot_path)
+        normalized_content_digest = _clean_optional_text(source_content_digest)
+        if normalized_snapshot_path and normalized_content_digest:
+            current = await conn.fetchrow(
+                """
+                select r.id, r.commit_sha, r.source_event,
+                       r.source_snapshot_path, r.source_content_digest
+                from module_imports m
+                left join bundle_revisions r on r.id = m.current_revision_id
+                where m.id = $1
+                for update of m
+                """,
+                module_id,
+            )
+            if current is not None and current["id"]:
+                same_source_identity = (
+                    current["source_content_digest"] == normalized_content_digest
+                    and current["commit_sha"] == commit_sha
+                    and current["source_event"] == source_event
+                )
+                if same_source_identity:
+                    return str(current["id"])
+                if (
+                    current["source_content_digest"] is None
+                    and current["commit_sha"] == commit_sha
+                    and current["source_event"] == source_event
+                ):
+                    await conn.execute(
+                        """
+                        update bundle_revisions
+                        set commit_sha = $2,
+                            checkout_path = $3,
+                            bundle_name = $4,
+                            bundle_version = $5,
+                            source_snapshot_path = $6,
+                            source_content_digest = $7
+                        where id = $1
+                        """,
+                        current["id"],
+                        _clean_optional_text(commit_sha),
+                        _clean_optional_text(checkout_path),
+                        _clean_optional_text(bundle_name),
+                        _clean_optional_text(bundle_version),
+                        normalized_snapshot_path,
+                        normalized_content_digest,
+                    )
+                    return str(current["id"])
+
         revision_id = str(uuid4())
         now = datetime.now(timezone.utc)
         await conn.execute(
@@ -1865,9 +2689,11 @@ class AppServices:
               bundle_name,
               bundle_version,
               source_event,
+              source_snapshot_path,
+              source_content_digest,
               created_at
             )
-            values ($1, $2, $3, $4, $5, $6, $7, $8)
+            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             """,
             revision_id,
             module_id,
@@ -1876,6 +2702,8 @@ class AppServices:
             _clean_optional_text(bundle_name),
             _clean_optional_text(bundle_version),
             source_event,
+            normalized_snapshot_path,
+            normalized_content_digest,
             now,
         )
         await conn.execute(
@@ -1967,6 +2795,92 @@ class AppServices:
             )
         return dict(row) if row is not None else None
 
+    async def freeze_validated_source(self, bundle_path: str) -> FrozenRevisionSource:
+        return await asyncio.to_thread(
+            freeze_revision_source,
+            Path(bundle_path),
+            self._revision_snapshot_store,
+        )
+
+    async def record_validated_revision(
+        self,
+        module_id: str,
+        *,
+        bundle_path: str,
+        commit_sha: str | None,
+        bundle_name: str | None,
+        bundle_version: str | None,
+        source_event: str,
+        frozen_source: FrozenRevisionSource | None = None,
+    ) -> dict[str, str]:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        frozen = frozen_source or await self.freeze_validated_source(bundle_path)
+        async with self.postgres_pool.acquire() as conn:
+            revision_id = await self._create_bundle_revision(
+                conn,
+                module_id,
+                commit_sha=commit_sha,
+                checkout_path=bundle_path,
+                bundle_name=bundle_name,
+                bundle_version=bundle_version,
+                source_event=source_event,
+                source_snapshot_path=str(frozen.path),
+                source_content_digest=frozen.content_digest,
+            )
+        return {
+            "revision_id": revision_id,
+            "source_snapshot_path": str(frozen.path),
+            "source_content_digest": frozen.content_digest,
+        }
+
+    async def persist_module_validation(
+        self,
+        module_id: str,
+        *,
+        module_state: dict[str, Any],
+        report: Any,
+        frozen_source: FrozenRevisionSource,
+    ) -> bool:
+        bundle_name = (
+            report.metadata.get("name")
+            if isinstance(report.metadata.get("name"), str)
+            else None
+        )
+        bundle_version = (
+            report.metadata.get("version")
+            if isinstance(report.metadata.get("version"), str)
+            else None
+        )
+        revision_id = module_state.get("bundle_revision_id")
+        if report.passed:
+            revision = await self.record_validated_revision(
+                module_id,
+                bundle_path=module_state["bundle_path"],
+                commit_sha=module_state.get("bundle_commit_sha"),
+                bundle_name=bundle_name,
+                bundle_version=bundle_version,
+                source_event="validation",
+                frozen_source=frozen_source,
+            )
+            revision_id = revision["revision_id"]
+        await self._update_module_bundle_metadata_record(
+            module_id,
+            bundle_name=bundle_name,
+            bundle_version=bundle_version,
+        )
+        found = await self.set_validation_status(
+            module_id,
+            "passed" if report.passed else "failed",
+            report.diagnostics,
+            revision_id=revision_id,
+            commit_sha=module_state.get("bundle_commit_sha"),
+            bundle_version=bundle_version,
+        )
+        if found and report.passed:
+            await self._reconcile_revision_builds(trigger="manual_validation")
+        return found
+
     async def _set_module_sync_state(
         self,
         module_id: str,
@@ -1980,9 +2894,14 @@ class AppServices:
         bundle_name: str | None = None,
         bundle_version: str | None = None,
         checkout_path: str | None = None,
-    ) -> None:
+        frozen_source: FrozenRevisionSource | None = None,
+        persist: bool = True,
+    ) -> str | None:
+        if not persist:
+            return None
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
+        revision_id: str | None = None
         async with self.postgres_pool.acquire() as conn:
             await conn.execute(
                 """
@@ -2003,7 +2922,7 @@ class AppServices:
                 synced_now,
             )
             if source_event:
-                await self._create_bundle_revision(
+                revision_id = await self._create_bundle_revision(
                     conn,
                     module_id,
                     commit_sha=current_commit_sha,
@@ -2011,7 +2930,81 @@ class AppServices:
                     bundle_name=bundle_name,
                     bundle_version=bundle_version,
                     source_event=source_event,
+                    source_snapshot_path=(
+                        str(frozen_source.path) if frozen_source is not None else None
+                    ),
+                    source_content_digest=(
+                        frozen_source.content_digest if frozen_source is not None else None
+                    ),
                 )
+        return revision_id
+
+    async def _finalize_synced_module(
+        self,
+        module_id: str,
+        *,
+        current_commit_sha: str,
+        bundle_name: str | None,
+        bundle_version: str | None,
+        checkout_path: str,
+        frozen_source: FrozenRevisionSource,
+        diagnostics: list[dict[str, Any]],
+    ) -> str:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            async with conn.transaction():
+                revision_id = await self._create_bundle_revision(
+                    conn,
+                    module_id,
+                    commit_sha=current_commit_sha,
+                    bundle_name=bundle_name,
+                    bundle_version=bundle_version,
+                    source_event="sync",
+                    checkout_path=checkout_path,
+                    source_snapshot_path=str(frozen_source.path),
+                    source_content_digest=frozen_source.content_digest,
+                )
+                module_result = await conn.execute(
+                    """
+                    update module_imports
+                    set current_commit_sha = $2,
+                        upstream_commit_sha = $2,
+                        sync_status = 'synced',
+                        last_sync_error = null,
+                        last_synced_at = now(),
+                        bundle_name = coalesce($3, bundle_name),
+                        bundle_version = coalesce($4, bundle_version),
+                        updated_at = now()
+                    where id = $1
+                    """,
+                    module_id,
+                    current_commit_sha,
+                    bundle_name,
+                    bundle_version,
+                )
+                if module_result == "UPDATE 0":
+                    raise RuntimeError("module not found")
+                validation_result = await conn.execute(
+                    """
+                    update runtime_bundles
+                    set validation_status = 'passed',
+                        diagnostics = $2::jsonb,
+                        validation_revision_id = $3,
+                        validation_commit_sha = $4,
+                        validation_bundle_version = $5,
+                        updated_at = now()
+                    where module_import_id = $1
+                    """,
+                    module_id,
+                    __import__("json").dumps(diagnostics),
+                    revision_id,
+                    current_commit_sha,
+                    bundle_version,
+                )
+                if validation_result == "UPDATE 0":
+                    raise RuntimeError("module runtime not found")
+        return revision_id
 
     async def resolve_module_execution_state(
         self,
@@ -2061,10 +3054,13 @@ class AppServices:
             bundle_root = checkout_path / normalized_subpath if normalized_subpath else checkout_path
             if not bundle_root.exists() or not bundle_root.is_dir():
                 raise ValueError("github_subpath does not exist in the repository")
-            report = validate_bundle(str(bundle_root))
+            try:
+                frozen_source = await self.freeze_validated_source(str(bundle_root))
+            except BuildContextError as exc:
+                raise ValueError(str(exc)) from exc
+            report = validate_bundle(str(frozen_source.path))
             if not report.passed:
                 raise ValueError(report.summary)
-
             created = await self.create_module_import(
                 "github",
                 str(bundle_root),
@@ -2079,10 +3075,31 @@ class AppServices:
                 sync_status="synced",
                 bundle_name=report.metadata.get("name") if isinstance(report.metadata.get("name"), str) else None,
                 bundle_version=report.metadata.get("version") if isinstance(report.metadata.get("version"), str) else None,
+                source_snapshot_path=(
+                    str(frozen_source.path) if frozen_source is not None else None
+                ),
+                source_content_digest=(
+                    frozen_source.content_digest if frozen_source is not None else None
+                ),
             )
-            found = await self.set_validation_status(module_id, "passed", report.diagnostics)
+            found = await self.set_validation_status(
+                module_id,
+                "passed",
+                report.diagnostics,
+                revision_id=created["current_revision_id"],
+                commit_sha=current_commit_sha,
+                bundle_version=(
+                    report.metadata.get("version")
+                    if isinstance(report.metadata.get("version"), str)
+                    else None
+                ),
+            )
             if not found:
                 raise RuntimeError("imported module could not be marked validated")
+            await self._reconcile_revision_builds(trigger="github_import")
+            created["image_build"] = await self.get_revision_image_state(
+                created["current_revision_id"]
+            )
             created["validation_status"] = "passed"
             created["diagnostics"] = report.diagnostics
             created["checkout_path"] = str(checkout_path)
@@ -2096,7 +3113,9 @@ class AppServices:
                 shutil.rmtree(checkout_path, ignore_errors=True)
             raise
 
-    async def refresh_module_sync_status(self, module_id: str) -> dict[str, Any]:
+    async def refresh_module_sync_status(
+        self, module_id: str, *, persist: bool = True
+    ) -> dict[str, Any]:
         module = await self._get_module_source_record(module_id)
         if module is None:
             raise ValueError("module not found")
@@ -2133,6 +3152,7 @@ class AppServices:
                 upstream_commit_sha=upstream_commit_sha,
                 sync_status=sync_status,
                 last_sync_error=None,
+                persist=persist,
             )
             return {
                 "module_id": module_id,
@@ -2153,6 +3173,7 @@ class AppServices:
                 upstream_commit_sha=upstream_commit_sha or current_commit_sha,
                 sync_status="sync_error",
                 last_sync_error=str(exc),
+                persist=persist,
             )
             raise ModuleSyncError(
                 str(exc),
@@ -2169,7 +3190,7 @@ class AppServices:
             )
 
     async def sync_module(self, module_id: str) -> dict[str, Any]:
-        sync_state = await self.refresh_module_sync_status(module_id)
+        sync_state = await self.refresh_module_sync_status(module_id, persist=False)
         module = await self._get_module_source_record(module_id)
         if module is None:
             raise ValueError("module not found")
@@ -2189,34 +3210,58 @@ class AppServices:
         checkout_path = Path(str(module.get("checkout_path") or "").strip()).expanduser().resolve()
         clone_url = _github_clone_url(repo_url, normalized_pat)
 
+        previous_commit_sha = str(module.get("current_commit_sha") or "").strip()
+        checkout_advanced = False
         try:
             await self._run_git_command(["git", "fetch", clone_url, branch], cwd=checkout_path)
             await self._run_git_command(["git", "merge", "--ff-only", "FETCH_HEAD"], cwd=checkout_path)
+            checkout_advanced = True
             current_commit_sha = await self._run_git_command(["git", "rev-parse", "HEAD"], cwd=checkout_path)
             bundle_root = Path(self._module_bundle_root_path(module)).expanduser().resolve()
-            report = validate_bundle(str(bundle_root))
+            try:
+                frozen_source = await self.freeze_validated_source(str(bundle_root))
+            except BuildContextError as exc:
+                raise RuntimeError(str(exc)) from exc
+            report = validate_bundle(str(frozen_source.path))
             if not report.passed:
                 raise RuntimeError(report.summary)
-            await self.set_module_bundle_metadata(
-                module_id,
-                report.metadata.get("name") if isinstance(report.metadata.get("name"), str) else None,
-                report.metadata.get("version") if isinstance(report.metadata.get("version"), str) else None,
+            bundle_name = (
+                report.metadata.get("name")
+                if isinstance(report.metadata.get("name"), str)
+                else None
             )
-            found = await self.set_validation_status(module_id, "passed", report.diagnostics)
-            if not found:
-                raise RuntimeError("module not found")
-            await self._set_module_sync_state(
+            bundle_version = (
+                report.metadata.get("version")
+                if isinstance(report.metadata.get("version"), str)
+                else None
+            )
+            revision_id = await self._finalize_synced_module(
                 module_id,
                 current_commit_sha=current_commit_sha,
-                upstream_commit_sha=current_commit_sha,
-                sync_status="synced",
-                last_sync_error=None,
-                synced_now=True,
-                source_event="sync",
-                bundle_name=report.metadata.get("name") if isinstance(report.metadata.get("name"), str) else None,
-                bundle_version=report.metadata.get("version") if isinstance(report.metadata.get("version"), str) else None,
-                checkout_path=str(checkout_path),
+                bundle_name=bundle_name,
+                bundle_version=bundle_version,
+                checkout_path=str(bundle_root),
+                frozen_source=frozen_source,
+                diagnostics=report.diagnostics,
             )
+            checkout_advanced = False
+            try:
+                await self._reconcile_revision_builds(trigger="sync")
+                image_build = await self.get_revision_image_state(revision_id)
+            except Exception as exc:
+                logger.exception(
+                    "revision_image_post_finalize_failed trigger=sync module_id=%s revision_id=%s",
+                    module_id,
+                    revision_id,
+                )
+                image_build = {
+                    "status": "enqueue_failed",
+                    "eligible": True,
+                    "error": str(exc),
+                    "current_build": None,
+                    "ready_build": None,
+                    "history_count": 0,
+                }
             return {
                 "module_id": module_id,
                 "sync_status": "synced",
@@ -2227,16 +3272,26 @@ class AppServices:
                 "github_subpath": module.get("github_subpath"),
                 "last_sync_error": None,
                 "synced": True,
+                "current_revision_id": revision_id,
+                "image_build": image_build,
             }
-        except ModuleSyncError:
-            raise
         except Exception as exc:
-            await self._set_module_sync_state(
+            if checkout_advanced and previous_commit_sha:
+                try:
+                    await self._run_git_command(
+                        ["git", "reset", "--hard", previous_commit_sha],
+                        cwd=checkout_path,
+                    )
+                except Exception:
+                    logger.exception(
+                        "module_sync_checkout_rollback_failed module_id=%s commit=%s",
+                        module_id,
+                        previous_commit_sha,
+                    )
+            logger.warning(
+                "module_sync_source_finalization_failed module_id=%s: %s",
                 module_id,
-                current_commit_sha=str(module.get("current_commit_sha") or "").strip(),
-                upstream_commit_sha=str(sync_state.get("upstream_commit_sha") or module.get("upstream_commit_sha") or "").strip(),
-                sync_status="sync_error",
-                last_sync_error=str(exc),
+                exc,
             )
             raise ModuleSyncError(
                 str(exc),
@@ -2274,6 +3329,8 @@ class AppServices:
         bundle_version: str | None = None,
         github_secrets_environment_name: str | None = None,
         environment_entries: list[dict[str, Any]] | None = None,
+        source_snapshot_path: str | None = None,
+        source_content_digest: str | None = None,
     ) -> dict[str, Any]:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
@@ -2356,6 +3413,8 @@ class AppServices:
                 bundle_name=bundle_name,
                 bundle_version=bundle_version,
                 source_event="import",
+                source_snapshot_path=source_snapshot_path,
+                source_content_digest=source_content_digest,
             )
         return {"id": module_id, "status": "imported", "current_revision_id": current_revision_id}
 
@@ -2586,6 +3645,103 @@ class AppServices:
             "evaluation_contract": bundle_metadata.get("evaluation_contract"),
         }
 
+    async def _revision_image_states(
+        self, revision_ids: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        if self.postgres_pool is None or not revision_ids:
+            return {}
+        async with self.postgres_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                select r.id as requested_revision_id,
+                       (m.deleted_at is null
+                        and m.sync_status = 'synced'
+                        and m.current_revision_id = r.id
+                        and rb.validation_status = 'passed'
+                        and rb.validation_revision_id = r.id) as source_eligible,
+                       (m.deleted_at is null
+                        and m.sync_status = 'synced'
+                        and m.current_revision_id = r.id
+                        and rb.validation_status = 'passed'
+                        and rb.validation_revision_id = r.id
+                        and r.source_snapshot_path is not null
+                        and r.source_content_digest is not null) as eligible,
+                       r.source_snapshot_path, r.source_content_digest,
+                       b.id, b.revision_id, b.generation, b.source_commit,
+                       b.source_content_digest, b.local_tag, b.image_id, b.image_digest,
+                       b.base_image_id, b.status, b.attempt, b.available_at,
+                       b.claim_owner, b.claim_expires_at, b.failure_reason,
+                       b.retry_of_build_id, b.queued_at, b.started_at, b.finished_at,
+                       b.created_at, b.updated_at
+                from bundle_revisions r
+                join module_imports m on m.id = r.module_import_id
+                left join runtime_bundles rb on rb.module_import_id = m.id
+                left join revision_image_builds b on b.revision_id = r.id
+                where r.id = any($1::text[])
+                order by r.id, b.generation desc
+                """,
+                revision_ids,
+            )
+        grouped: dict[str, list[Any]] = {revision_id: [] for revision_id in revision_ids}
+        eligible: dict[str, bool] = {revision_id: False for revision_id in revision_ids}
+        source_eligible: dict[str, bool] = {revision_id: False for revision_id in revision_ids}
+        snapshot_present: dict[str, bool] = {revision_id: False for revision_id in revision_ids}
+        for row in rows:
+            revision_id = str(row["requested_revision_id"])
+            eligible[revision_id] = bool(row["eligible"])
+            source_eligible[revision_id] = bool(row["source_eligible"])
+            snapshot_present[revision_id] = bool(
+                row["source_snapshot_path"] and row["source_content_digest"]
+            )
+            if row["id"] is not None:
+                grouped.setdefault(revision_id, []).append(row)
+        states: dict[str, dict[str, Any]] = {}
+        for revision_id in revision_ids:
+            builds = grouped.get(revision_id, [])
+            latest = builds[0] if builds else None
+            ready = next((row for row in builds if row["status"] == "ready"), None)
+            if latest is not None:
+                status = latest["status"]
+                error = None
+            elif source_eligible.get(revision_id, False) and not snapshot_present.get(revision_id, False):
+                status = "snapshot_failed"
+                error = "validated revision has no immutable source snapshot"
+            elif eligible.get(revision_id, False):
+                status = "enqueue_failed"
+                error = "eligible revision has no image build generation"
+            else:
+                status = "not_eligible"
+                error = None
+            states[revision_id] = {
+                "status": status,
+                "error": error,
+                "eligible": eligible.get(revision_id, False),
+                "current_build": (
+                    build_revision_image_summary_payload(latest)
+                    if latest is not None
+                    else None
+                ),
+                "ready_build": (
+                    build_revision_image_summary_payload(ready)
+                    if ready is not None
+                    else None
+                ),
+                "history_count": len(builds),
+            }
+        return states
+
+    async def get_revision_image_state(self, revision_id: str) -> dict[str, Any]:
+        return (await self._revision_image_states([revision_id])).get(
+            revision_id,
+            {
+                "status": "not_eligible",
+                "eligible": False,
+                "current_build": None,
+                "ready_build": None,
+                "history_count": 0,
+            },
+        )
+
     async def list_modules(self) -> list[dict[str, Any]]:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
@@ -2612,7 +3768,27 @@ class AppServices:
                 order by m.created_at desc
                 """
             )
-        return [self._build_module_payload(row) for row in rows]
+        modules = [self._build_module_payload(row) for row in rows]
+        states = await self._revision_image_states(
+            [
+                str(module["current_revision_id"])
+                for module in modules
+                if module.get("current_revision_id")
+            ]
+        )
+        for module in modules:
+            revision_id = module.get("current_revision_id")
+            module["image_build"] = states.get(
+                str(revision_id),
+                {
+                    "status": "not_eligible",
+                    "eligible": False,
+                    "current_build": None,
+                    "ready_build": None,
+                    "history_count": 0,
+                },
+            )
+        return modules
 
     async def get_module(self, module_id: str) -> dict[str, Any] | None:
         modules = await self.list_modules()
@@ -2799,6 +3975,602 @@ class AppServices:
             payload["lm_profile_name"] = lm_profile_name
         return payload
 
+    async def _resolve_ready_endpoint_image(
+        self, conn: Any, module_id: str
+    ) -> dict[str, Any] | None:
+        row = await conn.fetchrow(
+            """
+            select m.id as module_id, m.current_revision_id,
+                   rb.validation_status, rb.validation_revision_id,
+                   ready.id as ready_build_id, ready.generation as ready_generation,
+                   ready.image_id as ready_image_id,
+                   latest.id as latest_build_id, latest.generation as latest_generation,
+                   latest.status as latest_build_status, latest.image_id as latest_image_id,
+                   latest.failure_reason as latest_failure_reason
+            from module_imports m
+            left join runtime_bundles rb on rb.module_import_id = m.id
+            left join lateral (
+              select b.id, b.generation, b.image_id
+              from revision_image_builds b
+              where b.revision_id = m.current_revision_id
+                and b.status = 'ready'
+                and b.image_id is not null
+              order by b.generation desc
+              limit 1
+            ) ready on true
+            left join lateral (
+              select b.id, b.generation, b.status, b.image_id, b.failure_reason
+              from revision_image_builds b
+              where b.revision_id = m.current_revision_id
+              order by b.generation desc
+              limit 1
+            ) latest on true
+            where m.id = $1 and m.deleted_at is null
+            for share of m
+            """,
+            module_id,
+        )
+        if row is None:
+            return None
+        revision_id = _clean_optional_text(row["current_revision_id"])
+        if (
+            revision_id is None
+            or str(row["validation_status"] or "") != "passed"
+            or _clean_optional_text(row["validation_revision_id"]) != revision_id
+        ):
+            raise EndpointImageNotReadyError(
+                "endpoint requires a validated current module revision",
+                code="endpoint_revision_not_ready",
+                revision_id=revision_id,
+                build_status="revision_not_ready",
+            )
+        ready_build_id = _clean_optional_text(row["ready_build_id"])
+        ready_image_id = _clean_optional_text(row["ready_image_id"])
+        if ready_build_id and ready_image_id:
+            locked_ready = await conn.fetchrow(
+                """
+                select id, generation, image_id
+                from revision_image_builds
+                where id = $1 and revision_id = $2
+                  and status = 'ready' and image_id = $3
+                for share
+                """,
+                ready_build_id,
+                revision_id,
+                ready_image_id,
+            )
+            if locked_ready is not None:
+                return {
+                    "module_id": module_id,
+                    "revision_id": revision_id,
+                    "build_id": str(locked_ready["id"]),
+                    "image_id": str(locked_ready["image_id"]),
+                    "generation": int(locked_ready["generation"] or 0),
+                    "status": "ready",
+                }
+        latest_build_id = _clean_optional_text(row["latest_build_id"])
+        latest_status = str(row["latest_build_status"] or "missing")
+        if ready_build_id and ready_image_id and locked_ready is None:
+            latest_status = "pruned"
+        if latest_status == "ready" and not _clean_optional_text(
+            row["latest_image_id"]
+        ):
+            latest_status = "missing_local_image"
+        build = None
+        if latest_build_id:
+            build = {
+                "id": latest_build_id,
+                "revision_id": revision_id,
+                "generation": int(row["latest_generation"] or 0),
+                "status": latest_status,
+                "image_id": _clean_optional_text(row["latest_image_id"]),
+                "failure_reason": _clean_optional_text(row["latest_failure_reason"]),
+            }
+        raise EndpointImageNotReadyError(
+            "endpoint requires a ready non-pruned local revision image",
+            code="endpoint_image_not_ready",
+            revision_id=revision_id,
+            build_status=latest_status,
+            build=build,
+        )
+
+    async def _schedule_endpoint_rollout(
+        self,
+        conn: Any,
+        *,
+        endpoint_id: str,
+        build_id: str,
+        revision_id: str,
+        target_module_import_id: str,
+        desired_replica_count: int,
+        now: datetime,
+    ) -> bool:
+        deployment = await conn.fetchrow(
+            """
+            select id, endpoint_id, active_build_id, active_revision_id, active_module_import_id,
+                   target_build_id, target_revision_id, target_module_import_id,
+                   previous_build_id, previous_revision_id, previous_module_import_id,
+                   failed_build_id, failed_revision_id, failed_module_import_id,
+                   phase, desired_replica_count, legacy_fallback, rollout_generation, created_at
+            from endpoint_deployments
+            where endpoint_id = $1
+            order by rollout_generation desc
+            limit 1
+            for update
+            """,
+            endpoint_id,
+        )
+        if deployment is None:
+            raise RuntimeError("endpoint deployment intent is missing")
+        active_pair = (
+            _clean_optional_text(deployment["active_build_id"]),
+            _clean_optional_text(deployment["active_revision_id"]),
+        )
+        target_pair = (
+            _clean_optional_text(deployment["target_build_id"]),
+            _clean_optional_text(deployment["target_revision_id"]),
+        )
+        desired_pair = (build_id, revision_id)
+        if desired_pair in {active_pair, target_pair}:
+            await self._update_endpoint_deployment_replica_count(
+                conn,
+                endpoint_id=endpoint_id,
+                desired_replica_count=desired_replica_count,
+                updated_at=now,
+            )
+            return False
+        legacy_fallback = bool(deployment["legacy_fallback"])
+        phase = str(deployment["phase"] or "")
+        if legacy_fallback or phase in {"pending", "rolling", "draining", "rollback", "failed"}:
+            await conn.execute(
+                """
+                update endpoint_deployments
+                set target_build_id = $2, target_revision_id = $3,
+                    target_module_import_id = $4,
+                    phase = 'pending', desired_replica_count = $5,
+                    rollout_generation = rollout_generation + case
+                      when target_build_id is null and phase = 'legacy_static' then 0 else 1 end,
+                    failed_build_id = null, failed_revision_id = null,
+                    failed_module_import_id = null,
+                    rollout_started_at = $6, ready_at = null, deadline_at = null,
+                    failure_reason = null, updated_at = $6
+                where id = $1
+                """,
+                str(deployment["id"]),
+                build_id,
+                revision_id,
+                target_module_import_id,
+                desired_replica_count,
+                now,
+            )
+            return True
+        next_generation = int(deployment["rollout_generation"] or 0) + 1
+        await conn.execute(
+            """
+            insert into endpoint_deployments (
+              id, endpoint_id, active_build_id, active_revision_id, active_module_import_id,
+              target_build_id, target_revision_id, target_module_import_id,
+              previous_build_id, previous_revision_id, previous_module_import_id,
+              phase, desired_replica_count, legacy_fallback, rollout_generation,
+              rollout_started_at, created_at, updated_at
+            ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                      'pending', $12, false, $13, $14, $14, $14)
+            """,
+            f"rollout-{endpoint_id}-{next_generation}-{uuid4().hex[:12]}",
+            endpoint_id,
+            active_pair[0],
+            active_pair[1],
+            _clean_optional_text(deployment["active_module_import_id"]),
+            build_id,
+            revision_id,
+            target_module_import_id,
+            _clean_optional_text(deployment["previous_build_id"]),
+            _clean_optional_text(deployment["previous_revision_id"]),
+            _clean_optional_text(deployment["previous_module_import_id"]),
+            desired_replica_count,
+            next_generation,
+            now,
+        )
+        return True
+
+    async def _ensure_legacy_endpoint_deployment(
+        self,
+        conn: Any,
+        *,
+        endpoint_id: str,
+        desired_replica_count: int,
+        created_at: datetime,
+        updated_at: datetime,
+    ) -> None:
+        await conn.execute(
+            """
+            insert into endpoint_deployments (
+              id, endpoint_id, active_module_import_id, phase, desired_replica_count, rollout_generation, created_at, updated_at
+            )
+            values ($1, $2, (select module_import_id from bundle_endpoints where id = $2), 'legacy_static', $3, 0, $4, $5)
+            on conflict (endpoint_id, rollout_generation) do nothing
+            """,
+            f"legacy-{endpoint_id}",
+            endpoint_id,
+            desired_replica_count,
+            created_at,
+            updated_at,
+        )
+
+    async def _update_endpoint_deployment_replica_count(
+        self,
+        conn: Any,
+        *,
+        endpoint_id: str,
+        desired_replica_count: int,
+        updated_at: datetime,
+    ) -> None:
+        await conn.execute(
+            """
+            update endpoint_deployments
+            set desired_replica_count = $2, updated_at = $3
+            where id = (
+              select id
+              from endpoint_deployments
+              where endpoint_id = $1
+              order by rollout_generation desc
+              limit 1
+            )
+            """,
+            endpoint_id,
+            desired_replica_count,
+            updated_at,
+        )
+
+    async def list_revision_image_builds(self, revision_id: str) -> list[dict[str, Any]]:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                select id, revision_id, generation, source_commit, source_snapshot_path, source_content_digest,
+                       local_tag, image_id, image_digest, base_image_id, status, attempt, available_at,
+                       claim_owner, claim_expires_at, build_log, failure_reason, retry_of_build_id,
+                       queued_at, started_at, finished_at, created_at, updated_at
+                from revision_image_builds
+                where revision_id = $1
+                order by generation desc
+                """,
+                revision_id,
+            )
+        return [build_revision_image_payload(row) for row in rows]
+
+    async def get_revision_image_build(self, build_id: str) -> dict[str, Any] | None:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                select id, revision_id, generation, source_commit, source_snapshot_path, source_content_digest,
+                       local_tag, image_id, image_digest, base_image_id, status, attempt, available_at,
+                       claim_owner, claim_expires_at, build_log, failure_reason, retry_of_build_id,
+                       queued_at, started_at, finished_at, created_at, updated_at
+                from revision_image_builds
+                where id = $1
+                """,
+                build_id,
+            )
+        return build_revision_image_payload(row) if row is not None else None
+
+    async def list_revision_image_build_statuses(
+        self,
+        *,
+        module_id: str | None = None,
+        revision_id: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        if status is not None and status not in {
+            "queued", "building", "ready", "failed", "superseded", "pruned"
+        }:
+            raise ValueError("unknown revision image build status")
+        bounded_limit = min(100, max(1, int(limit)))
+        bounded_offset = max(0, int(offset))
+        clauses: list[str] = []
+        params: list[Any] = []
+        for column, value in (
+            ("r.module_import_id", module_id),
+            ("b.revision_id", revision_id),
+            ("b.status", status),
+        ):
+            if value is None:
+                continue
+            params.append(value)
+            clauses.append(f"{column} = ${len(params)}")
+        where = f"where {' and '.join(clauses)}" if clauses else ""
+        params.extend((bounded_limit, bounded_offset))
+        async with self.postgres_pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                select b.id, b.revision_id, b.generation, b.source_commit,
+                       b.source_snapshot_path, b.source_content_digest, b.local_tag,
+                       b.image_id, b.image_digest, b.base_image_id, b.status, b.attempt,
+                       b.available_at, b.claim_owner, b.claim_expires_at, b.build_log,
+                       b.failure_reason, b.retry_of_build_id, b.queued_at, b.started_at,
+                       b.finished_at, b.created_at, b.updated_at,
+                       r.module_import_id as module_id,
+                       count(*) over() as total_count
+                from revision_image_builds b
+                join bundle_revisions r on r.id = b.revision_id
+                {where}
+                order by b.created_at desc, b.id desc
+                limit ${len(params) - 1} offset ${len(params)}
+                """,
+                *params,
+            )
+        items = []
+        for row in rows:
+            item = build_revision_image_summary_payload(row)
+            item["module_id"] = row["module_id"]
+            items.append(item)
+        total = int(rows[0]["total_count"]) if rows else 0
+        next_offset = bounded_offset + len(items)
+        return {
+            "items": items,
+            "limit": bounded_limit,
+            "offset": bounded_offset,
+            "next_offset": next_offset if next_offset < total else None,
+            "total": total,
+        }
+
+    async def get_revision_image_build_status(
+        self, build_id: str
+    ) -> dict[str, Any] | None:
+        build = await self.get_revision_image_build(build_id)
+        return build_revision_image_summary_payload(build) if build is not None else None
+
+    async def get_revision_image_build_logs(
+        self,
+        build_id: str,
+        *,
+        offset: int = 0,
+        limit: int = 16_384,
+    ) -> dict[str, Any] | None:
+        build = await self.get_revision_image_build(build_id)
+        if build is None:
+            return None
+        encoded = str(build.get("build_log") or "").encode("utf-8", errors="replace")
+        bounded_offset = min(len(encoded), max(0, int(offset)))
+        bounded_limit = min(65_536, max(1, int(limit)))
+        end = min(len(encoded), bounded_offset + bounded_limit)
+        text = encoded[bounded_offset:end].decode("utf-8", errors="ignore")
+        return {
+            "build_id": build_id,
+            "offset": bounded_offset,
+            "limit": bounded_limit,
+            "next_offset": end if end < len(encoded) else None,
+            "total_bytes": len(encoded),
+            "text": text,
+        }
+
+    def _require_revision_build_store(self) -> RevisionImageBuildStore:
+        if self._revision_build_store is None:
+            raise RuntimeError("revision image build coordinator is not configured")
+        return self._revision_build_store
+
+    async def build_current_module_revision(self, module_id: str) -> dict[str, Any]:
+        build_id = await self._require_revision_build_store().enqueue_module_current(
+            module_id
+        )
+        build = await self.get_revision_image_build_status(build_id)
+        if build is None:
+            raise RuntimeError("queued revision image build was not persisted")
+        return build
+
+    async def retry_revision_image_build(self, build_id: str) -> dict[str, Any]:
+        queued_id = await self._require_revision_build_store().enqueue_retry(build_id)
+        queued = await self.get_revision_image_build_status(queued_id)
+        if queued is None:
+            raise RuntimeError("queued revision image build was not persisted")
+        return queued
+
+    async def rebuild_all_revision_images(self) -> list[dict[str, Any]]:
+        build_ids = await self._require_revision_build_store().enqueue_rebuild_all()
+        builds: list[dict[str, Any]] = []
+        for build_id in build_ids:
+            build = await self.get_revision_image_build_status(build_id)
+            if build is not None:
+                builds.append(build)
+        return builds
+
+    async def list_endpoint_deployments(self, endpoint_id: str) -> list[dict[str, Any]]:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                select id, endpoint_id, active_build_id, active_revision_id, active_module_import_id,
+                       target_build_id, target_revision_id, target_module_import_id,
+                       previous_build_id, previous_revision_id, previous_module_import_id,
+                       failed_build_id, failed_revision_id, failed_module_import_id, phase,
+                       desired_replica_count, legacy_fallback, rollout_generation, deadline_at,
+                       failure_reason, rollout_started_at, ready_at, created_at, updated_at
+                from endpoint_deployments
+                where endpoint_id = $1
+                order by rollout_generation desc
+                """,
+                endpoint_id,
+            )
+        return [build_endpoint_deployment_payload(row) for row in rows]
+
+    async def get_endpoint_deployment(self, endpoint_id: str) -> dict[str, Any] | None:
+        deployments = await self.list_endpoint_deployments(endpoint_id)
+        return deployments[0] if deployments else None
+
+    async def list_managed_endpoint_containers(
+        self, endpoint_id: str
+    ) -> list[dict[str, Any]]:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        async with self.postgres_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                select container_id, container_name, endpoint_id, deployment_id, build_id, revision_id,
+                       slot, worker_id, lifecycle, last_observed_at, last_heartbeat_at, started_at,
+                       drain_started_at, stopped_at, drain_timed_out, failure_reason, container_log,
+                       created_at, updated_at
+                from managed_endpoint_containers
+                where endpoint_id = $1
+                order by created_at asc, container_id asc
+                """,
+                endpoint_id,
+            )
+        return [build_managed_container_payload(row) for row in rows]
+
+    async def get_endpoint_deployment_status(
+        self, endpoint_id: str
+    ) -> dict[str, Any] | None:
+        deployment = await self.get_endpoint_deployment(endpoint_id)
+        if deployment is None:
+            return None
+        containers = await self.list_managed_endpoint_containers(endpoint_id)
+        registrations = {
+            str(worker.get("worker_id") or ""): worker
+            for worker in await self.list_endpoint_worker_registrations()
+            if worker.get("worker_id")
+        }
+
+        async def build_ref(role: str) -> dict[str, Any] | None:
+            build_id = _clean_optional_text(deployment.get(f"{role}_build_id"))
+            revision_id = _clean_optional_text(deployment.get(f"{role}_revision_id"))
+            if build_id is None and revision_id is None:
+                return None
+            build = (
+                await self.get_revision_image_build_status(build_id)
+                if build_id is not None
+                else None
+            )
+            return {
+                "build_id": build_id,
+                "module_import_id": _clean_optional_text(deployment.get(f"{role}_module_import_id")),
+                "revision_id": revision_id,
+                "build_status": (
+                    str(build.get("status") or "unknown") if build else "missing"
+                ),
+                "failure_reason": build.get("failure_reason") if build else None,
+                "logs_url": (
+                    f"/revision-image-builds/{build_id}/logs" if build_id else None
+                ),
+            }
+
+        phase = str(deployment.get("phase") or "unknown")
+        legacy_fallback = bool(
+            deployment.get("legacy_fallback", phase == "legacy_static")
+        )
+        if legacy_fallback:
+            migration_state = {
+                "legacy_static": "awaiting_image",
+                "failed": "migration_failed",
+            }.get(phase, "warming_managed")
+        else:
+            migration_state = {
+                "ready": "managed",
+                "rollback": "rolling_back",
+                "failed": "rollout_failed",
+            }.get(phase, "rolling")
+
+        deployment_id = str(deployment.get("id") or "")
+        rollout_generation = int(deployment.get("rollout_generation") or 0)
+        slots: list[dict[str, Any]] = []
+        for container in containers:
+            worker_id = _clean_optional_text(container.get("worker_id"))
+            worker = registrations.get(worker_id or "")
+            lifecycle = str(container.get("lifecycle") or "unknown")
+            current_deployment = (
+                str(container.get("deployment_id") or "") == deployment_id
+            )
+            ready = bool(
+                current_deployment
+                and lifecycle == "ready"
+                and worker
+                and worker.get("is_live")
+                and str(worker.get("status") or "") == "listening"
+                and str(worker.get("assigned_endpoint_id") or "") == endpoint_id
+                and str(worker.get("endpoint_deployment_id") or "") == deployment_id
+                and int(
+                    worker.get("endpoint_slot")
+                    if worker.get("endpoint_slot") is not None
+                    else -1
+                )
+                == int(container.get("slot") or 0)
+                and int(
+                    worker.get("endpoint_rollout_generation")
+                    if worker.get("endpoint_rollout_generation") is not None
+                    else -1
+                )
+                == rollout_generation
+                and _clean_optional_text(worker.get("warmed_build_id"))
+                == _clean_optional_text(container.get("build_id"))
+                and _clean_optional_text(worker.get("warmed_revision_id"))
+                == _clean_optional_text(container.get("revision_id"))
+            )
+            slots.append(
+                {
+                    "slot": int(container.get("slot") or 0),
+                    "container_id": container.get("container_id"),
+                    "container_name": container.get("container_name"),
+                    "deployment_id": container.get("deployment_id"),
+                    "worker_id": worker_id,
+                    "build_id": container.get("build_id"),
+                    "revision_id": container.get("revision_id"),
+                    "lifecycle": lifecycle,
+                    "ready": ready,
+                    "draining": lifecycle == "draining",
+                    "failure_reason": container.get("failure_reason"),
+                    "last_observed_at": container.get("last_observed_at"),
+                    "last_heartbeat_at": container.get("last_heartbeat_at"),
+                }
+            )
+        slots.sort(
+            key=lambda item: (
+                str(item.get("deployment_id") or "") != deployment_id,
+                int(item["slot"]),
+                str(item.get("container_id") or ""),
+            )
+        )
+        failure_reason = _clean_optional_text(deployment.get("failure_reason"))
+        return {
+            "endpoint_id": endpoint_id,
+            "deployment_id": deployment_id,
+            "phase": phase,
+            "migration_state": migration_state,
+            "legacy_fallback": legacy_fallback,
+            "desired_replica_count": int(deployment.get("desired_replica_count") or 1),
+            "rollout_generation": rollout_generation,
+            "active": await build_ref("active"),
+            "target": await build_ref("target"),
+            "previous": await build_ref("previous"),
+            "failed_target": await build_ref("failed"),
+            "slots": slots,
+            "failure_reason": failure_reason,
+            "rollout_reason": failure_reason if phase == "failed" else None,
+            "rollback_reason": failure_reason if phase == "rollback" else None,
+            "rollout_started_at": deployment.get("rollout_started_at"),
+            "ready_at": deployment.get("ready_at"),
+            "deadline_at": deployment.get("deadline_at"),
+            "updated_at": deployment.get("updated_at"),
+        }
+
+    @staticmethod
+    def validate_revision_image_build_transition(current: Any, target: Any) -> str:
+        return validate_revision_image_build_transition(current, target)
+
+    @staticmethod
+    def validate_endpoint_deployment_transition(current: Any, target: Any) -> str:
+        return validate_endpoint_deployment_transition(current, target)
+
+    @staticmethod
+    def validate_managed_container_transition(current: Any, target: Any) -> str:
+        return validate_managed_container_transition(current, target)
+
     async def list_all_bundle_endpoints(self) -> list[dict[str, Any]]:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
@@ -2811,7 +4583,7 @@ class AppServices:
                 from bundle_endpoints e
                 join module_imports m on m.id = e.module_import_id
                 left join lm_profiles lp on lp.id = e.lm_profile_id and lp.archived_at is null
-                where m.deleted_at is null
+                where m.deleted_at is null and e.delete_requested_at is null
                 order by e.created_at desc
                 """
             )
@@ -2829,7 +4601,7 @@ class AppServices:
                 from bundle_endpoints e
                 join module_imports m on m.id = e.module_import_id
                 left join lm_profiles lp on lp.id = e.lm_profile_id and lp.archived_at is null
-                where e.id = $1 and m.deleted_at is null
+                where e.id = $1 and m.deleted_at is null and e.delete_requested_at is null
                 """,
                 endpoint_id,
             )
@@ -2852,7 +4624,7 @@ class AppServices:
                 from bundle_endpoints e
                 join module_imports m on m.id = e.module_import_id
                 left join lm_profiles lp on lp.id = e.lm_profile_id and lp.archived_at is null
-                where e.module_import_id = $1 and m.deleted_at is null
+                where e.module_import_id = $1 and m.deleted_at is null and e.delete_requested_at is null
                 order by created_at asc
                 """,
                 module_id,
@@ -2868,9 +4640,6 @@ class AppServices:
     ) -> dict[str, Any] | None:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
-        module = await self.get_module(module_id)
-        if module is None:
-            return None
         normalized_lm_profile_id = str(lm_profile_id or "").strip() or None
         normalized_pinned_worker_count = _normalize_pinned_worker_count(pinned_worker_count)
         if normalized_lm_profile_id is not None:
@@ -2884,27 +4653,47 @@ class AppServices:
         preview = key[-6:]
         now = datetime.now(timezone.utc)
         async with self.postgres_pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                insert into bundle_endpoints (id, module_import_id, lm_profile_id, pinned_worker_count, name, key_hash, key_preview, created_at, updated_at)
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                returning id, module_import_id, lm_profile_id, pinned_worker_count, name, key_preview, created_at, updated_at
-                """,
-                endpoint_id,
-                module_id,
-                normalized_lm_profile_id,
-                normalized_pinned_worker_count,
-                normalized_name,
-                key_hash,
-                preview,
-                now,
-                now,
-            )
+            async with conn.transaction():
+                image = await self._resolve_ready_endpoint_image(conn, module_id)
+                if image is None:
+                    return None
+                row = await conn.fetchrow(
+                    """
+                    insert into bundle_endpoints (id, module_import_id, lm_profile_id, pinned_worker_count, name, key_hash, key_preview, created_at, updated_at)
+                    values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    returning id, module_import_id, lm_profile_id, pinned_worker_count, name, key_preview, created_at, updated_at
+                    """,
+                    endpoint_id,
+                    module_id,
+                    normalized_lm_profile_id,
+                    normalized_pinned_worker_count,
+                    normalized_name,
+                    key_hash,
+                    preview,
+                    now,
+                    now,
+                )
+                await conn.execute(
+                    """
+                    insert into endpoint_deployments (
+                      id, endpoint_id, target_build_id, target_revision_id, target_module_import_id, phase,
+                      desired_replica_count, legacy_fallback, rollout_generation,
+                      rollout_started_at, created_at, updated_at
+                    ) values ($1, $2, $3, $4, $5, 'pending', $6, false, 0, $7, $7, $7)
+                    """,
+                    f"managed-{endpoint_id}-0",
+                    endpoint_id,
+                    image["build_id"],
+                    image["revision_id"],
+                    module_id,
+                    normalized_pinned_worker_count,
+                    now,
+                )
         payload = await self.get_bundle_endpoint(str(row["id"]))
         if payload is None:
             return None
         payload["api_key"] = key
-        await self.reconcile_endpoint_worker_assignments()
+        payload["deployment"] = await self.get_endpoint_deployment_status(endpoint_id)
         return payload
 
     async def create_bundle_endpoint_global(
@@ -2942,23 +4731,31 @@ class AppServices:
                 raise ValueError("lm profile not found")
         now = datetime.now(timezone.utc)
         async with self.postgres_pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                update bundle_endpoints
-                set name = $3,
-                    lm_profile_id = $4,
-                    pinned_worker_count = $5,
-                    updated_at = $6
-                where id = $1 and module_import_id = $2
-                returning id, module_import_id, lm_profile_id, pinned_worker_count, name, key_preview, created_at, updated_at
-                """,
-                endpoint_id,
-                module_id,
-                normalized_name,
-                normalized_lm_profile_id,
-                normalized_pinned_worker_count,
-                now,
-            )
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    update bundle_endpoints
+                    set name = $3,
+                        lm_profile_id = $4,
+                        pinned_worker_count = $5,
+                        updated_at = $6
+                    where id = $1 and module_import_id = $2
+                    returning id, module_import_id, lm_profile_id, pinned_worker_count, name, key_preview, created_at, updated_at
+                    """,
+                    endpoint_id,
+                    module_id,
+                    normalized_name,
+                    normalized_lm_profile_id,
+                    normalized_pinned_worker_count,
+                    now,
+                )
+                if row is not None:
+                    await self._update_endpoint_deployment_replica_count(
+                        conn,
+                        endpoint_id=endpoint_id,
+                        desired_replica_count=normalized_pinned_worker_count,
+                        updated_at=now,
+                    )
         if row is None:
             return None
         payload = await self.get_bundle_endpoint(str(row["id"]))
@@ -2983,59 +4780,130 @@ class AppServices:
         next_module_id = str(module_import_id or current["module_import_id"]).strip()
         next_lm_profile_id = lm_profile_id if lm_profile_id is not None else current.get("lm_profile_id")
         normalized_lm_profile_id = str(next_lm_profile_id or "").strip() or None
-        next_pinned_worker_count = current.get("pinned_worker_count") if pinned_worker_count is None else pinned_worker_count
-        normalized_pinned_worker_count = _normalize_pinned_worker_count(next_pinned_worker_count)
+        next_pinned_worker_count = (
+            current.get("pinned_worker_count")
+            if pinned_worker_count is None
+            else pinned_worker_count
+        )
+        normalized_pinned_worker_count = _normalize_pinned_worker_count(
+            next_pinned_worker_count
+        )
         if not next_module_id:
             raise ValueError("module_import_id is required")
-        if await self.get_module(next_module_id) is None:
-            raise ValueError("module not found")
         if normalized_lm_profile_id is not None and await self.get_lm_profile(normalized_lm_profile_id) is None:
             raise ValueError("lm profile not found")
+        module_changed = next_module_id != str(current["module_import_id"])
         now = datetime.now(timezone.utc)
         async with self.postgres_pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                update bundle_endpoints
-                set name = $2,
-                    module_import_id = $3,
-                    lm_profile_id = $4,
-                    pinned_worker_count = $5,
-                    updated_at = $6
-                where id = $1
-                returning id, module_import_id, lm_profile_id, pinned_worker_count, name, key_preview, created_at, updated_at
-                """,
-                endpoint_id,
-                next_name,
-                next_module_id,
-                normalized_lm_profile_id,
-                normalized_pinned_worker_count,
-                now,
-            )
+            async with conn.transaction():
+                image = None
+                if module_changed:
+                    image = await self._resolve_ready_endpoint_image(
+                        conn, next_module_id
+                    )
+                    if image is None:
+                        raise ValueError("module not found")
+                row = await conn.fetchrow(
+                    """
+                    update bundle_endpoints
+                    set name = $2,
+                        lm_profile_id = $3,
+                        pinned_worker_count = $4,
+                        updated_at = $5
+                    where id = $1
+                    returning id, module_import_id, lm_profile_id, pinned_worker_count, name, key_preview, created_at, updated_at
+                    """,
+                    endpoint_id,
+                    next_name,
+                    normalized_lm_profile_id,
+                    normalized_pinned_worker_count,
+                    now,
+                )
+                if row is not None and image is not None:
+                    await self._schedule_endpoint_rollout(
+                        conn,
+                        endpoint_id=endpoint_id,
+                        build_id=str(image["build_id"]),
+                        revision_id=str(image["revision_id"]),
+                        target_module_import_id=next_module_id,
+                        desired_replica_count=normalized_pinned_worker_count,
+                        now=now,
+                    )
+                elif row is not None:
+                    await self._update_endpoint_deployment_replica_count(
+                        conn,
+                        endpoint_id=endpoint_id,
+                        desired_replica_count=normalized_pinned_worker_count,
+                        updated_at=now,
+                    )
         if row is None:
             return None
         payload = await self.get_bundle_endpoint(str(row["id"]))
+        if payload is not None:
+            payload["deployment"] = await self.get_endpoint_deployment_status(
+                endpoint_id
+            )
         await self.reconcile_endpoint_worker_assignments()
         return payload
 
     async def delete_bundle_endpoint(self, module_id: str, endpoint_id: str) -> bool:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
+        now = datetime.now(timezone.utc)
         async with self.postgres_pool.acquire() as conn:
-            result = await conn.execute(
-                "delete from bundle_endpoints where id = $1 and module_import_id = $2",
-                endpoint_id,
-                module_id,
-            )
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    update bundle_endpoints
+                    set delete_requested_at = $3, updated_at = $3
+                    where id = $1 and module_import_id = $2 and delete_requested_at is null
+                    returning id
+                    """,
+                    endpoint_id,
+                    module_id,
+                    now,
+                )
+                if row is not None:
+                    await conn.execute(
+                        """
+                        update endpoint_deployments
+                        set phase = 'draining', deadline_at = null,
+                            failure_reason = 'endpoint deletion requested', updated_at = $2
+                        where id = (
+                          select id from endpoint_deployments
+                          where endpoint_id = $1
+                          order by rollout_generation desc
+                          limit 1
+                        )
+                        """,
+                        endpoint_id,
+                        now,
+                    )
+                    await conn.execute(
+                        """
+                        update endpoint_worker_registrations
+                        set status = 'stale', assigned_endpoint_id = null,
+                            heartbeat_expires_at = $2,
+                            last_error = coalesce(last_error, 'endpoint deletion requested'),
+                            updated_at = $2
+                        where assigned_endpoint_id = $1
+                           or runtime_metadata->>'endpoint_id' = $1
+                        """,
+                        endpoint_id,
+                        now,
+                    )
+        if row is None:
+            return False
         await self.reconcile_endpoint_worker_assignments()
-        return result.endswith("1")
+        return True
 
     async def delete_bundle_endpoint_global(self, endpoint_id: str) -> bool:
         current = await self.get_bundle_endpoint(endpoint_id)
         if current is None:
             return False
-        deleted = await self.delete_bundle_endpoint(str(current["module_import_id"]), endpoint_id)
-        await self.reconcile_endpoint_worker_assignments()
-        return deleted
+        return await self.delete_bundle_endpoint(
+            str(current["module_import_id"]), endpoint_id
+        )
 
     async def regenerate_bundle_endpoint_key(self, module_id: str, endpoint_id: str) -> dict[str, Any] | None:
         if self.postgres_pool is None:
@@ -3068,13 +4936,19 @@ class AppServices:
         payload["api_key"] = key
         return payload
 
-    async def regenerate_bundle_endpoint_key_global(self, endpoint_id: str) -> dict[str, Any] | None:
+    async def regenerate_bundle_endpoint_key_global(
+        self, endpoint_id: str
+    ) -> dict[str, Any] | None:
         current = await self.get_bundle_endpoint(endpoint_id)
         if current is None:
             return None
-        return await self.regenerate_bundle_endpoint_key(str(current["module_import_id"]), endpoint_id)
+        return await self.regenerate_bundle_endpoint_key(
+            str(current["module_import_id"]), endpoint_id
+        )
 
-    async def authenticate_bundle_endpoint(self, endpoint_id: str, api_key: str) -> dict[str, Any] | None:
+    async def authenticate_bundle_endpoint(
+        self, endpoint_id: str, api_key: str
+    ) -> dict[str, Any] | None:
         if self.postgres_pool is None:
             raise RuntimeError("database not initialized")
         normalized_key = str(api_key or "").strip()
@@ -3085,38 +4959,125 @@ class AppServices:
                 """
                 select id, module_import_id, lm_profile_id, pinned_worker_count, name, key_hash, key_preview, created_at, updated_at
                 from bundle_endpoints
-                where id = $1
+                where id = $1 and delete_requested_at is null
                 """,
                 endpoint_id,
             )
         if row is None:
             return None
-        if not secrets.compare_digest(str(row["key_hash"] or ""), self._hash_bundle_endpoint_key(normalized_key)):
+        if not secrets.compare_digest(
+            str(row["key_hash"] or ""), self._hash_bundle_endpoint_key(normalized_key)
+        ):
             return None
         return self._build_bundle_endpoint_payload(row)
 
-    def _endpoint_queue_name(self, endpoint_id: str) -> str:
-        return f"{self.settings.endpoint_queue_prefix}:{endpoint_id}"
+    def _endpoint_queue_name(
+        self,
+        endpoint_id: str,
+        *,
+        build_id: str | None = None,
+        revision_id: str | None = None,
+    ) -> str:
+        base = f"{self.settings.endpoint_queue_prefix}:{endpoint_id}"
+        normalized_build_id = _clean_optional_text(build_id)
+        normalized_revision_id = _clean_optional_text(revision_id)
+        if bool(normalized_build_id) != bool(normalized_revision_id):
+            raise ValueError(
+                "endpoint queue build and revision must be provided together"
+            )
+        if normalized_build_id is None:
+            return base
+        return f"{base}:build:{normalized_build_id}:revision:{normalized_revision_id}"
 
     def _endpoint_invocation_channel(self, invocation_id: str) -> str:
         return f"{self.settings.endpoint_invocation_channel_prefix}:{invocation_id}"
 
-    async def get_endpoint_worker_assignment(self, worker_id: str) -> dict[str, Any] | None:
+    async def get_endpoint_worker_assignment(
+        self, worker_id: str
+    ) -> dict[str, Any] | None:
         registration = await self._get_endpoint_worker_registration(worker_id)
         if registration is None:
             return None
         endpoint_id = str(registration.get("assigned_endpoint_id") or "").strip()
         if not endpoint_id:
             return None
-        payload = {
+        return {
             "worker_id": str(registration.get("worker_id") or worker_id),
             "endpoint_id": endpoint_id,
-            "desired_revision_id": str(registration.get("desired_revision_id") or "").strip() or None,
+            "execution_mode": str(
+                registration.get("execution_mode") or "legacy_static"
+            ),
+            "build_id": _clean_optional_text(registration.get("desired_build_id")),
+            "revision_id": _clean_optional_text(
+                registration.get("desired_revision_id")
+            ),
+            "bundle_path": _clean_optional_text(registration.get("bundle_path")),
             "is_live": bool(registration.get("is_live")),
         }
-        return payload
 
-    async def _set_endpoint_worker_assignment(self, worker_id: str, endpoint_id: str | None) -> None:
+    async def claim_endpoint_worker_task(
+        self,
+        *,
+        worker_id: str,
+        endpoint_id: str,
+        task_id: str,
+        execution_mode: str | None,
+        build_id: str | None,
+        revision_id: str | None,
+        bundle_path: str | None,
+    ) -> bool:
+        if self.postgres_pool is None:
+            raise RuntimeError("database not initialized")
+        now = datetime.now(timezone.utc)
+        runtime_metadata = {
+            "endpoint_id": endpoint_id,
+            "execution_mode": execution_mode,
+            "desired_build_id": build_id,
+            "warmed_build_id": build_id,
+            "desired_revision_id": revision_id,
+            "warmed_revision_id": revision_id,
+            "bundle_path": bundle_path,
+        }
+        async with self.postgres_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                update endpoint_worker_registrations
+                set status = 'running',
+                    task_id = $3,
+                    last_seen_at = $4,
+                    heartbeat_expires_at = $5,
+                    runtime_metadata = runtime_metadata || $10::jsonb,
+                    updated_at = $4
+                where worker_id = $1
+                  and assigned_endpoint_id = $2
+                  and status = 'listening'
+                  and task_id is null
+                  and heartbeat_expires_at > $4
+                  and runtime_metadata->>'endpoint_id' = $2
+                  and coalesce(runtime_metadata->>'execution_mode', 'legacy_static') = $6
+                  and runtime_metadata->>'desired_build_id' is not distinct from $7::text
+                  and runtime_metadata->>'warmed_build_id' is not distinct from $7::text
+                  and runtime_metadata->>'desired_revision_id' is not distinct from $8::text
+                  and runtime_metadata->>'warmed_revision_id' is not distinct from $8::text
+                  and runtime_metadata->>'bundle_path' is not distinct from $9::text
+                returning worker_id
+                """,
+                str(worker_id),
+                str(endpoint_id),
+                str(task_id),
+                now,
+                self._endpoint_worker_heartbeat_expires_at(now),
+                str(execution_mode or "legacy_static"),
+                _clean_optional_text(build_id),
+                _clean_optional_text(revision_id),
+                _clean_optional_text(bundle_path),
+                json.dumps(runtime_metadata),
+            )
+        return row is not None
+
+    async def _set_endpoint_worker_assignment(
+        self, worker_id: str, endpoint_id: str | None
+    ) -> None:
         if self.postgres_pool is None:
             return
         async with self.postgres_pool.acquire() as conn:
@@ -3138,13 +5099,35 @@ class AppServices:
         await self.mark_stale_endpoint_workers()
         endpoints = sorted(
             await self.list_all_bundle_endpoints(),
-            key=lambda item: (str(item.get("created_at") or ""), str(item.get("id") or "")),
+            key=lambda item: (
+                str(item.get("created_at") or ""),
+                str(item.get("id") or ""),
+            ),
         )
-        workers = await self.list_endpoint_worker_registrations()
-        desired_assignments: list[str] = []
+        legacy_endpoints: list[dict[str, Any]] = []
         for endpoint in endpoints:
+            deployment = await self.get_endpoint_deployment(str(endpoint["id"]))
+            if deployment is not None and bool(
+                deployment.get(
+                    "legacy_fallback",
+                    str(deployment.get("phase") or "") == "legacy_static",
+                )
+            ):
+                legacy_endpoints.append(endpoint)
+
+        workers = await self.list_endpoint_worker_registrations()
+        legacy_workers = [
+            worker
+            for worker in workers
+            if worker.get("execution_mode") == "legacy_static"
+            and bool(worker.get("is_live"))
+        ]
+        desired_assignments: list[str] = []
+        for endpoint in legacy_endpoints:
             endpoint_id = str(endpoint["id"])
-            desired_assignments.extend([endpoint_id] * max(1, int(endpoint.get("pinned_worker_count") or 1)))
+            desired_assignments.extend(
+                [endpoint_id] * max(1, int(endpoint.get("pinned_worker_count") or 1))
+            )
 
         preserved_assignments: list[tuple[str, str]] = []
         preserved_worker_ids: set[str] = set()
@@ -3153,9 +5136,11 @@ class AppServices:
             candidates = sorted(
                 (
                     worker
-                    for worker in workers
-                    if str(worker.get("worker_id") or "").strip() not in preserved_worker_ids
-                    and str(worker.get("assigned_endpoint_id") or "").strip() == endpoint_id
+                    for worker in legacy_workers
+                    if str(worker.get("worker_id") or "").strip()
+                    not in preserved_worker_ids
+                    and str(worker.get("assigned_endpoint_id") or "").strip()
+                    == endpoint_id
                     and bool(worker.get("is_revision_ready"))
                 ),
                 key=self._endpoint_worker_assignment_rank,
@@ -3169,20 +5154,26 @@ class AppServices:
 
         remaining_workers = sorted(
             (
-                worker for worker in workers if str(worker.get("worker_id") or "").strip() not in preserved_worker_ids
+                worker
+                for worker in legacy_workers
+                if str(worker.get("worker_id") or "").strip()
+                not in preserved_worker_ids
             ),
             key=self._endpoint_worker_assignment_rank,
         )
-        assignment_by_worker_id = {worker_id: endpoint_id for worker_id, endpoint_id in preserved_assignments}
+        assignment_by_worker_id = {
+            worker_id: endpoint_id for worker_id, endpoint_id in preserved_assignments
+        }
         for worker, endpoint_id in zip(remaining_workers, remaining_slots):
             worker_id = str(worker.get("worker_id") or "").strip()
             if worker_id:
                 assignment_by_worker_id[worker_id] = endpoint_id
-        for worker in workers:
+        for worker in legacy_workers:
             worker_id = str(worker.get("worker_id") or "").strip()
             if worker_id:
-                await self._set_endpoint_worker_assignment(worker_id, assignment_by_worker_id.get(worker_id))
-
+                await self._set_endpoint_worker_assignment(
+                    worker_id, assignment_by_worker_id.get(worker_id)
+                )
 
     async def count_endpoint_workers_assigned(self, endpoint_id: str) -> int:
         assigned = 0
@@ -3197,43 +5188,117 @@ class AppServices:
         endpoint = await self.get_bundle_endpoint(endpoint_id)
         if endpoint is None:
             return None
-        module_state = await self.resolve_module_execution_state(str(endpoint["module_import_id"]))
+        module_state = await self.resolve_module_execution_state(
+            str(endpoint["module_import_id"])
+        )
         if module_state is None:
             return None
         return str(module_state.get("bundle_revision_id") or "").strip() or None
 
     async def get_endpoint_routing_state(self, endpoint_id: str) -> dict[str, Any]:
-        desired_revision_id = await self._get_endpoint_desired_revision_id(endpoint_id)
+        deployment = await self.get_endpoint_deployment(endpoint_id)
+        phase = str(deployment.get("phase") or "") if deployment else ""
+        legacy_static = bool(
+            deployment
+            and deployment.get(
+                "legacy_fallback",
+                phase == "legacy_static",
+            )
+        )
+        desired_revision_id = (
+            await self._get_endpoint_desired_revision_id(endpoint_id)
+            if legacy_static
+            else None
+        )
+        allowed_pairs: set[tuple[str, str]] = set()
+        if deployment and not legacy_static:
+            active_pair = (
+                _clean_optional_text(deployment.get("active_build_id")),
+                _clean_optional_text(deployment.get("active_revision_id")),
+            )
+            if all(active_pair):
+                allowed_pairs.add((str(active_pair[0]), str(active_pair[1])))
+
         workers = (await self.list_endpoint_workers())["items"]
         assigned_workers = 0
-        ready_workers = 0
         status_counts: dict[str, int] = {}
+        ready_targets: dict[tuple[str, str | None, str], dict[str, Any]] = {}
         for worker in workers:
-            if str(worker.get("assigned_endpoint_id") or "").strip() != endpoint_id:
-                continue
-            if not worker.get("is_live"):
+            if str(
+                worker.get("assigned_endpoint_id") or ""
+            ).strip() != endpoint_id or not worker.get("is_live"):
                 continue
             assigned_workers += 1
             status = str(worker.get("status") or "unknown")
-            worker_endpoint_id = str(worker.get("endpoint_id") or "").strip()
-            if (
-                desired_revision_id
-                and status == "listening"
-                and worker_endpoint_id == endpoint_id
-                and str(worker.get("desired_revision_id") or "").strip() == desired_revision_id
-                and str(worker.get("warmed_revision_id") or "").strip() == desired_revision_id
-            ):
-                ready_workers += 1
             status_counts[status] = status_counts.get(status, 0) + 1
+            if (
+                status != "listening"
+                or str(worker.get("endpoint_id") or "").strip() != endpoint_id
+            ):
+                continue
+            execution_mode = str(worker.get("execution_mode") or "legacy_static")
+            worker_revision_id = _clean_optional_text(worker.get("warmed_revision_id"))
+            desired_worker_revision_id = _clean_optional_text(worker.get("desired_revision_id"))
+            if legacy_static:
+                if (
+                    execution_mode != "legacy_static"
+                    or not desired_revision_id
+                    or desired_worker_revision_id != desired_revision_id
+                    or worker_revision_id != desired_revision_id
+                ):
+                    continue
+                key = (execution_mode, None, desired_revision_id)
+                ready_targets[key] = {
+                    "execution_mode": execution_mode,
+                    "build_id": None,
+                    "revision_id": desired_revision_id,
+                    "bundle_path": None,
+                    "queue_name": self._endpoint_queue_name(endpoint_id),
+                }
+                continue
+            worker_build_id = _clean_optional_text(worker.get("warmed_build_id"))
+            desired_build_id = _clean_optional_text(worker.get("desired_build_id"))
+            pair = (worker_build_id, worker_revision_id)
+            if (
+                execution_mode != "managed_image"
+                or pair not in allowed_pairs
+                or worker_build_id != desired_build_id
+                or worker_revision_id != desired_worker_revision_id
+                or _clean_optional_text(worker.get("bundle_path")) != BUNDLE_IMAGE_PATH
+            ):
+                continue
+            key = (execution_mode, worker_build_id, str(worker_revision_id))
+            ready_targets[key] = {
+                "execution_mode": execution_mode,
+                "build_id": worker_build_id,
+                "revision_id": worker_revision_id,
+                "bundle_path": BUNDLE_IMAGE_PATH,
+                "queue_name": self._endpoint_queue_name(
+                    endpoint_id,
+                    build_id=worker_build_id,
+                    revision_id=worker_revision_id,
+                ),
+            }
+        targets = sorted(
+            ready_targets.values(),
+            key=lambda item: (
+                str(item.get("build_id") or ""),
+                str(item.get("revision_id") or ""),
+            ),
+        )
         return {
             "endpoint_id": endpoint_id,
+            "deployment_phase": phase or None,
             "desired_revision_id": desired_revision_id,
             "assigned_workers": assigned_workers,
-            "ready_workers": ready_workers,
+            "ready_workers": len(targets),
+            "ready_targets": targets,
             "status_counts": status_counts,
         }
 
-    async def ensure_endpoint_ready_for_invocation(self, endpoint_id: str) -> dict[str, Any]:
+    async def ensure_endpoint_ready_for_invocation(
+        self, endpoint_id: str
+    ) -> dict[str, Any]:
         await self.reconcile_endpoint_worker_assignments()
         routing_state = await self.get_endpoint_routing_state(endpoint_id)
         if int(routing_state.get("ready_workers") or 0) > 0:
@@ -3260,19 +5325,38 @@ class AppServices:
     ) -> str:
         if self.redis is None:
             raise RuntimeError("queue not initialized")
-        await self.ensure_endpoint_ready_for_invocation(endpoint_id)
         invocation_id = str(invocation_id or uuid4())
+        routing_state = await self.ensure_endpoint_ready_for_invocation(endpoint_id)
+        targets = routing_state.get("ready_targets") or []
+        if not targets:
+            raise EndpointUnavailableError(
+                "endpoint has no revision-pinned routing target",
+                code="no_pinned_routing_target",
+                routing_state=routing_state,
+            )
+        target_index = int(
+            hashlib.sha256(invocation_id.encode("utf-8")).hexdigest(), 16
+        ) % len(targets)
+        target = targets[target_index]
         payload = {
             "type": "endpoint_invocation",
             "invocation_id": invocation_id,
             "endpoint_id": endpoint_id,
             "input_payload": input_payload,
             "stream": bool(stream),
+            "execution_mode": target["execution_mode"],
+            "build_id": target.get("build_id"),
+            "revision_id": target["revision_id"],
+            "bundle_path": target.get("bundle_path"),
         }
-        await self.redis.execute_command("LPUSH", self._endpoint_queue_name(endpoint_id), json.dumps(payload))
+        await self.redis.execute_command(
+            "LPUSH", str(target["queue_name"]), json.dumps(payload)
+        )
         return invocation_id
 
-    async def publish_endpoint_invocation_event(self, invocation_id: str, event: str, payload: dict[str, Any]) -> None:
+    async def publish_endpoint_invocation_event(
+        self, invocation_id: str, event: str, payload: dict[str, Any]
+    ) -> None:
         if self.redis is None:
             return
         await self.redis.publish(
@@ -3288,19 +5372,90 @@ class AppServices:
         worker_id: str,
         *,
         stream: bool,
+        execution_mode: str = "legacy_static",
+        build_id: str | None = None,
+        revision_id: str | None = None,
+        bundle_path: str | None = None,
     ) -> None:
         endpoint = await self.get_bundle_endpoint(endpoint_id)
         if endpoint is None:
-            await self.publish_endpoint_invocation_event(invocation_id, "error", {"error": "endpoint not found"})
-            return
-        module_state = await self.resolve_module_execution_state(str(endpoint["module_import_id"]))
-        if module_state is None:
-            await self.publish_endpoint_invocation_event(invocation_id, "error", {"error": "bundle endpoint module not found"})
+            await self.publish_endpoint_invocation_event(
+                invocation_id, "error", {"error": "endpoint not found"}
+            )
             return
         try:
-            await self.ensure_bundle_requirements_installed(module_state["bundle_path"])
-            runtime_env = await self.get_module_runtime_environment(str(endpoint["module_import_id"]))
-            lm_profile = await self._get_lm_profile_record(str(endpoint["lm_profile_id"]), include_secret=True) if endpoint.get("lm_profile_id") else None
+            if execution_mode == "managed_image":
+                registration = await self._get_endpoint_worker_registration(worker_id)
+                if registration is None or not registration.get("is_live"):
+                    raise RuntimeError("managed endpoint worker registration is not live")
+                runtime_identity = dict(registration.get("runtime_metadata") or {})
+                runtime_identity.update(
+                    {
+                        "execution_mode": execution_mode,
+                        "endpoint_id": endpoint_id,
+                        "desired_build_id": build_id,
+                        "desired_revision_id": revision_id,
+                        "bundle_path": bundle_path,
+                    }
+                )
+                identity = await self.validate_managed_endpoint_worker_identity(
+                    runtime_identity,
+                    worker_id=worker_id,
+                )
+                if (
+                    identity.get("container_lifecycle") == "draining"
+                    and (
+                        str(registration.get("status") or "") != "running"
+                        or _clean_optional_text(registration.get("task_id"))
+                        != invocation_id
+                    )
+                ):
+                    raise RuntimeError(
+                        "draining managed endpoint worker may only finish its claimed invocation"
+                    )
+                resolved_bundle_path = identity["bundle_path"]
+                resolved_revision_id = identity["revision_id"]
+                resolved_build_id = identity["build_id"]
+                bundle_commit_sha = None
+            else:
+                deployment = await self.get_endpoint_deployment(endpoint_id)
+                if deployment is None or not bool(
+                    deployment.get(
+                        "legacy_fallback",
+                        str(deployment.get("phase") or "") == "legacy_static",
+                    )
+                ):
+                    raise RuntimeError(
+                        "legacy static execution is not enabled for this endpoint"
+                    )
+                module_state = await self.resolve_module_execution_state(
+                    str(endpoint["module_import_id"])
+                )
+                if module_state is None:
+                    raise RuntimeError("bundle endpoint module not found")
+                await self.ensure_bundle_requirements_installed(
+                    module_state["bundle_path"]
+                )
+                resolved_bundle_path = str(module_state["bundle_path"])
+                resolved_revision_id = _clean_optional_text(
+                    module_state.get("bundle_revision_id")
+                    or module_state.get("revision_id")
+                )
+                resolved_build_id = None
+                bundle_commit_sha = module_state.get("commit_sha") or module_state.get(
+                    "current_commit_sha"
+                )
+
+            runtime_env = await self.get_module_runtime_environment(
+                str(endpoint["module_import_id"])
+            )
+            lm_profile = (
+                await self._get_lm_profile_record(
+                    str(endpoint["lm_profile_id"]), include_secret=True
+                )
+                if endpoint.get("lm_profile_id")
+                else None
+            )
             if stream:
                 from app.executor.module_runner import stream_bundle
 
@@ -3308,27 +5463,27 @@ class AppServices:
 
                 def emit_event(event_payload: dict[str, Any]) -> None:
                     asyncio.run_coroutine_threadsafe(
-                        self.publish_endpoint_invocation_event(invocation_id, "delta", event_payload),
+                        self.publish_endpoint_invocation_event(
+                            invocation_id, "delta", event_payload
+                        ),
                         loop,
                     )
 
                 def operation() -> dict[str, Any]:
                     return stream_bundle(
-                        module_state["bundle_path"],
+                        resolved_bundle_path,
                         input_payload,
                         emit_event,
                         lm_profile,
                         runtime_env,
                     )
+
             else:
                 from app.executor.module_runner import invoke_bundle
 
                 def operation() -> dict[str, Any]:
                     return invoke_bundle(
-                        module_state["bundle_path"],
-                        input_payload,
-                        lm_profile,
-                        runtime_env,
+                        resolved_bundle_path, input_payload, lm_profile, runtime_env
                     )
 
             trace_attributes = {
@@ -3337,10 +5492,12 @@ class AppServices:
                 "endpoint_name": endpoint.get("name"),
                 "worker_id": worker_id,
                 "stream": bool(stream),
+                "execution_mode": execution_mode,
                 "module_import_id": endpoint.get("module_import_id"),
                 "lm_profile_id": endpoint.get("lm_profile_id"),
-                "bundle_revision_id": module_state.get("revision_id"),
-                "bundle_commit_sha": module_state.get("commit_sha") or module_state.get("current_commit_sha"),
+                "bundle_revision_id": resolved_revision_id,
+                "revision_image_build_id": resolved_build_id,
+                "bundle_commit_sha": bundle_commit_sha,
             }
             output, trace_id = await asyncio.to_thread(
                 _run_endpoint_invocation_with_mlflow,
@@ -3350,15 +5507,26 @@ class AppServices:
                 attributes=trace_attributes,
             )
             logger.info(
-                "Managed endpoint invocation completed invocation_id=%s endpoint_id=%s worker_id=%s mlflow_trace_id=%s",
+                "Endpoint invocation completed invocation_id=%s endpoint_id=%s worker_id=%s build_id=%s revision_id=%s mlflow_trace_id=%s",
                 invocation_id,
                 endpoint_id,
                 worker_id,
+                resolved_build_id or "legacy",
+                resolved_revision_id or "unknown",
                 trace_id or "unavailable",
             )
             await self.publish_endpoint_invocation_event(invocation_id, "final", output)
         except Exception as exc:
-            await self.publish_endpoint_invocation_event(invocation_id, "error", {"error": str(exc), "worker_id": worker_id})
+            await self.publish_endpoint_invocation_event(
+                invocation_id,
+                "error",
+                {
+                    "error": str(exc),
+                    "worker_id": worker_id,
+                    "build_id": build_id,
+                    "revision_id": revision_id,
+                },
+            )
 
     async def list_module_revisions(self, module_id: str) -> list[dict[str, Any]]:
         if self.postgres_pool is None:
@@ -3366,14 +5534,15 @@ class AppServices:
         async with self.postgres_pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                select id, commit_sha, checkout_path, bundle_name, bundle_version, source_event, created_at
+                select id, commit_sha, checkout_path, bundle_name, bundle_version, source_event,
+                       source_content_digest, created_at
                 from bundle_revisions
                 where module_import_id = $1
                 order by created_at desc
                 """,
                 module_id,
             )
-        return [
+        revisions = [
             {
                 "id": row["id"],
                 "commit_sha": row["commit_sha"],
@@ -3381,10 +5550,26 @@ class AppServices:
                 "bundle_name": row["bundle_name"],
                 "bundle_version": row["bundle_version"],
                 "source_event": row["source_event"],
+                "source_content_digest": row["source_content_digest"],
                 "created_at": row["created_at"].isoformat() if row["created_at"] else None,
             }
             for row in rows
         ]
+        states = await self._revision_image_states(
+            [str(revision["id"]) for revision in revisions]
+        )
+        for revision in revisions:
+            revision["image_build"] = states.get(
+                str(revision["id"]),
+                {
+                    "status": "not_eligible",
+                    "eligible": False,
+                    "current_build": None,
+                    "ready_build": None,
+                    "history_count": 0,
+                },
+            )
+        return revisions
 
     @staticmethod
     def _upsert_toml_string_key(content: str, key: str, value: str) -> str:

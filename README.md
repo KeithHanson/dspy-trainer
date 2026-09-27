@@ -27,10 +27,10 @@ Building production LLM programs requires iteration—lots of it. DSPy Trainer g
 
 ```bash
 cp .env.sample .env
-# Edit .env - at minimum, add your GITHUB_PAT
-# If you plan to store module environment entries in the UI OR
-# save LM Profile provider API keys in the UI, also generate
-# DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY:
+# Edit .env: add GITHUB_PAT and stable Compose, network, deployment, and
+# local backend image names. The deployer records the immutable image ID.
+# If you plan to store module environment entries in the UI OR save LM
+# Profile provider API keys, also generate DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY:
 # python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
@@ -38,8 +38,13 @@ cp .env.sample .env
 
 ```bash
 docker compose pull --ignore-pull-failures
+docker compose build --pull backend
 docker compose build --pull
-docker compose up -d --remove-orphans
+docker compose up -d --scale deployer=2 --remove-orphans
+for id in $(docker compose ps -q deployer); do
+  docker exec "$id" python backend/deployer.py --liveness
+  docker exec "$id" python backend/deployer.py --readiness
+done
 ```
 
 If MLflow trace or run requests time out under load, increase `MLFLOW_WEB_WORKERS` in `.env` before restarting the stack.
@@ -141,9 +146,11 @@ An **LM profile** configures direct provider runtime access:
 
 ### 🔌 Managed Endpoint
 
-A **managed endpoint** exposes a validated bundle to external callers with a rotatable API key:
+A **managed endpoint** exposes a validated bundle to external callers with a rotatable API key. Creation is accepted only when the module's exact current revision is validated and has a ready, non-pruned local image; otherwise the API returns `409` with a stable `endpoint_revision_not_ready` or `endpoint_image_not_ready` code and writes no endpoint or deployment intent. New endpoints begin as managed-image deployments and become invokable only after their exact container slots report ready.
 
 - Create, rename, delete, and rotate keys from the bundle detail page
+- The deployer derives each managed worker's deployment, rollout generation, and slot environment from the same replacement specification used for its Docker labels and durable container record; workers fail closed when that identity is missing
+- Managed-image worker rosters include only registrations backed by an active managed container; removal deletes the runtime registration while preserving deployment history
 - `POST /bundle-endpoints/{id}/invoke` returns one JSON output payload
 - `POST /bundle-endpoints/{id}/stream` returns an SSE stream of incremental `delta` events followed by a `final` event
 - Each invocation is traced in MLflow under the `dspy-trainer-managed-endpoints` experiment, tagged with its invocation, endpoint, worker, module, profile, and bundle revision identifiers
@@ -186,22 +193,23 @@ DSPy handles execution, optimization, and prompt engineering for you.
 │   Web UI    │  React app - create bundles, plans, view results
 └──────┬──────┘
        │
-┌──────▼──────┐
-│  Backend    │  FastAPI - validation, orchestration, APIs
-└──────┬──────┘
-       │
-┌──────▼──────┐
-│   Worker    │  Eval execution, optimization jobs (scales)
-└──────┬──────┘
-       │
-┌──────┴──────────────────────────────┐
-│  Postgres  │  Redis  │  MLflow  │
-└─────────────────────────────────────┘
+┌──────▼──────┐       ┌──────────────┐
+│  Backend    │       │   Deployer   │  image builds and endpoint reconciliation
+└──────┬──────┘       └──────┬───────┘
+       │                     │ Docker socket (deployer only)
+┌──────▼──────┐              │
+│   Worker    │              │
+└──────┬──────┘              │
+       │                     │
+┌──────┴─────────────────────┴────────┐
+│        Postgres  │  Redis  │  MLflow │
+└──────────────────────────────────────┘
 ```
 
 **Services:**
 - **Backend**: Control plane (FastAPI)
 - **Worker**: Execution engine (async job processing)
+- **Deployer**: Internal-only PostgreSQL advisory leader that builds revision images and reconciles exact-image endpoint containers; it alone installs the Docker SDK and mounts the Docker socket
 - **Postgres**: Primary app store
 - **Redis**: Queue + worker coordination
 - **MLflow**: Experiment tracking with metadata stored in a dedicated Postgres `mlflow` schema and artifacts on a Docker volume
@@ -548,6 +556,10 @@ Key variables in `.env`:
 | `DSPY_TRAINER_BUNDLE_INSTALL_MAX_CONCURRENCY` | Deployment-wide maximum concurrent bundle dependency installs (default `8`) | Optional |
 | `DSPY_TRAINER_TOTAL_ENDPOINT_WORKER_REPLICAS` | Number of dedicated endpoint worker containers in Compose | Optional |
 | `DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS` | Seconds before an endpoint-worker heartbeat is marked stale | Optional |
+| `DSPY_TRAINER_DEPLOYER_ENDPOINT_READINESS_TIMEOUT_SECONDS` | Seconds allowed for an exact managed-image worker to report ready before rollback | Optional |
+| `DSPY_TRAINER_DEPLOYER_ENDPOINT_DRAIN_TIMEOUT_SECONDS` | Seconds allowed for an active invocation to drain before forced removal | Optional |
+| `DSPY_TRAINER_DEPLOYER_IMAGE_RETENTION_COUNT` | Ready images retained per module, minimum `2`; referenced images are always protected | Optional |
+| `DSPY_TRAINER_COMPOSE_NETWORK_PROJECT_LABEL` | Exact Compose project label required on the selected runtime network | ✅ in deployment environments |
 | `DSPY_TRAINER_POSTGRES_DSN` | Postgres connection | ✅ (auto in Compose) |
 | `DSPY_TRAINER_REDIS_URL` | Redis connection | ✅ (auto in Compose) |
 
@@ -573,18 +585,26 @@ LM Profiles store the provider model, API base, model type, optional LM class ov
 
 ### Managed Endpoint Workers
 
-Managed bundle endpoints do not execute inside the backend container. The backend authenticates, enqueues, and relays responses, while dedicated `endpoint-worker` containers perform bundle installation/bootstrap and invocation.
+Managed bundle endpoints do not execute inside the backend container. The backend authenticates, selects a ready build-pinned worker, enqueues, and relays responses. The deployer creates deterministic per-endpoint slots from immutable revision-image IDs on the actual Compose network; the static `endpoint-worker` service remains migration-only for deployments explicitly marked `legacy_static`.
 
-- Set `DSPY_TRAINER_TOTAL_WORKERS` in `.env` to control the number of general worker containers Compose starts.
-- Set `DSPY_TRAINER_TOTAL_ENDPOINT_WORKER_REPLICAS` in `.env` to control how many dedicated endpoint-worker containers Compose starts.
-- Compose-backed endpoint workers now self-register into the backend's durable endpoint-worker registry; operator-facing assignment and readiness come directly from those live registry records rather than from an env-defined logical roster.
-- Endpoint-worker heartbeats default to a 5 minute stale threshold (`DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS=300`). Override it in `.env` if you need operator stale detection to move faster or slower.
-- Bundle system dependency commands and Python package installs share a PostgreSQL-backed deployment-wide concurrency limit. Set `DSPY_TRAINER_BUNDLE_INSTALL_MAX_CONCURRENCY` to a positive integer (default `8`) and recreate `backend`, `worker`, and `endpoint-worker` together when changing it.
-- Each endpoint stores a `pinned_worker_count`.
-- Endpoint workers are assigned deterministically to endpoints based on those pinned counts and the current registry-backed worker set.
-- Only workers assigned to a given endpoint consume that endpoint's invocation queue.
-- `GET /endpoint-workers` exposes operator-facing readiness details for each endpoint worker from the durable endpoint-worker registry, including `deploy_state`, `state_summary`, and the desired versus warmed bundle revisions.
-- Common endpoint worker states: `idle` (unassigned), `preparing` (installing the desired revision / warming up), `listening` (ready), `running` (serving traffic), `failed` (warmup or invocation failure), and `stale` (heartbeat expired / non-live).
+- Each endpoint's `pinned_worker_count` is the desired managed container count. Slots, names, and retirement order are deterministic. Reducing the count blocks new claims on the highest excess slots and stops and removes each inactive Docker container in that reconciliation cycle; a slot with an active invocation drains before removal.
+- Managed workers are created already bound to one endpoint slot; they are not pooled waiting for assignment. The `idle` state remains only for the migration-only `legacy_static` worker path.
+- Deleting an endpoint immediately fences and marks its registry workers stale, then the deployer stops and removes every owned managed container before finalizing deletion.
+- The Endpoints page hides stale and unassigned worker records by default; operators can reveal them with the inactive-workers control.
+- A rollout starts one target slot at a time and requires a live, claim-eligible `managed_image` registration with matching endpoint and desired/warmed build and revision before the old slot drains. The endpoint's active module, runtime environment, and trace provenance remain unchanged until the target slots are ready and the deployment and endpoint module are promoted atomically.
+- Draining atomically marks the managed container ineligible and blocks the worker's next claim. A restart cannot re-register a draining slot, while an already claimed invocation may finish until the configured timeout; a timed-out removal is recorded with bounded container logs.
+- Removed managed-container rows remain durable history. A replacement may reuse its deterministic container name with a new Docker ID only after the prior row reaches removed; PostgreSQL rejects two non-removed rows with the same name.
+- Failed target startup or readiness restores the old revision capacity and preserves the failed build, revision, module, reason, and build-log link in deployment status. The automatic scheduler suppresses that exact failed build across reconciliation cycles and restarts until a newer build or explicit retry exists.
+- Reconciler restart adopts only containers with the complete ownership/provenance label set, exact deployment owner, and exact immutable image ID. Scale-down and endpoint deletion remove only fully owned slots; similarly named, partially labeled, wrong-owner, and wrong-image containers are never adopted or deleted.
+- Image cleanup retains at least the current and previous ready images per module and protects every active, target, previous, or failed deployment build and every build referenced by a non-removed managed container.
+- Endpoint jobs use build/revision-specific Redis queues. After `BRPOP`, an atomic PostgreSQL claim serializes with drain; a losing claim puts the exact job back on the same queue once rather than executing it.
+
+The revision-image build layer is deliberately separate from endpoint scheduling and rollout. Given one immutable revision snapshot and its content digest, it creates a deterministic tar context, uses the configured immutable backend image ID as `FROM`, runs `runtime.system_dependency_commands` before `requirements.txt`, writes a sorted Python package manifest to `/opt/dspy-trainer/python-manifest.txt`, bakes the bundle at `/opt/dspy-bundle`, and installs the platform endpoint-worker entrypoint. Builds use the local Docker Engine cache and host architecture only; the builder has no registry login, pull, or push path.
+
+The Modules listing build modal fetches every retained build-log segment, redacts credential-shaped values, and follows the latest output automatically. The backend retention limit remains the only output bound.
+The context includes every bundle asset except platform control directories (including `.git` and Python/tool caches) and secret-like files such as `.env*`, private keys, and credential files. A bundle may explicitly include a required in-root secret-like fixture with exact paths under `[image_build]` in `bundle.toml`, for example `include_files = ["fixtures/test.key"]`. Overrides cannot escape the snapshot root, name directories, or restore platform control directories. Runtime environment entries, provider keys, GitHub credentials, and host environment values are never build inputs.
+
+Local tags use `<repository>:<revision>-<build-digest-prefix>`; the digest includes the immutable build ID and generation, so rebuilding a revision never mutates an earlier tag or record. Every image has the complete `io.dspy-trainer.*` ownership and provenance set: `platform-owner`, stack `owner`, `managed-kind`, `module-id`, `revision-id`, `build-id`, `build-generation`, `source-commit`, `source-content-digest`, `dependency-digest`, `build-digest`, `base-image-id`, `platform-version`, and `schema-version`. Image adoption or deletion must first validate the full label set and stack owner; a successful build is ready only after inspecting the returned immutable image ID and matching every label.
 
 ---
 
@@ -769,6 +789,21 @@ bd close <id>         # Complete work
 See [`AGENTS.md`](AGENTS.md) for detailed contribution guidelines.
 
 ---
+
+## Revision Image Builds
+
+The backend first freezes source bytes into a read-only, content-addressed snapshot, validates that immutable snapshot, and only then records a passed/synced revision and enqueues its image build. Snapshot or validation failure leaves passed/synced/current-revision state unchanged. Coordinator or image-build failure after revision finalization remains independent; module and revision responses expose it separately in `image_build`.
+
+Operator APIs:
+
+- `GET /revision-image-builds` lists builds; filter with `module_id`, `revision_id`, or `status`, and paginate with `limit`/`offset`.
+- `GET /revision-image-builds/{build_id}` returns build status and provenance without the build log.
+- `GET /revision-image-builds/{build_id}/logs?offset=0&limit=16384` returns a bounded byte window of retained logs.
+- `POST /modules/{module_id}/revision-image-builds` queues a generation for the module’s exact current validated, synced revision, or returns that revision’s existing queued/building generation.
+- `POST /revision-image-builds/{build_id}/retry` queues a new generation for an eligible failed or ready build.
+- `POST /revision-image-builds/rebuild-all` queues one current-base generation for every currently eligible revision.
+
+Retry and rebuild-all requests reject duplicate active work with a stable `409` `build_conflict`. A previously ready image remains available while a newer generation is queued, building, or failed. The Bundles page shows the current revision’s image status and a module-scoped Build action. Its live modal polls bounded status and sanitized retained output until terminal state; closing or switching modules cannot apply a late response. Image history shows the latest current-revision generation plus every queued/building generation by default, with older terminal builds available under **Show previous builds**.
 
 ## Resources
 

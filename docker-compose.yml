@@ -1,8 +1,9 @@
+name: ${COMPOSE_PROJECT_NAME:-dspy-trainer}
 services:
   postgres:
     image: postgres:16-alpine
     command: ["postgres", "-c", "max_connections=300"]
-    container_name: dspy-trainer-postgres
+    container_name: ${COMPOSE_PROJECT_NAME:-dspy-trainer}-postgres
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -20,7 +21,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: dspy-trainer-redis
+    container_name: ${COMPOSE_PROJECT_NAME:-dspy-trainer}-redis
     ports:
       - "6379:6379"
     healthcheck:
@@ -35,7 +36,7 @@ services:
       context: .
       dockerfile: ops/mlflow/Dockerfile
     image: dspy-trainer-mlflow
-    container_name: dspy-trainer-mlflow
+    container_name: ${COMPOSE_PROJECT_NAME:-dspy-trainer}-mlflow
     depends_on:
       postgres:
         condition: service_healthy
@@ -65,11 +66,16 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    container_name: dspy-trainer-backend
+    image: ${DSPY_TRAINER_BACKEND_IMAGE:-dspy-trainer-backend:local}
+    container_name: ${COMPOSE_PROJECT_NAME:-dspy-trainer}-backend
     environment:
       DSPY_TRAINER_POSTGRES_DSN: postgresql://postgres:postgres@postgres:5432/dspy_trainer
       DSPY_TRAINER_REDIS_URL: redis://redis:6379/0
       DSPY_TRAINER_QUEUE_NAME: dspy-trainer:jobs
+      DSPY_TRAINER_DEPLOYER_BUILD_LOG_MAX_BYTES: ${DSPY_TRAINER_DEPLOYER_BUILD_LOG_MAX_BYTES:-262144}
+      DSPY_TRAINER_DEPLOYER_IMAGE_REPOSITORY: ${DSPY_TRAINER_DEPLOYER_IMAGE_REPOSITORY:-dspy-trainer-revision}
+      DSPY_TRAINER_DEPLOYER_PLATFORM_VERSION: ${DSPY_TRAINER_DEPLOYER_PLATFORM_VERSION:-local}
+      DSPY_TRAINER_DEPLOYMENT_ID: ${DSPY_TRAINER_DEPLOYMENT_ID:?Set a stable deployment identity}
       DSPY_TRAINER_BUNDLE_INSTALL_MAX_CONCURRENCY: ${DSPY_TRAINER_BUNDLE_INSTALL_MAX_CONCURRENCY:-8}
       DSPY_TRAINER_MLFLOW_TRACKING_URI: http://mlflow:5000
       MLFLOW_TRACKING_URI: http://mlflow:5000
@@ -146,7 +152,7 @@ services:
       dockerfile: backend/Dockerfile
     command: ["python", "backend/endpoint_worker.py"]
     deploy:
-      replicas: ${DSPY_TRAINER_TOTAL_ENDPOINT_WORKER_REPLICAS:-72}
+      replicas: ${DSPY_TRAINER_TOTAL_ENDPOINT_WORKER_REPLICAS:-0}
     environment:
       DSPY_TRAINER_POSTGRES_DSN: postgresql://postgres:postgres@postgres:5432/dspy_trainer
       DSPY_TRAINER_REDIS_URL: redis://redis:6379/0
@@ -180,6 +186,54 @@ services:
       retries: 10
       start_period: 15s
 
+  deployer:
+    build:
+      context: .
+      dockerfile: backend/Deployer.Dockerfile
+    image: ${DSPY_TRAINER_DEPLOYER_IMAGE:-dspy-trainer-deployer:local}
+    command: ["python", "backend/deployer.py", "--accept-base-image"]
+    restart: unless-stopped
+    deploy:
+      replicas: ${DSPY_TRAINER_DEPLOYER_REPLICAS:-2}
+    environment:
+      DSPY_TRAINER_POSTGRES_DSN: postgresql://postgres:postgres@postgres:5432/dspy_trainer
+      DSPY_TRAINER_REDIS_URL: redis://redis:6379/0
+      DSPY_TRAINER_QUEUE_NAME: dspy-trainer:jobs
+      DSPY_TRAINER_ENDPOINT_QUEUE_PREFIX: dspy-trainer:endpoint-queues
+      DSPY_TRAINER_ENDPOINT_INVOCATION_CHANNEL_PREFIX: dspy-trainer:endpoint-invocations
+      DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS: ${DSPY_TRAINER_ENDPOINT_WORKER_HEARTBEAT_TTL_SECONDS:-300}
+      DSPY_TRAINER_MLFLOW_TRACKING_URI: http://mlflow:5000
+      DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY: ${DSPY_TRAINER_MODULE_ENV_ENCRYPTION_KEY:-}
+      DSPY_TRAINER_DEPLOYER_LEADER_TIMEOUT_SECONDS: ${DSPY_TRAINER_DEPLOYER_LEADER_TIMEOUT_SECONDS:-15}
+      DSPY_TRAINER_DEPLOYER_CLAIM_TIMEOUT_SECONDS: ${DSPY_TRAINER_DEPLOYER_CLAIM_TIMEOUT_SECONDS:-300}
+      DSPY_TRAINER_DEPLOYER_POLL_INTERVAL_SECONDS: ${DSPY_TRAINER_DEPLOYER_POLL_INTERVAL_SECONDS:-1}
+      DSPY_TRAINER_DEPLOYER_ENDPOINT_READINESS_TIMEOUT_SECONDS: ${DSPY_TRAINER_DEPLOYER_ENDPOINT_READINESS_TIMEOUT_SECONDS:-120}
+      DSPY_TRAINER_DEPLOYER_ENDPOINT_DRAIN_TIMEOUT_SECONDS: ${DSPY_TRAINER_DEPLOYER_ENDPOINT_DRAIN_TIMEOUT_SECONDS:-300}
+      DSPY_TRAINER_DEPLOYER_ENDPOINT_RECONCILE_INTERVAL_SECONDS: ${DSPY_TRAINER_DEPLOYER_ENDPOINT_RECONCILE_INTERVAL_SECONDS:-2}
+      DSPY_TRAINER_DEPLOYER_IMAGE_RETENTION_COUNT: ${DSPY_TRAINER_DEPLOYER_IMAGE_RETENTION_COUNT:-2}
+      DSPY_TRAINER_DEPLOYER_BUILD_LOG_MAX_BYTES: ${DSPY_TRAINER_DEPLOYER_BUILD_LOG_MAX_BYTES:-262144}
+      DSPY_TRAINER_DEPLOYER_BACKEND_BASE_IMAGE: ${DSPY_TRAINER_BACKEND_IMAGE:-dspy-trainer-backend:local}
+      DSPY_TRAINER_DEPLOYER_IMAGE_REPOSITORY: ${DSPY_TRAINER_DEPLOYER_IMAGE_REPOSITORY:-dspy-trainer-revision}
+      DSPY_TRAINER_DEPLOYER_PLATFORM_VERSION: ${DSPY_TRAINER_DEPLOYER_PLATFORM_VERSION:-local}
+      DSPY_TRAINER_MANAGED_LABEL_NAMESPACE: ${DSPY_TRAINER_MANAGED_LABEL_NAMESPACE:-io.dspy-trainer}
+      DSPY_TRAINER_DEPLOYMENT_ID: ${DSPY_TRAINER_DEPLOYMENT_ID:?Set a stable deployment identity}
+      DSPY_TRAINER_COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-dspy-trainer}
+      DSPY_TRAINER_COMPOSE_NETWORK_NAME: ${DSPY_TRAINER_COMPOSE_NETWORK_NAME:-dspy-trainer}
+      DSPY_TRAINER_COMPOSE_NETWORK_PROJECT_LABEL: ${DSPY_TRAINER_COMPOSE_NETWORK_PROJECT_LABEL:-${COMPOSE_PROJECT_NAME:-dspy-trainer}}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    volumes:
+      - checkouts_data:/tmp/dspy-trainer/checkouts:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD", "python", "backend/deployer.py", "--readiness"]
+      interval: 15s
+      timeout: 10s
+      retries: 4
+      start_period: 30s
   web:
     build:
       context: .
@@ -187,7 +241,7 @@ services:
       args:
         VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api}
         VITE_MLFLOW_BASE_URL: ${VITE_MLFLOW_BASE_URL:-/mlflow}
-    container_name: dspy-trainer-web
+    container_name: ${COMPOSE_PROJECT_NAME:-dspy-trainer}-web
     depends_on:
       backend:
         condition: service_healthy
@@ -200,7 +254,7 @@ services:
 
   caddy:
     image: caddy:2.8-alpine
-    container_name: dspy-trainer-caddy
+    container_name: ${COMPOSE_PROJECT_NAME:-dspy-trainer}-caddy
     depends_on:
       web:
         condition: service_healthy
@@ -225,3 +279,6 @@ volumes:
   bundles_data:
   checkouts_data:
   optimization_artifacts_data:
+networks:
+  default:
+    name: ${DSPY_TRAINER_COMPOSE_NETWORK_NAME:-dspy-trainer}

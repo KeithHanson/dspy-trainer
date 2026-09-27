@@ -4,7 +4,6 @@ from pathlib import Path
 
 import pytest
 
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import Settings
@@ -21,15 +20,27 @@ async def _desired_revision(self, endpoint_id):
 
 
 def _services(items):
-    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+    services = AppServices(
+        Settings(
+            postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"
+        )
+    )
     services.postgres_pool = object()
 
     async def list_endpoint_workers():
         return {"items": items}
 
+    async def get_endpoint_deployment(endpoint_id):
+        return {"endpoint_id": endpoint_id, "phase": "legacy_static"}
+
     services.list_endpoint_workers = list_endpoint_workers  # type: ignore[method-assign]
-    services.reconcile_endpoint_worker_assignments = _no_reconcile.__get__(services, AppServices)
-    services._get_endpoint_desired_revision_id = _desired_revision.__get__(services, AppServices)
+    services.get_endpoint_deployment = get_endpoint_deployment  # type: ignore[method-assign]
+    services.reconcile_endpoint_worker_assignments = _no_reconcile.__get__(
+        services, AppServices
+    )
+    services._get_endpoint_desired_revision_id = _desired_revision.__get__(
+        services, AppServices
+    )
     return services
 
 
@@ -48,21 +59,47 @@ def test_endpoint_routing_accepts_only_listening_workers_for_assigned_endpoint()
         ]
     )
 
-    routing_state = asyncio.run(services.ensure_endpoint_ready_for_invocation("endpoint-1"))
+    routing_state = asyncio.run(
+        services.ensure_endpoint_ready_for_invocation("endpoint-1")
+    )
 
     assert routing_state == {
         "endpoint_id": "endpoint-1",
+        "deployment_phase": "legacy_static",
         "desired_revision_id": "rev-1",
         "assigned_workers": 1,
         "ready_workers": 1,
+        "ready_targets": [
+            {
+                "execution_mode": "legacy_static",
+                "build_id": None,
+                "revision_id": "rev-1",
+                "bundle_path": None,
+                "queue_name": "dspy-trainer:endpoint-queues:endpoint-1",
+            }
+        ],
         "status_counts": {"listening": 1},
     }
 
 
 @pytest.mark.parametrize(
-    ("worker_status", "worker_endpoint_id", "assigned_endpoint_id", "is_live", "expected_code", "expected_counts"),
+    (
+        "worker_status",
+        "worker_endpoint_id",
+        "assigned_endpoint_id",
+        "is_live",
+        "expected_code",
+        "expected_counts",
+    ),
     [
-        ("preparing", "endpoint-1", "endpoint-1", True, "no_ready_workers", {"preparing": 1}),
+        (
+            "preparing",
+            "endpoint-1",
+            "endpoint-1",
+            True,
+            "no_ready_workers",
+            {"preparing": 1},
+        ),
         ("failed", "endpoint-1", "endpoint-1", True, "no_ready_workers", {"failed": 1}),
         ("listening", "endpoint-1", "endpoint-2", True, "no_assigned_workers", {}),
         ("listening", "endpoint-1", "endpoint-1", False, "no_assigned_workers", {}),
@@ -83,8 +120,15 @@ def test_endpoint_routing_requires_live_registry_assignments(
                 "status": worker_status,
                 "endpoint_id": worker_endpoint_id,
                 "assigned_endpoint_id": assigned_endpoint_id,
-                "desired_revision_id": "rev-1" if assigned_endpoint_id == "endpoint-1" else None,
-                "warmed_revision_id": "rev-1" if worker_status == "listening" and assigned_endpoint_id == "endpoint-1" else None,
+                "desired_revision_id": (
+                    "rev-1" if assigned_endpoint_id == "endpoint-1" else None
+                ),
+                "warmed_revision_id": (
+                    "rev-1"
+                    if worker_status == "listening"
+                    and assigned_endpoint_id == "endpoint-1"
+                    else None
+                ),
                 "is_live": is_live,
             }
         ]
@@ -96,9 +140,11 @@ def test_endpoint_routing_requires_live_registry_assignments(
     assert exc_info.value.code == expected_code
     assert exc_info.value.routing_state == {
         "endpoint_id": "endpoint-1",
+        "deployment_phase": "legacy_static",
         "desired_revision_id": "rev-1",
         "assigned_workers": 0 if expected_code == "no_assigned_workers" else 1,
         "ready_workers": 0,
+        "ready_targets": [],
         "status_counts": expected_counts,
     }
 
@@ -131,8 +177,18 @@ def test_endpoint_routing_leaves_extra_live_workers_visible_but_unassigned():
 
     assert routing_state == {
         "endpoint_id": "endpoint-1",
+        "deployment_phase": "legacy_static",
         "desired_revision_id": "rev-1",
         "assigned_workers": 1,
         "ready_workers": 1,
+        "ready_targets": [
+            {
+                "execution_mode": "legacy_static",
+                "build_id": None,
+                "revision_id": "rev-1",
+                "bundle_path": None,
+                "queue_name": "dspy-trainer:endpoint-queues:endpoint-1",
+            }
+        ],
         "status_counts": {"listening": 1},
     }

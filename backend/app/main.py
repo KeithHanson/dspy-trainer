@@ -6,14 +6,21 @@ from pathlib import Path
 from typing import Any
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import AliasChoices, BaseModel, Field
 
 from app.config import get_cors_origins_from_env, get_settings
 from app.executor import run_bundle_eval
-from app.services import AppServices, EndpointUnavailableError, ModuleSyncError
+from app.revision_image_builder import BuildContextError
+from app.revision_image_coordinator import RevisionImageEnqueueError
+from app.services import (
+    AppServices,
+    EndpointImageNotReadyError,
+    EndpointUnavailableError,
+    ModuleSyncError,
+)
 from app.validator import validate_bundle
 
 
@@ -80,6 +87,43 @@ def _endpoint_unavailable_response(exc: EndpointUnavailableError) -> JSONRespons
             "error": str(exc),
             "code": exc.code,
             "routing_state": exc.routing_state,
+        },
+    )
+
+
+def _endpoint_image_not_ready_response(
+    exc: EndpointImageNotReadyError,
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=409,
+        content={
+            "error": str(exc),
+            "code": exc.code,
+            "revision_id": exc.revision_id,
+            "build_status": exc.build_status,
+            "build": json.loads(json.dumps(exc.build, default=str)),
+        },
+    )
+
+
+def _revision_image_enqueue_error_response(
+    exc: RevisionImageEnqueueError,
+) -> JSONResponse:
+    content: dict[str, Any] = {"error": str(exc), "code": exc.code}
+    if exc.build_id is not None:
+        content["build_id"] = exc.build_id
+    return JSONResponse(
+        status_code=404 if exc.code in {"build_not_found", "module_not_found"} else 409,
+        content=content,
+    )
+
+
+def _revision_image_coordinator_unavailable_response(exc: RuntimeError) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": str(exc),
+            "code": "build_coordinator_unavailable",
         },
     )
 
@@ -356,7 +400,16 @@ async def import_module(request: Request, payload: ModuleImportRequest):
             return JSONResponse(status_code=409, content={"error": str(exc), "sync_state": exc.sync_state})
         except RuntimeError as exc:
             return JSONResponse(status_code=400, content={"error": str(exc)})
-        return {"id": result["id"], "status": result["status"]}
+        response = {"id": result["id"], "status": result["status"]}
+        for field in (
+            "validation_status",
+            "sync_status",
+            "current_revision_id",
+            "image_build",
+        ):
+            if field in result:
+                response[field] = result[field]
+        return response
 
     result = await services.create_module_import(
         payload.source,
@@ -484,6 +537,98 @@ async def list_module_revisions(module_id: str, request: Request):
     return await services.list_module_revisions(module_id)
 
 
+@app.post("/modules/{module_id}/revision-image-builds")
+async def build_current_module_revision(module_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    try:
+        return await services.build_current_module_revision(module_id)
+    except RevisionImageEnqueueError as exc:
+        return _revision_image_enqueue_error_response(exc)
+    except RuntimeError as exc:
+        return _revision_image_coordinator_unavailable_response(exc)
+
+
+@app.get("/revision-image-builds")
+async def list_revision_image_builds(
+    request: Request,
+    module_id: str | None = Query(default=None),
+    revision_id: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+):
+    services: AppServices = request.app.state.services
+    try:
+        return await services.list_revision_image_build_statuses(
+            module_id=module_id,
+            revision_id=revision_id,
+            status=status,
+            limit=limit,
+            offset=offset,
+        )
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"error": str(exc), "code": "invalid_build_status"},
+        )
+
+
+@app.post("/revision-image-builds/rebuild-all")
+async def rebuild_all_revision_images(request: Request):
+    services: AppServices = request.app.state.services
+    try:
+        builds = await services.rebuild_all_revision_images()
+    except RevisionImageEnqueueError as exc:
+        return _revision_image_enqueue_error_response(exc)
+    except RuntimeError as exc:
+        return _revision_image_coordinator_unavailable_response(exc)
+    return {"items": builds, "queued": len(builds)}
+
+
+@app.get("/revision-image-builds/{build_id}")
+async def get_revision_image_build(build_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    build = await services.get_revision_image_build_status(build_id)
+    if build is None:
+        return JSONResponse(
+            status_code=404,
+            content={"error": "revision image build not found", "code": "build_not_found"},
+        )
+    return build
+
+
+@app.get("/revision-image-builds/{build_id}/logs")
+async def get_revision_image_build_logs(
+    build_id: str,
+    request: Request,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=16_384, ge=1, le=65_536),
+):
+    services: AppServices = request.app.state.services
+    logs = await services.get_revision_image_build_logs(
+        build_id,
+        offset=offset,
+        limit=limit,
+    )
+    if logs is None:
+        return JSONResponse(
+            status_code=404,
+            content={"error": "revision image build not found", "code": "build_not_found"},
+        )
+    return logs
+
+
+@app.post("/revision-image-builds/{build_id}/retry")
+async def retry_revision_image_build(build_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    try:
+        return await services.retry_revision_image_build(build_id)
+    except RevisionImageEnqueueError as exc:
+        return _revision_image_enqueue_error_response(exc)
+    except RuntimeError as exc:
+        return _revision_image_coordinator_unavailable_response(exc)
+
+
 @app.get("/modules/{module_id}/files")
 async def get_module_files(module_id: str, request: Request):
     services: AppServices = request.app.state.services
@@ -512,10 +657,14 @@ async def list_bundle_endpoints(module_id: str, request: Request):
 
 
 @app.post("/modules/{module_id}/endpoints")
-async def create_bundle_endpoint(module_id: str, request: Request, payload: BundleEndpointCreateRequest):
+async def create_bundle_endpoint(
+    module_id: str, request: Request, payload: BundleEndpointCreateRequest
+):
     services: AppServices = request.app.state.services
     try:
         endpoint = await services.create_bundle_endpoint(module_id, payload.name, payload.lm_profile_id, payload.pinned_worker_count)
+    except EndpointImageNotReadyError as exc:
+        return _endpoint_image_not_ready_response(exc)
     except ValueError as exc:
         return JSONResponse(status_code=400, content={"error": str(exc)})
     if endpoint is None:
@@ -568,7 +717,9 @@ async def list_all_bundle_endpoints(request: Request):
 
 
 @app.post("/bundle-endpoints")
-async def create_bundle_endpoint_global(request: Request, payload: BundleEndpointCreateRequest):
+async def create_bundle_endpoint_global(
+    request: Request, payload: BundleEndpointCreateRequest
+):
     services: AppServices = request.app.state.services
     try:
         endpoint = await services.create_bundle_endpoint_global(
@@ -577,6 +728,8 @@ async def create_bundle_endpoint_global(request: Request, payload: BundleEndpoin
             payload.lm_profile_id,
             payload.pinned_worker_count,
         )
+    except EndpointImageNotReadyError as exc:
+        return _endpoint_image_not_ready_response(exc)
     except ValueError as exc:
         return JSONResponse(status_code=400, content={"error": str(exc)})
     if endpoint is None:
@@ -593,8 +746,19 @@ async def get_bundle_endpoint(endpoint_id: str, request: Request):
     return endpoint
 
 
+@app.get("/bundle-endpoints/{endpoint_id}/deployment")
+async def get_bundle_endpoint_deployment(endpoint_id: str, request: Request):
+    services: AppServices = request.app.state.services
+    status = await services.get_endpoint_deployment_status(endpoint_id)
+    if status is None:
+        return JSONResponse(status_code=404, content={"error": "endpoint not found"})
+    return status
+
+
 @app.patch("/bundle-endpoints/{endpoint_id}")
-async def update_bundle_endpoint_global(endpoint_id: str, request: Request, payload: BundleEndpointUpdateRequest):
+async def update_bundle_endpoint_global(
+    endpoint_id: str, request: Request, payload: BundleEndpointUpdateRequest
+):
     services: AppServices = request.app.state.services
     try:
         endpoint = await services.update_bundle_endpoint_global(
@@ -604,6 +768,8 @@ async def update_bundle_endpoint_global(endpoint_id: str, request: Request, payl
             lm_profile_id=payload.lm_profile_id,
             pinned_worker_count=payload.pinned_worker_count,
         )
+    except EndpointImageNotReadyError as exc:
+        return _endpoint_image_not_ready_response(exc)
     except ValueError as exc:
         message = str(exc)
         status_code = 404 if message == "module not found" else 400
@@ -755,28 +921,31 @@ async def validate_module(module_id: str, request: Request, payload: ValidateReq
     module_state = await services.resolve_module_execution_state(module_id, payload.bundle_path)
     if module_state is None:
         return JSONResponse(status_code=404, content={"error": "module not found"})
-    report = validate_bundle(module_state["bundle_path"])
-    await services.set_module_bundle_metadata(
-        module_id,
-        report.metadata.get("name") if isinstance(report.metadata.get("name"), str) else None,
-        report.metadata.get("version") if isinstance(report.metadata.get("version"), str) else None,
-    )
+    try:
+        frozen_source = await services.freeze_validated_source(module_state["bundle_path"])
+    except BuildContextError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"error": str(exc), "code": "source_snapshot_failed"},
+        )
+    report = validate_bundle(str(frozen_source.path))
     status = "passed" if report.passed else "failed"
-    found = await services.set_validation_status(
+    found = await services.persist_module_validation(
         module_id,
-        status,
-        report.diagnostics,
-        revision_id=module_state["bundle_revision_id"],
-        commit_sha=module_state["bundle_commit_sha"],
-        bundle_version=module_state["bundle_version"],
+        module_state=module_state,
+        report=report,
+        frozen_source=frozen_source,
     )
     if not found:
         return JSONResponse(status_code=404, content={"error": "module not found"})
+    current = await services.get_module(module_id)
     return {
         "id": module_id,
         "validation_status": status,
         "diagnostics": report.diagnostics,
         "summary": report.summary,
+        "current_revision_id": (current or {}).get("current_revision_id"),
+        "image_build": (current or {}).get("image_build"),
     }
 
 

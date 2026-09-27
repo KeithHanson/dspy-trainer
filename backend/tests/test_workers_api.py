@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -124,12 +125,12 @@ def test_list_endpoint_workers_exposes_revision_state(monkeypatch):
     monkeypatch.setattr(services, "list_endpoint_worker_registrations", fake_list_endpoint_worker_registrations)
     payload = asyncio.run(services.list_endpoint_workers())
 
-    assert payload["available_workers"] == 2
+    assert payload["available_workers"] == 1
     assert payload["live_workers"] == 4
     assert payload["stale_workers"] == 0
     assert payload["assigned_workers"] == 3
     assert payload["unassigned_workers"] == 1
-    assert payload["ready_workers"] == 2
+    assert payload["ready_workers"] == 1
     assert payload["warming_workers"] == 1
     assert payload["running_workers"] == 0
     assert payload["failed_workers"] == 0
@@ -192,13 +193,13 @@ def test_list_endpoint_workers_does_not_count_listening_revision_mismatch_as_ava
     monkeypatch.setattr(services, "list_endpoint_worker_registrations", fake_list_endpoint_worker_registrations)
     payload = asyncio.run(services.list_endpoint_workers())
 
-    assert payload["available_workers"] == 2
-    assert payload["busy_workers"] == 1
+    assert payload["available_workers"] == 1
+    assert payload["busy_workers"] == 2
     assert payload["live_workers"] == 3
     assert payload["stale_workers"] == 0
     assert payload["assigned_workers"] == 2
     assert payload["unassigned_workers"] == 1
-    assert payload["ready_workers"] == 2
+    assert payload["ready_workers"] == 1
     assert payload["items"][0]["deploy_state"] == "revision_mismatch"
     assert payload["items"][0]["is_revision_ready"] is False
     assert payload["items"][1]["deploy_state"] == "ready"
@@ -215,6 +216,9 @@ def test_enqueue_endpoint_invocation_succeeds_once_worker_is_listening_on_curren
 
     async def fake_get_bundle_endpoint(endpoint_id):
         return {"id": endpoint_id, "module_import_id": "mod-1"}
+
+    async def fake_get_endpoint_deployment(endpoint_id):
+        return {"endpoint_id": endpoint_id, "phase": "legacy_static"}
 
     async def fake_resolve_module_execution_state(module_id):
         return {"module_id": module_id, "bundle_revision_id": "rev-2"}
@@ -237,6 +241,7 @@ def test_enqueue_endpoint_invocation_succeeds_once_worker_is_listening_on_curren
 
     monkeypatch.setattr(services, "reconcile_endpoint_worker_assignments", fake_reconcile)
     monkeypatch.setattr(services, "get_bundle_endpoint", fake_get_bundle_endpoint)
+    monkeypatch.setattr(services, "get_endpoint_deployment", fake_get_endpoint_deployment)
     monkeypatch.setattr(services, "resolve_module_execution_state", fake_resolve_module_execution_state)
     monkeypatch.setattr(services, "list_endpoint_workers", fake_list_endpoint_workers)
 
@@ -245,13 +250,22 @@ def test_enqueue_endpoint_invocation_succeeds_once_worker_is_listening_on_curren
     )
 
     assert invocation_id == "inv-1"
-    assert redis.commands == [
-        (
-            "LPUSH",
-            "dspy-trainer:endpoint-queues:endpoint-1",
-            '{"type": "endpoint_invocation", "invocation_id": "inv-1", "endpoint_id": "endpoint-1", "input_payload": {"question": "hello"}, "stream": false}',
-        )
-    ]
+    assert len(redis.commands) == 1
+    command, queue_name, raw_payload = redis.commands[0]
+    assert command == "LPUSH"
+    assert queue_name == "dspy-trainer:endpoint-queues:endpoint-1"
+    payload = json.loads(raw_payload)
+    assert payload == {
+        "type": "endpoint_invocation",
+        "invocation_id": "inv-1",
+        "endpoint_id": "endpoint-1",
+        "input_payload": {"question": "hello"},
+        "stream": False,
+        "execution_mode": "legacy_static",
+        "build_id": None,
+        "revision_id": "rev-2",
+        "bundle_path": None,
+    }
 
 
 def test_enqueue_endpoint_invocation_rejects_worker_with_stale_desired_revision(monkeypatch):
@@ -264,6 +278,9 @@ def test_enqueue_endpoint_invocation_rejects_worker_with_stale_desired_revision(
 
     async def fake_get_bundle_endpoint(endpoint_id):
         return {"id": endpoint_id, "module_import_id": "mod-1"}
+
+    async def fake_get_endpoint_deployment(endpoint_id):
+        return {"endpoint_id": endpoint_id, "phase": "legacy_static"}
 
     async def fake_resolve_module_execution_state(module_id):
         return {"module_id": module_id, "bundle_revision_id": "rev-2"}
@@ -286,6 +303,7 @@ def test_enqueue_endpoint_invocation_rejects_worker_with_stale_desired_revision(
 
     monkeypatch.setattr(services, "reconcile_endpoint_worker_assignments", fake_reconcile)
     monkeypatch.setattr(services, "get_bundle_endpoint", fake_get_bundle_endpoint)
+    monkeypatch.setattr(services, "get_endpoint_deployment", fake_get_endpoint_deployment)
     monkeypatch.setattr(services, "resolve_module_execution_state", fake_resolve_module_execution_state)
     monkeypatch.setattr(services, "list_endpoint_workers", fake_list_endpoint_workers)
 

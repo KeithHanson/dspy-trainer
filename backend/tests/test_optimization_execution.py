@@ -156,9 +156,20 @@ class FakePool:
         return _FakeAcquire(self.state)
 
 
+class _NoopTransaction:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
 class _RecordingConn:
     def __init__(self):
         self.queries: list[str] = []
+
+    def transaction(self):
+        return _NoopTransaction()
 
     async def execute(self, query, *params):
         del params

@@ -4,17 +4,33 @@ import json
 import sys
 from pathlib import Path
 
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import Settings
 from app.services import AppServices
+
+def _execution_mode(row):
+    metadata = row["runtime_metadata"]
+    if isinstance(metadata, str):
+        metadata = json.loads(metadata)
+    return metadata.get("execution_mode")
+
+
+class _NoopTransaction:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
 
 
 class _RegistryConn:
     def __init__(self, state):
         self.state = state
         self.queries: list[str] = []
+
+    def transaction(self):
+        return _NoopTransaction()
 
     async def fetchrow(self, query, *params):
         self.queries.append(query)
@@ -40,17 +56,46 @@ class _RegistryConn:
             }
             self.state["workers"][worker_id] = row
             return row
-        if normalized.startswith("update endpoint_worker_registrations set runtime_instance_id = coalesce($2, runtime_instance_id)"):
+        if normalized.startswith(
+            "update endpoint_worker_registrations set status = 'running'"
+        ):
             worker_id = str(params[0])
             row = self.state["workers"].get(worker_id)
-            if row is None:
+            if (
+                row is None
+                or row["assigned_endpoint_id"] != params[1]
+                or row["status"] != "listening"
+                or row["task_id"] is not None
+                or row["heartbeat_expires_at"] <= params[3]
+            ):
                 return None
-            runtime_instance_id = params[1]
-            if "where worker_id = $1 and runtime_instance_id = $2" in normalized and row["runtime_instance_id"] != runtime_instance_id:
+            row.update(
+                status="running",
+                task_id=params[2],
+                last_seen_at=params[3],
+                heartbeat_expires_at=params[4],
+                runtime_metadata={
+                    **row["runtime_metadata"],
+                    **json.loads(params[9]),
+                },
+                updated_at=params[3],
+            )
+            return {"worker_id": worker_id}
+
+        if normalized.startswith(
+            "update endpoint_worker_registrations set status = $3"
+        ):
+            worker_id = str(params[0])
+            row = self.state["workers"].get(worker_id)
+            if row is None or row["runtime_instance_id"] != params[1]:
+                return None
+            if (
+                "task_id is not distinct from $11" in normalized
+                and row["task_id"] != params[10]
+            ):
                 return None
             row.update(
                 {
-                    "runtime_instance_id": runtime_instance_id or row["runtime_instance_id"],
                     "status": params[2],
                     "task_id": params[3],
                     "last_seen_at": params[4],
@@ -63,7 +108,12 @@ class _RegistryConn:
                 }
             )
             return dict(row)
-        if normalized.startswith("select worker_id, runtime_instance_id, status, assigned_endpoint_id, task_id, last_seen_at,") and "where worker_id = $1" in normalized:
+        if (
+            normalized.startswith(
+                "select worker_id, runtime_instance_id, status, assigned_endpoint_id, task_id, last_seen_at,"
+            )
+            and "where worker_id = $1" in normalized
+        ):
             row = self.state["workers"].get(str(params[0]))
             return None if row is None else dict(row)
         return None
@@ -72,12 +122,16 @@ class _RegistryConn:
         del params
         self.queries.append(query)
         normalized = " ".join(query.strip().lower().split())
-        if normalized.startswith("select worker_id, runtime_instance_id, status, assigned_endpoint_id, task_id, last_seen_at,"):
+        if "from endpoint_worker_registrations" in normalized:
             return [
                 dict(row)
-                for _, row in sorted(
-                    self.state["workers"].items(), key=lambda item: (item[1]["created_at"], item[0])
+                for worker_id, row in sorted(
+                    self.state["workers"].items(),
+                    key=lambda item: (item[1]["created_at"], item[0]),
                 )
+                if "managed_endpoint_containers" not in normalized
+                or _execution_mode(row) != "managed_image"
+                or worker_id in self.state.get("active_managed_worker_ids", set())
             ]
         return []
 
@@ -88,16 +142,23 @@ class _RegistryConn:
             count = len(self.state["workers"])
             self.state["workers"].clear()
             return f"DELETE {count}"
-        if normalized.startswith("update endpoint_worker_registrations set status = 'stale', updated_at = $1"):
+        if normalized.startswith(
+            "update endpoint_worker_registrations set status = 'stale', updated_at = $1"
+        ):
             count = 0
             stale_time = params[0]
             for row in self.state["workers"].values():
-                if row["heartbeat_expires_at"] <= stale_time and row["status"] != "stale":
+                if (
+                    row["heartbeat_expires_at"] <= stale_time
+                    and row["status"] != "stale"
+                ):
                     row["status"] = "stale"
                     row["updated_at"] = stale_time
                     count += 1
             return f"UPDATE {count}"
-        if normalized.startswith("update endpoint_worker_registrations set assigned_endpoint_id = $2,"):
+        if normalized.startswith(
+            "update endpoint_worker_registrations set assigned_endpoint_id = $2,"
+        ):
             worker_id = str(params[0])
             row = self.state["workers"].get(worker_id)
             if row is None:
@@ -159,7 +220,11 @@ class _Redis:
 
 
 def _make_services() -> AppServices:
-    services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+    services = AppServices(
+        Settings(
+            postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"
+        )
+    )
     services.postgres_pool = _RegistryPool()
     return services
 
@@ -170,14 +235,32 @@ def test_init_db_creates_endpoint_worker_registry_schema_and_indexes():
     asyncio.run(services.init_db())
 
     queries = services.postgres_pool.conn.queries
-    assert any("create table if not exists endpoint_worker_registrations" in query for query in queries)
+    assert any(
+        "create table if not exists endpoint_worker_registrations" in query
+        for query in queries
+    )
     assert any("worker_id text primary key" in query for query in queries)
     assert any("runtime_instance_id text not null" in query for query in queries)
-    assert any("assigned_endpoint_id text references bundle_endpoints(id) on delete set null" in query for query in queries)
-    assert any("heartbeat_expires_at timestamptz not null" in query for query in queries)
-    assert any("runtime_metadata jsonb not null default '{}'::jsonb" in query for query in queries)
-    assert any("idx_endpoint_worker_registrations_heartbeat_expires_at" in query for query in queries)
-    assert any("idx_endpoint_worker_registrations_assigned_endpoint_id" in query for query in queries)
+    assert any(
+        "assigned_endpoint_id text references bundle_endpoints(id) on delete set null"
+        in query
+        for query in queries
+    )
+    assert any(
+        "heartbeat_expires_at timestamptz not null" in query for query in queries
+    )
+    assert any(
+        "runtime_metadata jsonb not null default '{}'::jsonb" in query
+        for query in queries
+    )
+    assert any(
+        "idx_endpoint_worker_registrations_heartbeat_expires_at" in query
+        for query in queries
+    )
+    assert any(
+        "idx_endpoint_worker_registrations_assigned_endpoint_id" in query
+        for query in queries
+    )
     assert any("idx_endpoint_worker_registrations_status" in query for query in queries)
 
 
@@ -201,28 +284,39 @@ def test_backend_startup_clears_endpoint_worker_registrations_before_runtime_rer
         cleared = await services.clear_endpoint_worker_registrations()
 
         assert cleared == 2
-        assert await services.list_endpoint_worker_registrations(now=registered_at + timedelta(seconds=2)) == []
+        assert (
+            await services.list_endpoint_worker_registrations(
+                now=registered_at + timedelta(seconds=2)
+            )
+            == []
+        )
 
     asyncio.run(scenario())
 
 
-def test_connect_backend_clears_stale_endpoint_worker_registrations_on_backend_startup(monkeypatch):
+def test_connect_backend_preserves_registry_and_expires_stale_runtime_identity(
+    monkeypatch,
+):
     async def scenario() -> None:
         seeded_pool = _RegistryPool()
-        seeded_pool.state["workers"]["stale-worker"] = {
-            "worker_id": "stale-worker",
-            "runtime_instance_id": "runtime-stale",
-            "status": "stale",
+        for worker_id, status, expires_at in (
+            ("healthy-worker", "idle", datetime(2200, 1, 1, tzinfo=timezone.utc)),
+            ("stale-worker", "running", datetime(2000, 1, 1, tzinfo=timezone.utc)),
+        ):
+            seeded_pool.state["workers"][worker_id] = {
+                "worker_id": worker_id,
+                "runtime_instance_id": f"runtime-{worker_id}",
+                "status": status,
             "assigned_endpoint_id": None,
             "task_id": None,
-            "last_seen_at": datetime(2099, 1, 1, tzinfo=timezone.utc),
-            "heartbeat_expires_at": datetime(2099, 1, 1, tzinfo=timezone.utc),
-            "hostname": "host-stale",
+                "last_seen_at": datetime(2000, 1, 1, tzinfo=timezone.utc),
+                "heartbeat_expires_at": expires_at,
+                "hostname": f"host-{worker_id}",
             "pid": 1,
             "runtime_metadata": {"boot": "old"},
             "last_error": None,
-            "created_at": datetime(2099, 1, 1, tzinfo=timezone.utc),
-            "updated_at": datetime(2099, 1, 1, tzinfo=timezone.utc),
+                "created_at": datetime(2000, 1, 1, tzinfo=timezone.utc),
+                "updated_at": datetime(2000, 1, 1, tzinfo=timezone.utc),
         }
 
         async def fake_create_pool(*args, **kwargs):
@@ -236,23 +330,46 @@ def test_connect_backend_clears_stale_endpoint_worker_registrations_on_backend_s
             async def aclose(self):
                 return None
 
-        monkeypatch.setattr("app.services.redis.Redis.from_url", lambda *args, **kwargs: _Redis())
+        monkeypatch.setattr(
+            "app.services.redis.Redis.from_url", lambda *args, **kwargs: _Redis()
+        )
         monkeypatch.setattr("app.services.asyncpg.create_pool", fake_create_pool)
         monkeypatch.setattr("app.services.httpx.AsyncClient", _HttpClient)
 
-        services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+        services = AppServices(
+            Settings(
+                postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"
+            )
+        )
         await services.connect_backend()
 
-        workers = await services.list_endpoint_worker_registrations(now=datetime(2099, 1, 1, tzinfo=timezone.utc))
-        assert workers == []
-        assert any("delete from endpoint_worker_registrations" in query.lower() for query in seeded_pool.conn.queries)
+        workers = await services.list_endpoint_worker_registrations(
+            now=datetime.now(timezone.utc)
+        )
+        by_id = {worker["worker_id"]: worker for worker in workers}
+        assert set(by_id) == {"healthy-worker", "stale-worker"}
+        assert by_id["healthy-worker"]["status"] == "idle"
+        assert by_id["healthy-worker"]["is_live"] is True
+        assert by_id["stale-worker"]["status"] == "stale"
+        assert by_id["stale-worker"]["is_live"] is False
+        assert not any(
+            "delete from endpoint_worker_registrations" in query.lower()
+            for query in seeded_pool.conn.queries
+        )
+        assert any(
+            "update endpoint_worker_registrations set status = 'stale'"
+            in " ".join(query.lower().split())
+            for query in seeded_pool.conn.queries
+        )
 
         await services.disconnect()
 
     asyncio.run(scenario())
 
 
-def test_connect_does_not_clear_endpoint_worker_registrations_for_non_backend_startup(monkeypatch):
+def test_connect_does_not_clear_endpoint_worker_registrations_for_non_backend_startup(
+    monkeypatch,
+):
     async def scenario() -> None:
         seeded_pool = _RegistryPool()
         seeded_pool.state["workers"]["worker-1"] = {
@@ -297,16 +414,27 @@ def test_connect_does_not_clear_endpoint_worker_registrations_for_non_backend_st
             async def aclose(self):
                 return None
 
-        monkeypatch.setattr("app.services.redis.Redis.from_url", lambda *args, **kwargs: _Redis())
+        monkeypatch.setattr(
+            "app.services.redis.Redis.from_url", lambda *args, **kwargs: _Redis()
+        )
         monkeypatch.setattr("app.services.asyncpg.create_pool", fake_create_pool)
         monkeypatch.setattr("app.services.httpx.AsyncClient", _HttpClient)
 
-        services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+        services = AppServices(
+            Settings(
+                postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"
+            )
+        )
         await services.connect()
 
-        workers = await services.list_endpoint_worker_registrations(now=datetime(2099, 1, 1, tzinfo=timezone.utc))
+        workers = await services.list_endpoint_worker_registrations(
+            now=datetime(2099, 1, 1, tzinfo=timezone.utc)
+        )
         assert [worker["worker_id"] for worker in workers] == ["worker-1", "worker-2"]
-        assert not any("delete from endpoint_worker_registrations" in query.lower() for query in seeded_pool.conn.queries)
+        assert not any(
+            "delete from endpoint_worker_registrations" in query.lower()
+            for query in seeded_pool.conn.queries
+        )
 
         await services.disconnect()
 
@@ -330,7 +458,34 @@ def test_endpoint_worker_registry_register_heartbeat_and_stale_transition():
         assert registered["worker_id"] == "endpoint-worker-1"
         assert registered["status"] == "idle"
         assert registered["is_live"] is True
-        assert registered["heartbeat_expires_at"] == (registered_at + timedelta(minutes=5)).isoformat()
+        assert (
+            registered["heartbeat_expires_at"]
+            == (registered_at + timedelta(minutes=5)).isoformat()
+        )
+
+        ready = await services.heartbeat_endpoint_worker(
+            "endpoint-worker-1",
+            runtime_instance_id="runtime-1",
+            status="listening",
+            runtime_metadata={
+                "endpoint_id": "endpoint-1",
+                "execution_mode": "legacy_static",
+            },
+            now=registered_at + timedelta(seconds=1),
+        )
+        assert ready is not None
+        await services._set_endpoint_worker_assignment(
+            "endpoint-worker-1", "endpoint-1"
+        )
+        assert await services.claim_endpoint_worker_task(
+            worker_id="endpoint-worker-1",
+            endpoint_id="endpoint-1",
+            task_id="inv-1",
+            execution_mode="legacy_static",
+            build_id=None,
+            revision_id=None,
+            bundle_path=None,
+        )
 
         heartbeat_at = registered_at + timedelta(seconds=5)
         heartbeat = await services.heartbeat_endpoint_worker(
@@ -373,6 +528,235 @@ def test_endpoint_worker_registry_register_heartbeat_and_stale_transition():
 
     asyncio.run(scenario())
 
+def test_endpoint_worker_list_omits_managed_workers_without_active_containers():
+    async def scenario() -> None:
+        services = _make_services()
+        now = datetime(2099, 1, 1, tzinfo=timezone.utc)
+        for worker_id in ("managed-active", "managed-removed"):
+            await services.register_endpoint_worker(
+                worker_id=worker_id,
+                runtime_instance_id=f"runtime-{worker_id}",
+                status="listening",
+                assigned_endpoint_id="endpoint-1",
+                runtime_metadata={"execution_mode": "legacy_static"},
+                now=now,
+            )
+            services.postgres_pool.state["workers"][worker_id]["runtime_metadata"] = {
+                "execution_mode": "managed_image"
+            }
+        services.postgres_pool.state["active_managed_worker_ids"] = {
+            "managed-active"
+        }
+
+        payload = await services.list_endpoint_workers(now=now)
+
+        assert [worker["worker_id"] for worker in payload["items"]] == [
+            "managed-active"
+        ]
+        assert payload["reported_workers"] == 1
+
+    asyncio.run(scenario())
+
+def test_explicitly_stopped_worker_is_stale_before_heartbeat_expiry():
+    async def scenario() -> None:
+        services = _make_services()
+        now = datetime(2099, 1, 1, tzinfo=timezone.utc)
+        await services.register_endpoint_worker(
+            worker_id="endpoint-worker-stopped",
+            runtime_instance_id="runtime-stopped",
+            status="listening",
+            assigned_endpoint_id="endpoint-1",
+            runtime_metadata={
+                "endpoint_id": "endpoint-1",
+                "execution_mode": "legacy_static",
+                "desired_revision_id": "revision-1",
+                "warmed_revision_id": "revision-1",
+            },
+            now=now,
+        )
+        services.postgres_pool.state["workers"]["endpoint-worker-stopped"]["status"] = "stale"
+
+        payload = await services.list_endpoint_workers(now=now + timedelta(seconds=1))
+
+        assert payload["items"][0]["status"] == "stale"
+        assert payload["items"][0]["is_stale"] is True
+        assert payload["items"][0]["is_live"] is False
+        assert payload["stale_workers"] == 1
+        assert payload["ready_workers"] == 0
+
+    asyncio.run(scenario())
+
+
+def test_stale_managed_worker_cannot_heartbeat_after_endpoint_removal():
+    async def scenario() -> None:
+        services = _make_services()
+        now = datetime(2099, 1, 1, tzinfo=timezone.utc)
+        await services.register_endpoint_worker(
+            worker_id="managed-worker-removed",
+            runtime_instance_id="runtime-managed",
+            status="listening",
+            assigned_endpoint_id="endpoint-1",
+            runtime_metadata={"execution_mode": "legacy_static"},
+            now=now,
+        )
+        registration = services.postgres_pool.state["workers"]["managed-worker-removed"]
+        registration["status"] = "stale"
+        registration["assigned_endpoint_id"] = None
+        registration["runtime_metadata"] = {"execution_mode": "managed_image"}
+
+        heartbeat = await services.heartbeat_endpoint_worker(
+            "managed-worker-removed",
+            runtime_instance_id="runtime-managed",
+            status="idle",
+            now=now + timedelta(seconds=1),
+        )
+
+        assert heartbeat is None
+        assert registration["status"] == "stale"
+
+    asyncio.run(scenario())
+
+
+def test_task_cas_rejects_late_same_runtime_heartbeats_after_next_claim():
+    async def scenario() -> None:
+        services = _make_services()
+        now = datetime(2099, 1, 1, tzinfo=timezone.utc)
+        worker_id = "endpoint-worker-1"
+        runtime_id = "runtime-1"
+        endpoint_id = "endpoint-1"
+        runtime_metadata = {
+            "endpoint_id": endpoint_id,
+            "execution_mode": "legacy_static",
+            "desired_build_id": None,
+            "warmed_build_id": None,
+            "desired_revision_id": None,
+            "warmed_revision_id": None,
+            "bundle_path": None,
+        }
+        await services.register_endpoint_worker(
+            worker_id=worker_id,
+            runtime_instance_id=runtime_id,
+            status="listening",
+            runtime_metadata=runtime_metadata,
+            now=now,
+        )
+        await services._set_endpoint_worker_assignment(worker_id, endpoint_id)
+
+        assert await services.claim_endpoint_worker_task(
+            worker_id=worker_id,
+            endpoint_id=endpoint_id,
+            task_id="task-1",
+            execution_mode="legacy_static",
+            build_id=None,
+            revision_id=None,
+            bundle_path=None,
+        )
+        completed = await services.heartbeat_endpoint_worker(
+            worker_id,
+            runtime_instance_id=runtime_id,
+            status="listening",
+            task_id=None,
+            expected_task_id="task-1",
+            runtime_metadata={"transition": "task-1-complete"},
+            now=now + timedelta(seconds=1),
+        )
+        assert completed is not None
+        assert completed["task_id"] is None
+
+        assert await services.claim_endpoint_worker_task(
+            worker_id=worker_id,
+            endpoint_id=endpoint_id,
+            task_id="task-2",
+            execution_mode="legacy_static",
+            build_id=None,
+            revision_id=None,
+            bundle_path=None,
+        )
+        current = services.postgres_pool.state["workers"][worker_id]
+        before_late_heartbeats = dict(current)
+        before_late_heartbeats["runtime_metadata"] = dict(current["runtime_metadata"])
+
+        late_running = await services.heartbeat_endpoint_worker(
+            worker_id,
+            runtime_instance_id=runtime_id,
+            status="running",
+            task_id="task-1",
+            runtime_metadata={"late": "running"},
+            last_error="late running task-1",
+            now=now + timedelta(seconds=2),
+        )
+        late_idle = await services.heartbeat_endpoint_worker(
+            worker_id,
+            runtime_instance_id=runtime_id,
+            status="idle",
+            task_id=None,
+            runtime_metadata={"late": "idle"},
+            last_error="late idle task-1",
+            now=now + timedelta(seconds=3),
+        )
+        late_completion = await services.heartbeat_endpoint_worker(
+            worker_id,
+            runtime_instance_id=runtime_id,
+            status="listening",
+            task_id=None,
+            expected_task_id="task-1",
+            runtime_metadata={"late": "completion"},
+            last_error="late completion task-1",
+            now=now + timedelta(seconds=4),
+        )
+
+        assert late_running is None
+        assert late_idle is None
+        assert late_completion is None
+        assert services.postgres_pool.state["workers"][worker_id] == before_late_heartbeats
+
+    asyncio.run(scenario())
+
+
+def test_replaced_runtime_fences_stale_heartbeat_from_same_worker_id():
+    async def scenario() -> None:
+        services = _make_services()
+        now = datetime(2099, 1, 1, tzinfo=timezone.utc)
+        await services.register_endpoint_worker(
+            worker_id="endpoint-worker-1",
+            runtime_instance_id="runtime-a",
+            status="listening",
+            now=now,
+        )
+        await services.register_endpoint_worker(
+            worker_id="endpoint-worker-1",
+            runtime_instance_id="runtime-b",
+            status="preparing",
+            now=now + timedelta(seconds=1),
+        )
+
+        stale = await services.heartbeat_endpoint_worker(
+            "endpoint-worker-1",
+            runtime_instance_id="runtime-a",
+            status="failed",
+            last_error="stale runtime",
+            now=now + timedelta(seconds=2),
+        )
+        assert stale is None
+        current = services.postgres_pool.state["workers"]["endpoint-worker-1"]
+        assert current["runtime_instance_id"] == "runtime-b"
+        assert current["status"] == "preparing"
+        assert current["last_error"] is None
+
+        current_heartbeat = await services.heartbeat_endpoint_worker(
+            "endpoint-worker-1",
+            runtime_instance_id="runtime-b",
+            status="listening",
+            now=now + timedelta(seconds=3),
+        )
+        assert current_heartbeat is not None
+        assert current_heartbeat["runtime_instance_id"] == "runtime-b"
+        assert current_heartbeat["status"] == "listening"
+        update_query = " ".join(services.postgres_pool.conn.queries[-1].split())
+        assert "where worker_id = $1 and runtime_instance_id = $2" in update_query
+
+    asyncio.run(scenario())
+
 
 def test_endpoint_worker_registry_marks_only_heartbeat_expiry_as_stale():
     async def scenario() -> None:
@@ -386,21 +770,32 @@ def test_endpoint_worker_registry_marks_only_heartbeat_expiry_as_stale():
             assigned_endpoint_id="endpoint-1",
             hostname="host-1",
             pid=101,
-            runtime_metadata={"endpoint_id": "endpoint-1", "desired_revision_id": "rev-2", "warmed_revision_id": "rev-1"},
+            runtime_metadata={
+                "endpoint_id": "endpoint-1",
+                "desired_revision_id": "rev-2",
+                "warmed_revision_id": "rev-1",
+            },
             now=now,
         )
 
-        live_workers = await services.list_endpoint_worker_registrations(now=now + timedelta(minutes=4, seconds=59))
+        live_workers = await services.list_endpoint_worker_registrations(
+            now=now + timedelta(minutes=4, seconds=59)
+        )
         assert live_workers[0]["status"] == "preparing"
         assert live_workers[0]["is_live"] is True
         assert live_workers[0]["deploy_state"] == "warming"
         assert live_workers[0]["state_label"] == "Preparing"
 
-        stale_workers = await services.list_endpoint_worker_registrations(now=now + timedelta(minutes=5))
+        stale_workers = await services.list_endpoint_worker_registrations(
+            now=now + timedelta(minutes=5)
+        )
         assert stale_workers[0]["status"] == "stale"
         assert stale_workers[0]["is_live"] is False
         assert stale_workers[0]["deploy_state"] == "revision_mismatch"
-        assert stale_workers[0]["state_summary"] == "Heartbeat expired. Assigned endpoint expects revision rev-2; worker was last warmed on rev-1."
+        assert (
+            stale_workers[0]["state_summary"]
+            == "Heartbeat expired. Assigned endpoint expects revision rev-2; worker was last warmed on rev-1."
+        )
 
     asyncio.run(scenario())
 
@@ -420,11 +815,16 @@ def test_endpoint_worker_heartbeat_preserves_revision_metadata_when_later_payloa
                 "endpoint_id": "endpoint-1",
                 "desired_revision_id": "rev-1",
                 "warmed_revision_id": "rev-1",
-                "platform": {"python_executable": "/venv/bin/python", "argv": ["endpoint-worker.py"]},
+                "platform": {
+                    "python_executable": "/venv/bin/python",
+                    "argv": ["endpoint-worker.py"],
+                },
             },
             now=now,
         )
-        await services._set_endpoint_worker_assignment("endpoint-worker-1", "endpoint-1")
+        await services._set_endpoint_worker_assignment(
+            "endpoint-worker-1", "endpoint-1"
+        )
 
         heartbeat = await services.heartbeat_endpoint_worker(
             "endpoint-worker-1",
@@ -432,7 +832,9 @@ def test_endpoint_worker_heartbeat_preserves_revision_metadata_when_later_payloa
             status="listening",
             hostname="host-1",
             pid=101,
-            runtime_metadata={"platform": {"argv": ["endpoint-worker.py", "--heartbeat"]}},
+            runtime_metadata={
+                "platform": {"argv": ["endpoint-worker.py", "--heartbeat"]}
+            },
             now=now + timedelta(seconds=1),
         )
         payload = await services.list_endpoint_workers(now=now + timedelta(seconds=1))
@@ -440,8 +842,14 @@ def test_endpoint_worker_heartbeat_preserves_revision_metadata_when_later_payloa
         assert heartbeat is not None
         assert heartbeat["desired_revision_id"] == "rev-1"
         assert heartbeat["warmed_revision_id"] == "rev-1"
-        assert heartbeat["runtime_metadata"]["platform"]["python_executable"] == "/venv/bin/python"
-        assert heartbeat["runtime_metadata"]["platform"]["argv"] == ["endpoint-worker.py", "--heartbeat"]
+        assert (
+            heartbeat["runtime_metadata"]["platform"]["python_executable"]
+            == "/venv/bin/python"
+        )
+        assert heartbeat["runtime_metadata"]["platform"]["argv"] == [
+            "endpoint-worker.py",
+            "--heartbeat",
+        ]
         assert payload["ready_workers"] == 1
         assert payload["items"][0]["deploy_state"] == "ready"
         assert payload["items"][0]["desired_revision_id"] == "rev-1"
@@ -483,7 +891,8 @@ def test_endpoint_worker_heartbeat_sql_uses_contiguous_parameters_without_assign
         assert "task_id = $4" in update_query
         assert "updated_at = $5" in update_query
         assert "$10" in update_query
-        assert "$11" not in update_query
+        assert "task_id is not distinct from $11" in update_query
+        assert "$12" not in update_query
 
     asyncio.run(scenario())
 
@@ -503,7 +912,11 @@ class _ReadinessRedis:
 
 def test_readiness_awaits_redis_ping():
     async def scenario() -> None:
-        services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+        services = AppServices(
+            Settings(
+                postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"
+            )
+        )
         services.redis = _ReadinessRedis(ping_result=True)
 
         readiness = await services.readiness()
@@ -516,7 +929,11 @@ def test_readiness_awaits_redis_ping():
 
 def test_readiness_reports_redis_failure_when_ping_raises():
     async def scenario() -> None:
-        services = AppServices(Settings(postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"))
+        services = AppServices(
+            Settings(
+                postgres_dsn="postgresql://postgres:postgres@localhost:5432/dspy_trainer"
+            )
+        )
         services.redis = _ReadinessRedis(ping_error=RuntimeError("redis unavailable"))
 
         readiness = await services.readiness()
@@ -557,10 +974,16 @@ def test_list_endpoint_workers_uses_registry_backed_summaries():
             now=now,
         )
 
-        await services._set_endpoint_worker_assignment("endpoint-worker-1", "endpoint-1")
-        await services._set_endpoint_worker_assignment("endpoint-worker-2", "endpoint-1")
+        await services._set_endpoint_worker_assignment(
+            "endpoint-worker-1", "endpoint-1"
+        )
+        await services._set_endpoint_worker_assignment(
+            "endpoint-worker-2", "endpoint-1"
+        )
 
-        await services.mark_stale_endpoint_workers(now=now + timedelta(minutes=5, seconds=1))
+        await services.mark_stale_endpoint_workers(
+            now=now + timedelta(minutes=5, seconds=1)
+        )
         await services.heartbeat_endpoint_worker(
             "endpoint-worker-1",
             runtime_instance_id="runtime-1",
@@ -580,7 +1003,9 @@ def test_list_endpoint_workers_uses_registry_backed_summaries():
             now=now + timedelta(seconds=5),
         )
 
-        payload = await services.list_endpoint_workers(now=now + timedelta(minutes=5, seconds=1))
+        payload = await services.list_endpoint_workers(
+            now=now + timedelta(minutes=5, seconds=1)
+        )
 
         assert payload["total_workers"] == 3
         assert payload["reported_workers"] == 3
@@ -610,7 +1035,10 @@ def test_list_endpoint_workers_uses_registry_backed_summaries():
             "endpoint-worker-3",
         ]
         assert payload["items"][0]["deploy_state"] == "revision_metadata_missing"
-        assert payload["items"][0]["state_summary"] == "Listening for assigned endpoint traffic, but revision metadata has not been reported yet."
+        assert (
+            payload["items"][0]["state_summary"]
+            == "Listening for assigned endpoint traffic, but revision metadata has not been reported yet."
+        )
         assert payload["items"][-1]["status"] == "stale"
         assert payload["items"][-1]["assigned_endpoint_id"] is None
 
@@ -629,7 +1057,11 @@ def test_list_endpoint_workers_registry_summary_excludes_listening_revision_mism
             assigned_endpoint_id="endpoint-1",
             hostname="host-1",
             pid=101,
-            runtime_metadata={"endpoint_id": "endpoint-1", "desired_revision_id": "rev-2", "warmed_revision_id": "rev-1"},
+            runtime_metadata={
+                "endpoint_id": "endpoint-1",
+                "desired_revision_id": "rev-2",
+                "warmed_revision_id": "rev-1",
+            },
             now=now,
         )
         await services.register_endpoint_worker(
@@ -645,15 +1077,18 @@ def test_list_endpoint_workers_registry_summary_excludes_listening_revision_mism
 
         assert payload["total_workers"] == 2
         assert payload["reported_workers"] == 2
-        assert payload["available_workers"] == 1
-        assert payload["busy_workers"] == 1
-        assert payload["ready_workers"] == 1
-        assert payload["summary"]["ready_workers"] == 1
+        assert payload["available_workers"] == 0
+        assert payload["busy_workers"] == 2
+        assert payload["ready_workers"] == 0
+        assert payload["summary"]["ready_workers"] == 0
         assert payload["items"][0]["deploy_state"] == "revision_mismatch"
         assert payload["items"][0]["is_revision_ready"] is False
         assert payload["items"][1]["deploy_state"] == "unassigned"
 
     asyncio.run(scenario())
+
+
+
 
 
 def test_list_endpoint_workers_registry_marks_assigned_listening_workers_without_revision_metadata():
@@ -670,7 +1105,9 @@ def test_list_endpoint_workers_registry_marks_assigned_listening_workers_without
             runtime_metadata={"endpoint_id": "endpoint-1"},
             now=now,
         )
-        await services._set_endpoint_worker_assignment("endpoint-worker-1", "endpoint-1")
+        await services._set_endpoint_worker_assignment(
+            "endpoint-worker-1", "endpoint-1"
+        )
         await services.register_endpoint_worker(
             worker_id="endpoint-worker-2",
             runtime_instance_id="runtime-2",
@@ -682,11 +1119,14 @@ def test_list_endpoint_workers_registry_marks_assigned_listening_workers_without
 
         payload = await services.list_endpoint_workers(now=now)
 
-        assert payload["available_workers"] == 1
-        assert payload["busy_workers"] == 1
-        assert payload["ready_workers"] == 1
+        assert payload["available_workers"] == 0
+        assert payload["busy_workers"] == 2
+        assert payload["ready_workers"] == 0
         assert payload["items"][0]["deploy_state"] == "revision_metadata_missing"
-        assert payload["items"][0]["state_summary"] == "Listening for assigned endpoint traffic, but revision metadata has not been reported yet."
+        assert (
+            payload["items"][0]["state_summary"]
+            == "Listening for assigned endpoint traffic, but revision metadata has not been reported yet."
+        )
         assert payload["items"][0]["is_revision_ready"] is False
         assert payload["items"][1]["deploy_state"] == "unassigned"
 
@@ -705,11 +1145,19 @@ def test_list_endpoint_workers_registry_parses_string_runtime_metadata_for_ready
             assigned_endpoint_id="endpoint-1",
             hostname="host-1",
             pid=101,
-            runtime_metadata={"endpoint_id": "endpoint-1", "desired_revision_id": "rev-1", "warmed_revision_id": "rev-1"},
+            runtime_metadata={
+                "endpoint_id": "endpoint-1",
+                "desired_revision_id": "rev-1",
+                "warmed_revision_id": "rev-1",
+            },
             now=now,
         )
-        services.postgres_pool.conn.state["workers"]["endpoint-worker-1"]["runtime_metadata"] = json.dumps(
-            services.postgres_pool.conn.state["workers"]["endpoint-worker-1"]["runtime_metadata"]
+        services.postgres_pool.conn.state["workers"]["endpoint-worker-1"][
+            "runtime_metadata"
+        ] = json.dumps(
+            services.postgres_pool.conn.state["workers"]["endpoint-worker-1"][
+                "runtime_metadata"
+            ]
         )
 
         payload = await services.list_endpoint_workers(now=now)
@@ -729,16 +1177,26 @@ def test_reconcile_endpoint_worker_assignments_uses_registered_workers_without_s
         now = datetime(2099, 1, 1, tzinfo=timezone.utc)
 
         async def list_all_bundle_endpoints():
-            return [{"id": "endpoint-1", "pinned_worker_count": 1, "created_at": now.isoformat()}]
+            return [
+                {
+                    "id": "endpoint-1",
+                    "pinned_worker_count": 1,
+                    "created_at": now.isoformat(),
+                }
+            ]
 
         async def get_bundle_endpoint(endpoint_id: str):
             return {"id": endpoint_id, "module_import_id": "mod-1"}
+
+        async def get_endpoint_deployment(endpoint_id: str):
+            return {"endpoint_id": endpoint_id, "phase": "legacy_static"}
 
         async def resolve_module_execution_state(module_id: str):
             return {"module_id": module_id, "bundle_revision_id": "rev-1"}
 
         services.list_all_bundle_endpoints = list_all_bundle_endpoints  # type: ignore[method-assign]
         services.get_bundle_endpoint = get_bundle_endpoint  # type: ignore[method-assign]
+        services.get_endpoint_deployment = get_endpoint_deployment  # type: ignore[method-assign]
         services.resolve_module_execution_state = resolve_module_execution_state  # type: ignore[method-assign]
 
         registered_1 = await services.register_endpoint_worker(
@@ -774,16 +1232,26 @@ def test_reconcile_endpoint_worker_assignments_prioritizes_live_workers_over_new
         now = datetime(2099, 1, 1, tzinfo=timezone.utc)
 
         async def list_all_bundle_endpoints():
-            return [{"id": "endpoint-1", "pinned_worker_count": 1, "created_at": now.isoformat()}]
+            return [
+                {
+                    "id": "endpoint-1",
+                    "pinned_worker_count": 1,
+                    "created_at": now.isoformat(),
+                }
+            ]
 
         async def get_bundle_endpoint(endpoint_id: str):
             return {"id": endpoint_id, "module_import_id": "mod-1"}
+
+        async def get_endpoint_deployment(endpoint_id: str):
+            return {"endpoint_id": endpoint_id, "phase": "legacy_static"}
 
         async def resolve_module_execution_state(module_id: str):
             return {"module_id": module_id, "bundle_revision_id": "rev-1"}
 
         services.list_all_bundle_endpoints = list_all_bundle_endpoints  # type: ignore[method-assign]
         services.get_bundle_endpoint = get_bundle_endpoint  # type: ignore[method-assign]
+        services.get_endpoint_deployment = get_endpoint_deployment  # type: ignore[method-assign]
         services.resolve_module_execution_state = resolve_module_execution_state  # type: ignore[method-assign]
 
         live_worker = await services.register_endpoint_worker(
@@ -812,12 +1280,33 @@ def test_reconcile_endpoint_worker_assignments_prioritizes_live_workers_over_new
         reconcile_at = now + timedelta(seconds=17)
         await services.mark_stale_endpoint_workers(now=reconcile_at)
         await services.reconcile_endpoint_worker_assignments()
-        ordered_worker_ids = await services._registered_endpoint_worker_ids_for_assignment(now=reconcile_at)
+        ordered_worker_ids = (
+            await services._registered_endpoint_worker_ids_for_assignment(
+                now=reconcile_at
+            )
+        )
         workers = await services.list_endpoint_worker_registrations(now=reconcile_at)
 
-        assert ordered_worker_ids[:2] == [live_worker["worker_id"], stale_worker["worker_id"]]
-        assert next(item for item in workers if item["worker_id"] == live_worker["worker_id"])["assigned_endpoint_id"] == "endpoint-1"
-        assert next(item for item in workers if item["worker_id"] == stale_worker["worker_id"])["assigned_endpoint_id"] is None
+        assert ordered_worker_ids[:2] == [
+            live_worker["worker_id"],
+            stale_worker["worker_id"],
+        ]
+        assert (
+            next(
+                item
+                for item in workers
+                if item["worker_id"] == live_worker["worker_id"]
+            )["assigned_endpoint_id"]
+            == "endpoint-1"
+        )
+        assert (
+            next(
+                item
+                for item in workers
+                if item["worker_id"] == stale_worker["worker_id"]
+            )["assigned_endpoint_id"]
+            is None
+        )
 
     asyncio.run(scenario())
 
@@ -828,16 +1317,26 @@ def test_reconcile_endpoint_worker_assignments_preserves_ready_assigned_workers_
         now = datetime(2099, 1, 1, tzinfo=timezone.utc)
 
         async def list_all_bundle_endpoints():
-            return [{"id": "endpoint-1", "pinned_worker_count": 1, "created_at": now.isoformat()}]
+            return [
+                {
+                    "id": "endpoint-1",
+                    "pinned_worker_count": 1,
+                    "created_at": now.isoformat(),
+                }
+            ]
 
         async def get_bundle_endpoint(endpoint_id: str):
             return {"id": endpoint_id, "module_import_id": "mod-1"}
+
+        async def get_endpoint_deployment(endpoint_id: str):
+            return {"endpoint_id": endpoint_id, "phase": "legacy_static"}
 
         async def resolve_module_execution_state(module_id: str):
             return {"module_id": module_id, "bundle_revision_id": "rev-1"}
 
         services.list_all_bundle_endpoints = list_all_bundle_endpoints  # type: ignore[method-assign]
         services.get_bundle_endpoint = get_bundle_endpoint  # type: ignore[method-assign]
+        services.get_endpoint_deployment = get_endpoint_deployment  # type: ignore[method-assign]
         services.resolve_module_execution_state = resolve_module_execution_state  # type: ignore[method-assign]
 
         ready_worker = await services.register_endpoint_worker(
@@ -846,7 +1345,11 @@ def test_reconcile_endpoint_worker_assignments_preserves_ready_assigned_workers_
             assigned_endpoint_id="endpoint-1",
             hostname="host-1",
             pid=101,
-            runtime_metadata={"endpoint_id": "endpoint-1", "desired_revision_id": "rev-1", "warmed_revision_id": "rev-1"},
+            runtime_metadata={
+                "endpoint_id": "endpoint-1",
+                "desired_revision_id": "rev-1",
+                "warmed_revision_id": "rev-1",
+            },
             now=now,
         )
         idle_worker = await services.register_endpoint_worker(
@@ -858,10 +1361,26 @@ def test_reconcile_endpoint_worker_assignments_preserves_ready_assigned_workers_
         )
 
         await services.reconcile_endpoint_worker_assignments()
-        workers = await services.list_endpoint_worker_registrations(now=now + timedelta(seconds=1))
+        workers = await services.list_endpoint_worker_registrations(
+            now=now + timedelta(seconds=1)
+        )
 
-        assert next(item for item in workers if item["worker_id"] == ready_worker["worker_id"])["assigned_endpoint_id"] == "endpoint-1"
-        assert next(item for item in workers if item["worker_id"] == idle_worker["worker_id"])["assigned_endpoint_id"] is None
+        assert (
+            next(
+                item
+                for item in workers
+                if item["worker_id"] == ready_worker["worker_id"]
+            )["assigned_endpoint_id"]
+            == "endpoint-1"
+        )
+        assert (
+            next(
+                item
+                for item in workers
+                if item["worker_id"] == idle_worker["worker_id"]
+            )["assigned_endpoint_id"]
+            is None
+        )
 
     asyncio.run(scenario())
 
@@ -872,16 +1391,26 @@ def test_endpoint_ready_for_invocation_survives_reconcile_with_newer_idle_worker
         now = datetime(2099, 1, 1, tzinfo=timezone.utc)
 
         async def list_all_bundle_endpoints():
-            return [{"id": "endpoint-1", "pinned_worker_count": 1, "created_at": now.isoformat()}]
+            return [
+                {
+                    "id": "endpoint-1",
+                    "pinned_worker_count": 1,
+                    "created_at": now.isoformat(),
+                }
+            ]
 
         async def get_bundle_endpoint(endpoint_id: str):
             return {"id": endpoint_id, "module_import_id": "mod-1"}
+
+        async def get_endpoint_deployment(endpoint_id: str):
+            return {"endpoint_id": endpoint_id, "phase": "legacy_static"}
 
         async def resolve_module_execution_state(module_id: str):
             return {"module_id": module_id, "bundle_revision_id": "rev-1"}
 
         services.list_all_bundle_endpoints = list_all_bundle_endpoints  # type: ignore[method-assign]
         services.get_bundle_endpoint = get_bundle_endpoint  # type: ignore[method-assign]
+        services.get_endpoint_deployment = get_endpoint_deployment  # type: ignore[method-assign]
         services.resolve_module_execution_state = resolve_module_execution_state  # type: ignore[method-assign]
 
         await services.register_endpoint_worker(
@@ -890,7 +1419,11 @@ def test_endpoint_ready_for_invocation_survives_reconcile_with_newer_idle_worker
             assigned_endpoint_id="endpoint-1",
             hostname="host-1",
             pid=101,
-            runtime_metadata={"endpoint_id": "endpoint-1", "desired_revision_id": "rev-1", "warmed_revision_id": "rev-1"},
+            runtime_metadata={
+                "endpoint_id": "endpoint-1",
+                "desired_revision_id": "rev-1",
+                "warmed_revision_id": "rev-1",
+            },
             now=now,
         )
         await services.register_endpoint_worker(
@@ -901,13 +1434,25 @@ def test_endpoint_ready_for_invocation_survives_reconcile_with_newer_idle_worker
             now=now + timedelta(seconds=1),
         )
 
-        routing_state = await services.ensure_endpoint_ready_for_invocation("endpoint-1")
+        routing_state = await services.ensure_endpoint_ready_for_invocation(
+            "endpoint-1"
+        )
 
         assert routing_state == {
             "endpoint_id": "endpoint-1",
+            "deployment_phase": "legacy_static",
             "desired_revision_id": "rev-1",
             "assigned_workers": 1,
             "ready_workers": 1,
+            "ready_targets": [
+                {
+                    "execution_mode": "legacy_static",
+                    "build_id": None,
+                    "revision_id": "rev-1",
+                    "bundle_path": None,
+                    "queue_name": "dspy-trainer:endpoint-queues:endpoint-1",
+                }
+            ],
             "status_counts": {"listening": 1},
         }
 
@@ -920,16 +1465,26 @@ def test_registry_assignment_remains_control_plane_owned_across_worker_heartbeat
         now = datetime(2099, 1, 1, tzinfo=timezone.utc)
 
         async def list_all_bundle_endpoints():
-            return [{"id": "endpoint-1", "pinned_worker_count": 1, "created_at": now.isoformat()}]
+            return [
+                {
+                    "id": "endpoint-1",
+                    "pinned_worker_count": 1,
+                    "created_at": now.isoformat(),
+                }
+            ]
 
         async def get_bundle_endpoint(endpoint_id: str):
             return {"id": endpoint_id, "module_import_id": "mod-1"}
+
+        async def get_endpoint_deployment(endpoint_id: str):
+            return {"endpoint_id": endpoint_id, "phase": "legacy_static"}
 
         async def resolve_module_execution_state(module_id: str):
             return {"module_id": module_id, "bundle_revision_id": "rev-1"}
 
         services.list_all_bundle_endpoints = list_all_bundle_endpoints  # type: ignore[method-assign]
         services.get_bundle_endpoint = get_bundle_endpoint  # type: ignore[method-assign]
+        services.get_endpoint_deployment = get_endpoint_deployment  # type: ignore[method-assign]
         services.resolve_module_execution_state = resolve_module_execution_state  # type: ignore[method-assign]
 
         worker = await services.register_endpoint_worker(
@@ -944,17 +1499,26 @@ def test_registry_assignment_remains_control_plane_owned_across_worker_heartbeat
             runtime_instance_id="runtime-1",
             status="listening",
             assigned_endpoint_id="endpoint-2",
-            runtime_metadata={"endpoint_id": "endpoint-1", "desired_revision_id": "rev-1", "warmed_revision_id": "rev-1"},
+            runtime_metadata={
+                "endpoint_id": "endpoint-1",
+                "desired_revision_id": "rev-1",
+                "warmed_revision_id": "rev-1",
+            },
             now=now + timedelta(seconds=1),
         )
 
         assignment = await services.get_endpoint_worker_assignment(worker["worker_id"])
-        registration = await services._get_endpoint_worker_registration(worker["worker_id"], now=now + timedelta(seconds=1))
+        registration = await services._get_endpoint_worker_registration(
+            worker["worker_id"], now=now + timedelta(seconds=1)
+        )
 
         assert assignment == {
             "worker_id": worker["worker_id"],
             "endpoint_id": "endpoint-1",
-            "desired_revision_id": "rev-1",
+            "execution_mode": "legacy_static",
+            "build_id": None,
+            "revision_id": "rev-1",
+            "bundle_path": None,
             "is_live": True,
         }
         assert registration is not None

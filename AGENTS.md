@@ -9,8 +9,15 @@ This section MUST remain up to date after you complete a task.
 - `.env.sample`: Source of truth for required environment variables.
 - `docs/COMPOSE_RUNBOOK.md`: Current compose bootstrap, health checks, and day-2 operations.
 - `backend/app/config.py`: Validated runtime settings, including the deployment-wide bundle-install concurrency limit.
-- `backend/app/services.py`: Central runtime services and PostgreSQL advisory-lock admission for bundle dependency installs.
-- `backend/endpoint_worker.py`: Managed endpoint warmup, status transitions, and heartbeat lifecycle.
+- `backend/app/main.py`: FastAPI lifecycle and HTTP contracts, including revision-image status, bounded logs, retry, and rebuild-all operator APIs.
+- `backend/app/services.py`: Central runtime services, PostgreSQL schema/bootstrap, revision-image coordination/persistence, build-and-revision-pinned endpoint routing, and legacy bundle-install admission.
+- `backend/app/revision_images.py`: Reusable revision-image build, endpoint-deployment, and managed-container state transitions and payload builders.
+- `backend/app/revision_image_builder.py`: Deterministic revision snapshot context generation, Docker SDK adapter, provenance labels, and inspected local-image build results.
+- `backend/app/revision_image_coordinator.py`: PostgreSQL advisory leadership, durable claim/recovery/fencing, priority ordering, supersession, retry/rebuild, and coordinator shutdown logic.
+- `backend/app/endpoint_container_reconciler.py`: Advisory-led exact-image endpoint container rollout, rollback, drain, ownership, network discovery, and image-retention reconciliation.
+- `backend/deployer.py`: Dedicated long-running deployer process entrypoint.
+- `backend/Deployer.Dockerfile` and `backend/deployer-requirements.txt`: Deployer-only Docker SDK image boundary based on an immutable backend image ID.
+- `backend/endpoint_worker.py`: Explicit managed image identity, baked-source endpoint execution, assignment validation, and build/revision heartbeat lifecycle.
 - `docker-compose.yml`: Shared runtime configuration wiring for backend, worker, and endpoint-worker services.
 - `backend/sample_bundles/`: Downloadable reference bundles exposed in the UI.
 
