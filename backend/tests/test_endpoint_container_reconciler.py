@@ -612,20 +612,21 @@ def test_scaling_and_deletion_are_slot_deterministic_and_strictly_owned():
 
         store.intents = [replace(store.intents[0], desired_replica_count=2)]
         assert await reconciler.run_cycle() is True
-        assert await reconciler.run_cycle() is True
         assert slot_2 not in docker.containers
+        assert ("stop", slot_2.container_id) in docker.events
         assert slot_1 in docker.containers
         assert slot_0 in docker.containers
 
         store.intents = [replace(store.intents[0], desired_replica_count=1)]
         assert await reconciler.run_cycle() is True
-        assert await reconciler.run_cycle() is True
         assert slot_1 not in docker.containers
+        assert ("stop", slot_1.container_id) in docker.events
 
         store.intents = []
         assert await reconciler.run_cycle() is True
         assert await reconciler.run_cycle() is True
         assert slot_0 not in docker.containers
+        assert ("stop", slot_0.container_id) in docker.events
         assert foreign in docker.containers
 
     asyncio.run(scenario())

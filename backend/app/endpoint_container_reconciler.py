@@ -599,6 +599,9 @@ class EndpointContainerReconciler:
                 records,
                 now=now,
                 reason="container is outside current endpoint slot intent",
+                remove_inactive_immediately=(
+                    excess[0][1].slot >= intent.desired_replica_count
+                ),
             )
             return acted, False
 
@@ -613,17 +616,20 @@ class EndpointContainerReconciler:
         *,
         now: datetime,
         reason: str,
+        remove_inactive_immediately: bool = False,
     ) -> bool:
         record = records.get(container.container_id)
         if record is None:
             await self._store.observe_container(identity, container, now=now)
+        snapshot = registry.get(identity.worker_id)
         if record is None or record.lifecycle != "draining":
             await self._store.block_worker_claims(identity.worker_id)
             await self._store.mark_container_draining(container.container_id, now=now)
-            return True
-
-        snapshot = registry.get(identity.worker_id)
-        drain_started_at = record.drain_started_at or now
+            if not remove_inactive_immediately or (
+                snapshot is not None and snapshot.active
+            ):
+                return True
+        drain_started_at = (record.drain_started_at if record is not None else None) or now
         timed_out = (
             now - drain_started_at
         ).total_seconds() >= self._drain_timeout_seconds

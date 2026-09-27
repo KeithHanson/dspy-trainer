@@ -586,7 +586,7 @@ LM Profiles store the provider model, API base, model type, optional LM class ov
 
 Managed bundle endpoints do not execute inside the backend container. The backend authenticates, selects a ready build-pinned worker, enqueues, and relays responses. The deployer creates deterministic per-endpoint slots from immutable revision-image IDs on the actual Compose network; the static `endpoint-worker` service remains migration-only for deployments explicitly marked `legacy_static`.
 
-- Each endpoint's `pinned_worker_count` is the desired managed container count. Slots, names, and retirement order are deterministic.
+- Each endpoint's `pinned_worker_count` is the desired managed container count. Slots, names, and retirement order are deterministic. Reducing the count blocks new claims on the highest excess slots and stops and removes each inactive Docker container in that reconciliation cycle; a slot with an active invocation drains before removal.
 - Managed workers are created already bound to one endpoint slot; they are not pooled waiting for assignment. The `idle` state remains only for the migration-only `legacy_static` worker path.
 - Deleting an endpoint immediately fences and marks its registry workers stale, then the deployer stops and removes every owned managed container before finalizing deletion.
 - The Endpoints page hides stale and unassigned worker records by default; operators can reveal them with the inactive-workers control.
