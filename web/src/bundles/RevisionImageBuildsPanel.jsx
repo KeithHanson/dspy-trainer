@@ -5,7 +5,6 @@ import { ErrorState } from "../components/states/ErrorState";
 import { LoadingState } from "../components/states/LoadingState";
 
 const ACTIVE_BUILD_STATUSES = new Set(["queued", "building"]);
-const MAX_VISIBLE_BUILD_LOG_CHARS = 16_384;
 
 export function isActiveBuildStatus(status) {
   return ACTIVE_BUILD_STATUSES.has(String(status || "").toLowerCase());
@@ -14,8 +13,7 @@ export function isActiveBuildStatus(status) {
 export function sanitizeBuildOutput(value) {
   return String(value || "")
     .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, "$1[REDACTED]")
-    .replace(/((?:password|secret|token|api[_-]?key|authorization|credential)[A-Za-z0-9_.-]*\s*[:=]\s*)[^\r\n]*/gi, "$1[REDACTED]")
-    .slice(0, MAX_VISIBLE_BUILD_LOG_CHARS);
+    .replace(/((?:password|secret|token|api[_-]?key|authorization|credential)[A-Za-z0-9_.-]*\s*[:=]\s*)[^\r\n]*/gi, "$1[REDACTED]");
 }
 
 function formatDateTime(value) {

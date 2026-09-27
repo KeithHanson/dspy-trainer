@@ -783,6 +783,75 @@ describe("BundlesPage", () => {
     vi.unstubAllGlobals();
   }, 8_000);
 
+  it("loads every retained modal log page and follows the output tail", async () => {
+    const firstPage = `start\n${"x".repeat(65_530)}`;
+    const secondPage = "tail marker";
+    const totalBytes = firstPage.length + secondPage.length;
+    const currentBuild = {
+      id: "build-complete-log",
+      revision_id: "revision-complete-log",
+      generation: 3,
+      status: "ready",
+      queued_at: "2026-09-26T10:00:00Z",
+      finished_at: "2026-09-26T10:00:03Z",
+      updated_at: "2026-09-26T10:00:03Z",
+    };
+    const module = {
+      id: "mod-complete-log",
+      bundle_name: "complete-log-agent",
+      current_revision_id: "revision-complete-log",
+      validation_status: "passed",
+      status: "validated",
+      image_build: { eligible: true, status: "ready", current_build: currentBuild },
+    };
+    const scrollHeight = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(480);
+    const fetchMock = vi.fn((url, init) => {
+      const value = String(url);
+      if (value.includes("/agent-run-plans?")) {
+        return Promise.resolve({ ok: true, status: 200, json: vi.fn().mockResolvedValue([]) });
+      }
+      if (value.endsWith("/modules") && (!init || init.method === "GET")) {
+        return Promise.resolve({ ok: true, status: 200, json: vi.fn().mockResolvedValue([module]) });
+      }
+      if (value.endsWith("/revision-image-builds/build-complete-log")) {
+        return Promise.resolve({ ok: true, status: 200, json: vi.fn().mockResolvedValue(currentBuild) });
+      }
+      if (value.includes("/revision-image-builds/build-complete-log/logs?offset=0&limit=65536")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: vi.fn().mockResolvedValue({ text: firstPage, total_bytes: totalBytes, next_offset: 65_536 }),
+        });
+      }
+      if (value.includes("/revision-image-builds/build-complete-log/logs?offset=65536&limit=65536")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: vi.fn().mockResolvedValue({ text: secondPage, total_bytes: totalBytes, next_offset: null }),
+        });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderBundlesApp();
+
+    await userEvent.click(await screen.findByRole("button", { name: "View build" }));
+    const output = await screen.findByLabelText("Build output for build-complete-log");
+    expect(output).toHaveTextContent("start");
+    expect(output).toHaveTextContent("tail marker");
+    expect(output.textContent).toHaveLength(totalBytes);
+    expect(screen.getByText(`Showing all retained output (${totalBytes} bytes).`)).toBeInTheDocument();
+    expect(screen.queryByText(/additional output is intentionally hidden/)).not.toBeInTheDocument();
+    await waitFor(() => expect(output.scrollTop).toBe(480));
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/logs?offset=65536&limit=65536"),
+      expect.objectContaining({ method: "GET" }),
+    );
+
+    scrollHeight.mockRestore();
+    vi.unstubAllGlobals();
+  });
+
   it("keeps the module row live when the modal closes before enqueue resolves", async () => {
     const postBuild = deferredResponse();
     let moduleRequests = 0;

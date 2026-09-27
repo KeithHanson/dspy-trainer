@@ -361,6 +361,7 @@ function SavedBundlesPanel({ modulesUrl }) {
   const [syncNotice, setSyncNotice] = useState(null);
   const [buildModal, setBuildModal] = useState(null);
   const buildRequestGeneration = useRef(0);
+  const buildLogRef = useRef(null);
 
   const loadBundles = async () => {
     setIsLoadingBundles(true);
@@ -474,32 +475,23 @@ function SavedBundlesPanel({ modulesUrl }) {
     let timer = null;
     const poll = async () => {
       try {
-        const [statusResponse, logResponse] = await Promise.all([
+        const [statusResponse, logResult] = await Promise.all([
           fetch(buildApiUrl(`/revision-image-builds/${encodeURIComponent(buildId)}`), {
             method: "GET",
             signal: controller.signal,
           }),
-          fetch(buildApiUrl(`/revision-image-builds/${encodeURIComponent(buildId)}/logs?offset=0&limit=16384`), {
-            method: "GET",
-            signal: controller.signal,
-          }),
+          readCompleteBuildLog(buildId, controller.signal)
+            .then((log) => ({ log, logError: "" }))
+            .catch((error) => ({
+              log: null,
+              logError: error instanceof Error ? error.message : "Could not load build output",
+            })),
         ]);
         if (!statusResponse.ok) {
           throw new Error(await parseError(statusResponse, `Could not refresh image build (${statusResponse.status})`));
         }
         const status = await statusResponse.json();
-        let log = null;
-        let logError = "";
-        if (logResponse.ok) {
-          const payload = await logResponse.json();
-          log = {
-            text: sanitizeBuildOutput(payload?.text),
-            totalBytes: Number(payload?.total_bytes || 0),
-            truncated: payload?.next_offset !== null && payload?.next_offset !== undefined,
-          };
-        } else {
-          logError = await parseError(logResponse, `Could not load build output (${logResponse.status})`);
-        }
+        const { log, logError } = logResult;
         if (controller.signal.aborted || buildRequestGeneration.current !== requestGeneration) return;
         updateBundleBuild(moduleId, status);
         setBuildModal((current) => current?.build?.id === buildId ? {
@@ -525,6 +517,12 @@ function SavedBundlesPanel({ modulesUrl }) {
       if (timer !== null) window.clearTimeout(timer);
     };
   }, [buildModal?.build?.id]);
+
+  useEffect(() => {
+    const logElement = buildLogRef.current;
+    if (!logElement) return;
+    logElement.scrollTop = logElement.scrollHeight;
+  }, [buildModal?.build?.id, buildModal?.log?.text]);
 
   const hasActiveListingBuild = savedBundles.some((bundle) => (
     isActiveBuildStatus(bundle?.image_build?.current_build?.status)
@@ -674,10 +672,10 @@ function SavedBundlesPanel({ modulesUrl }) {
                   {buildModal.logError ? <ErrorState title="Build output unavailable" description={buildModal.logError} /> : null}
                   {buildModal.log ? (
                     <>
-                      <p className="cap">Showing bounded output ({buildModal.log.totalBytes} retained bytes){buildModal.log.truncated ? "; additional output is intentionally hidden." : "."}</p>
-                      <pre className="image-build-log" aria-label={`Build output for ${buildModal.build.id}`}>{buildModal.log.text || "No build output recorded."}</pre>
+                      <p className="cap">Showing all retained output ({buildModal.log.totalBytes} bytes).</p>
+                      <pre ref={buildLogRef} className="image-build-log" aria-label={`Build output for ${buildModal.build.id}`}>{buildModal.log.text || "No build output recorded."}</pre>
                     </>
-                  ) : <p className="cap">Loading bounded build output...</p>}
+                  ) : <p className="cap">Loading retained build output...</p>}
                 </div>
               </>
             ) : null}
@@ -1163,6 +1161,36 @@ async function parseError(response, fallback) {
     return fallback;
   }
   return fallback;
+}
+
+async function readCompleteBuildLog(buildId, signal) {
+  let offset = 0;
+  let text = "";
+  let totalBytes = 0;
+
+  while (true) {
+    const response = await fetch(buildApiUrl(`/revision-image-builds/${encodeURIComponent(buildId)}/logs?offset=${offset}&limit=65536`), {
+      method: "GET",
+      signal,
+    });
+    if (!response.ok) {
+      throw new Error(await parseError(response, `Could not load build output (${response.status})`));
+    }
+    const payload = await response.json();
+    text += String(payload?.text || "");
+    const payloadTotalBytes = Number(payload?.total_bytes);
+    if (Number.isFinite(payloadTotalBytes)) totalBytes = payloadTotalBytes;
+
+    const nextOffset = payload?.next_offset;
+    if (nextOffset === null || nextOffset === undefined) break;
+    const normalizedNextOffset = Number(nextOffset);
+    if (!Number.isFinite(normalizedNextOffset) || normalizedNextOffset <= offset) {
+      throw new Error("Build output pagination returned an invalid offset");
+    }
+    offset = normalizedNextOffset;
+  }
+
+  return { text: sanitizeBuildOutput(text), totalBytes };
 }
 
 function GitHubImportPanel({ modulesUrl, onBack, onCreatePlan }) {
