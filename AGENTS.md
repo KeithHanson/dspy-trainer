@@ -6,6 +6,8 @@ This section MUST remain up to date after you complete a task.
 
 - `AGENTS.md`: Operator and agent workflow rules for this repository.
 - `README.md`: Project overview and high-level goals.
+- `LICENSE`: Canonical GNU Affero General Public License version 3 text governing the repository.
+- `web/package.json` and `web/package-lock.json`: Frontend npm package metadata, including the project license declaration.
 - `.env.sample`: Source of truth for required environment variables.
 - `docs/COMPOSE_RUNBOOK.md`: Current compose bootstrap, health checks, and day-2 operations.
 - `backend/app/config.py`: Validated runtime settings, including the deployment-wide bundle-install concurrency limit.
