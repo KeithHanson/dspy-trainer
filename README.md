@@ -781,7 +781,7 @@ See [`AGENTS.md`](AGENTS.md) for detailed contribution guidelines.
 
 ## License
 
-[Add your license here]
+This project is licensed under the [GNU Affero General Public License v3.0 only](LICENSE) (`AGPL-3.0-only`).
 
 ---
 
