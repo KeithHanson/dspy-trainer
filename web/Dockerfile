@@ -1,4 +1,4 @@
-FROM node:20-alpine AS build
+FROM node:22-alpine AS build
 
 ARG VITE_API_BASE_URL=/api
 ARG VITE_MLFLOW_BASE_URL=/mlflow
@@ -7,8 +7,8 @@ ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
 ENV VITE_MLFLOW_BASE_URL=${VITE_MLFLOW_BASE_URL}
 
 WORKDIR /app
-COPY web/package.json ./package.json
-RUN npm install
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
 COPY web/index.html ./index.html
 COPY web/vite.config.js ./vite.config.js
 COPY web/vitest.setup.js ./vitest.setup.js

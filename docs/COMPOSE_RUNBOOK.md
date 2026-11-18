@@ -111,6 +111,17 @@ Follow key services:
 docker compose logs -f --timestamps backend worker deployer
 ```
 
+### Web-only deployment
+
+The frontend builder uses Node 22 and installs the committed lockfile with `npm ci`.
+For frontend-only changes, retain the running web image under a rollback tag before
+building the replacement. Recreate only `web` with
+`docker compose up -d --no-deps --no-build --force-recreate web`; do not restart
+the backend, deployers, workers, or persistent services. Verify web container
+health, browser rendering and asset loads, `/api/ready`, and `/mlflow/` through
+Caddy. If verification fails, restore the retained image under the Compose web
+image tag and repeat the web-only recreate command.
+
 ### Rebuild
 
 Rebuilds deliberately stop the deployer before changing the named backend image. Confirm the build-status API has no queued or building generation, then accept the newly inspected ID explicitly:
